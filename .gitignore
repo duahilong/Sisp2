@@ -1,0 +1,44 @@
+# Python compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.env
+venv/
+env/
+ENV/
+.env/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Large files and directories
+img/
+sw/
+*.iso
+*.gho
+*.ghs
+*.wim
+
+# Configuration files with secrets
+secrets.json
+config.local.json

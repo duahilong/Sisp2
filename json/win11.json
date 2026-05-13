@@ -1,0 +1,15 @@
+{
+    "description" : "Windows 11 配置",
+    "win_gho" : "D:\\sisp2\\img\\111.GHO",
+    "efi_size" : 100,
+    "c_size" : 1536,
+    "software_file" : "D:\\常用软件",
+    "gho_exe" : "D:\\sisp2\\sw\\ghost64.exe",
+    "bcd_exe" : "D:\\sisp2\\sw\\bcdboot.exe",
+    "excluded_disk_names": [
+        "Samsung SSD 980 PRO 1TB",
+        "Cubex CP2000 256GB",
+        "GXF-512 PRO",
+        "WDC WD7500BPVX-75JC3T0"
+    ]
+}
