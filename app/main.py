@@ -7,7 +7,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.modules.config_loader.service import load_config
 from app.modules.disk_info.service import scan_disk_summaries
 from app.modules.user_interaction.service import print_disk_summaries, prompt_disk_selection
 from app.preflight import print_preflight_report, run_preflight_checks
@@ -37,7 +36,10 @@ def run_minimal_main_flow(input_func=input, preflight_runner: PreflightRunner | 
     if not preflight_report.get("all_passed"):
         raise RuntimeError("运行前检查失败")
 
-    config_payload = load_config()
+    config_payload = preflight_report.get("config_payload")
+    if not isinstance(config_payload, dict):
+        raise RuntimeError("运行前检查未返回可用的配置数据")
+
     disk_summaries = scan_disk_summaries()
     if not disk_summaries:
         raise RuntimeError("模块1未返回任何硬盘摘要信息")

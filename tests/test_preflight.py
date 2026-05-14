@@ -54,13 +54,17 @@ def test_check_config_file_exists() -> None:
 
 
 def test_check_config_file_parseable() -> None:
-    passed = check_config_file_parseable(config_loader=lambda path: {"config_path": str(path)})
-    if not passed.get("passed"):
-        raise AssertionError(f"配置文件可解析性检查应通过，实际为: {passed}")
+    result, config_payload = check_config_file_parseable(config_loader=lambda path: {"config_path": str(path), "config": {}})
+    if not result.get("passed"):
+        raise AssertionError(f"配置文件可解析性检查应通过，实际为: {result}")
+    if not isinstance(config_payload, dict):
+        raise AssertionError("配置文件可解析性检查通过时应返回配置数据")
 
-    failed = check_config_file_parseable(config_loader=lambda path: (_ for _ in ()).throw(ValueError("bad config")))
-    if failed.get("passed"):
-        raise AssertionError(f"配置文件可解析性检查应失败，实际为: {failed}")
+    failed_result, failed_payload = check_config_file_parseable(config_loader=lambda path: (_ for _ in ()).throw(ValueError("bad config")))
+    if failed_result.get("passed"):
+        raise AssertionError(f"配置文件可解析性检查应失败，实际为: {failed_result}")
+    if failed_payload is not None:
+        raise AssertionError("配置文件可解析性检查失败时不应返回配置数据")
 
 
 
@@ -68,15 +72,17 @@ def test_run_preflight_checks() -> None:
     report = run_preflight_checks(
         admin_checker=lambda: True,
         powershell_probe=lambda: CompletedProcess(args=["powershell"], returncode=0, stdout="preflight-ok\n", stderr=""),
-        config_loader=lambda path: {"config_path": str(path)},
+        config_loader=lambda path: {"config_path": str(path), "config": {}},
     )
     if not report.get("all_passed"):
         raise AssertionError(f"运行前检查应全部通过，实际为: {report}")
+    if not isinstance(report.get("config_payload"), dict):
+        raise AssertionError("运行前检查全部通过时应返回配置数据")
 
     failed_report = run_preflight_checks(
         admin_checker=lambda: False,
         powershell_probe=lambda: CompletedProcess(args=["powershell"], returncode=0, stdout="preflight-ok\n", stderr=""),
-        config_loader=lambda path: {"config_path": str(path)},
+        config_loader=lambda path: {"config_path": str(path), "config": {}},
     )
     if failed_report.get("all_passed"):
         raise AssertionError(f"运行前检查应存在失败项，实际为: {failed_report}")
@@ -84,23 +90,42 @@ def test_run_preflight_checks() -> None:
 
 
 def test_print_preflight_report() -> None:
-    report = {
+    passed_report = {
+        "all_passed": True,
+        "results": [
+            {"name": "管理员权限检查", "passed": True, "message": "当前程序已以管理员权限运行"},
+        ],
+        "config_payload": {"config_path": "demo"},
+    }
+
+    passed_captured = io.StringIO()
+    with redirect_stdout(passed_captured):
+        print_preflight_report(passed_report)
+
+    if passed_captured.getvalue():
+        raise AssertionError("运行前检查全部通过时不应输出任何信息")
+
+    failed_report = {
         "all_passed": False,
         "results": [
             {"name": "管理员权限检查", "passed": True, "message": "当前程序已以管理员权限运行"},
             {"name": "PowerShell 可用性检查", "passed": False, "message": "PowerShell 不可用: error"},
         ],
+        "config_payload": None,
     }
 
-    captured = io.StringIO()
-    with redirect_stdout(captured):
-        print_preflight_report(report)
+    failed_captured = io.StringIO()
+    with redirect_stdout(failed_captured):
+        print_preflight_report(failed_report)
 
-    output = captured.getvalue()
-    assert_contains(output, "运行前检查结果:")
-    assert_contains(output, "[通过] 管理员权限检查")
-    assert_contains(output, "[失败] PowerShell 可用性检查")
-    assert_contains(output, "运行前检查结论：存在失败项")
+    output = failed_captured.getvalue()
+    assert_contains(output, "PowerShell 可用性检查：PowerShell 不可用: error")
+    if "管理员权限检查" in output:
+        raise AssertionError("运行前检查失败时不应输出通过项")
+    if "运行前检查结果:" in output:
+        raise AssertionError("运行前检查失败时不应输出统一标题")
+    if "运行前检查结论" in output:
+        raise AssertionError("运行前检查失败时不应输出统一结论")
 
 
 

@@ -8,6 +8,7 @@ from app.modules.config_loader.service import DEFAULT_CONFIG_PATH, load_config
 
 CheckResult = dict[str, Any]
 CheckRunner = Callable[..., CheckResult]
+ConfigLoader = Callable[[str | Path | None], dict[str, Any]]
 
 
 
@@ -76,17 +77,17 @@ def check_config_file_exists(config_path: str | Path | None = None) -> CheckResu
 
 def check_config_file_parseable(
     config_path: str | Path | None = None,
-    config_loader: Callable[[str | Path | None], dict[str, Any]] | None = None,
-) -> CheckResult:
+    config_loader: ConfigLoader | None = None,
+) -> tuple[CheckResult, dict[str, Any] | None]:
     loader = config_loader or load_config
 
     try:
-        loader(config_path)
+        config_payload = loader(config_path)
     except Exception as exc:
-        return build_check_result("配置文件可解析性检查", False, f"配置文件解析失败: {exc}")
+        return build_check_result("配置文件可解析性检查", False, f"配置文件可解析性检查失败: {exc}"), None
 
     path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
-    return build_check_result("配置文件可解析性检查", True, f"配置文件可正常解析: {path}")
+    return build_check_result("配置文件可解析性检查", True, f"配置文件可正常解析: {path}"), config_payload
 
 
 
@@ -94,26 +95,30 @@ def run_preflight_checks(
     config_path: str | Path | None = None,
     admin_checker: Callable[[], bool] | None = None,
     powershell_probe: Callable[[], subprocess.CompletedProcess[str]] | None = None,
-    config_loader: Callable[[str | Path | None], dict[str, Any]] | None = None,
+    config_loader: ConfigLoader | None = None,
 ) -> dict[str, Any]:
     results = [
         check_admin_privileges(admin_checker),
         check_powershell_available(powershell_probe),
         check_config_file_exists(config_path),
-        check_config_file_parseable(config_path, config_loader),
     ]
+    config_check_result, config_payload = check_config_file_parseable(config_path, config_loader)
+    results.append(config_check_result)
     return {
         "all_passed": all(result["passed"] for result in results),
         "results": results,
+        "config_payload": config_payload,
     }
 
 
 
 def print_preflight_report(report: dict[str, Any]) -> None:
-    print("运行前检查结果:")
-    for result in report.get("results", []):
-        status_text = "通过" if result.get("passed") else "失败"
-        print(f"[{status_text}] {result.get('name')}：{result.get('message')}")
+    if report.get("all_passed"):
+        return
 
-    summary_text = "全部通过" if report.get("all_passed") else "存在失败项"
-    print(f"运行前检查结论：{summary_text}")
+    failed_results = [result for result in report.get("results", []) if not result.get("passed")]
+    if not failed_results:
+        return
+
+    for result in failed_results:
+        print(f"{result.get('name')}：{result.get('message')}")
