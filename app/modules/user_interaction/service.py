@@ -7,7 +7,7 @@ from app.modules.disk_info.service import scan_disk_summaries
 
 
 InputFunc = Callable[[str], str]
-TABLE_HEADERS = ["编号", "硬盘型号", "容量", "盘符", "分区表格式"]
+TABLE_HEADERS = ["编号", "硬盘型号", "容量", "连接方式", "盘符", "分区表格式"]
 COLUMN_SEPARATOR = "  "
 EXIT_SELECTION = "q"
 SELECT_ALL_SELECTION = "a"
@@ -23,6 +23,7 @@ def build_table_rows(disks: list[dict]) -> list[list[str]]:
                 str(disk.get("disk_number")),
                 str(disk.get("model") or "未知"),
                 str(disk.get("size_display") or "未知"),
+                str(disk.get("bus_type") or "未知"),
                 drive_letters,
                 str(disk.get("partition_style") or "未知"),
             ]

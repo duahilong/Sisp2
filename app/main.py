@@ -1,3 +1,4 @@
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -12,7 +13,14 @@ from app.modules.user_interaction.service import print_disk_summaries, prompt_di
 from app.preflight import print_preflight_report, run_preflight_checks
 
 
-PreflightRunner = Callable[[], dict[str, Any]]
+PreflightRunner = Callable[[str | Path | None], dict[str, Any]]
+
+
+
+def parse_command_line_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-j", dest="config_path", help="JSON 配置文件路径")
+    return parser.parse_args(argv)
 
 
 
@@ -29,9 +37,13 @@ def build_workflow_snapshot(config_payload: dict, disk_summaries: list[dict], se
 
 
 
-def run_minimal_main_flow(input_func=input, preflight_runner: PreflightRunner | None = None) -> dict:
+def run_minimal_main_flow(
+    input_func=input,
+    preflight_runner: PreflightRunner | None = None,
+    config_path: str | Path | None = None,
+) -> dict:
     runner = preflight_runner or run_preflight_checks
-    preflight_report = runner()
+    preflight_report = runner(config_path)
     print_preflight_report(preflight_report)
     if not preflight_report.get("all_passed"):
         raise RuntimeError("运行前检查失败")
@@ -62,9 +74,10 @@ def run_minimal_main_flow(input_func=input, preflight_runner: PreflightRunner | 
 
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     try:
-        snapshot = run_minimal_main_flow()
+        args = parse_command_line_args(argv)
+        snapshot = run_minimal_main_flow(config_path=args.config_path)
         if snapshot.get("selected_disk_numbers"):
             print(f"\n演示运行完成，已选择硬盘编号 {snapshot['selected_disk_numbers']}")
         else:

@@ -7,12 +7,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.main import run_minimal_main_flow
+import app.main as main_module
+from app.main import parse_command_line_args, run_minimal_main_flow
 from app.modules.disk_info.service import scan_disk_summaries
 
 
 
-def build_successful_preflight_report() -> dict:
+def build_successful_preflight_report(config_path: str | Path | None = None) -> dict:
+    resolved_path = str(config_path) if config_path else "D:\\Code-Project\\Sisp2\\json\\win11.json"
     return {
         "all_passed": True,
         "results": [
@@ -22,7 +24,7 @@ def build_successful_preflight_report() -> dict:
             {"name": "配置文件可解析性检查", "passed": True, "message": "配置文件可正常解析"},
         ],
         "config_payload": {
-            "config_path": "D:\\Code-Project\\Sisp2\\json\\win11.json",
+            "config_path": resolved_path,
             "partition_info": {"efi_size_mb": 100, "c_size_gb": 1536},
             "image_info": {"image_path": "D:\\sisp2\\img\\111.GHO"},
             "software_paths": {"ghost64_path": "D:\\sisp2\\sw\\ghost64.exe", "bcdboot_path": "D:\\sisp2\\sw\\bcdboot.exe"},
@@ -32,7 +34,7 @@ def build_successful_preflight_report() -> dict:
 
 
 
-def build_failed_preflight_report() -> dict:
+def build_failed_preflight_report(config_path: str | Path | None = None) -> dict:
     return {
         "all_passed": False,
         "results": [
@@ -74,6 +76,17 @@ def validate_snapshot(snapshot: dict) -> None:
 
 
 
+def test_parse_command_line_args() -> None:
+    args = parse_command_line_args(["-j", "D:\\temp\\demo.json"])
+    if args.config_path != "D:\\temp\\demo.json":
+        raise AssertionError(f"-j 参数解析结果不正确: {args.config_path}")
+
+    default_args = parse_command_line_args([])
+    if default_args.config_path is not None:
+        raise AssertionError("未传入 -j 参数时，config_path 应为 None")
+
+
+
 def test_successful_main_flow() -> None:
     disk_summaries = scan_disk_summaries()
     if not disk_summaries:
@@ -102,6 +115,55 @@ def test_successful_main_flow() -> None:
     validate_snapshot(snapshot)
     print(output)
     print(f"最小主流程成功路径测试结果: 通过，已选择硬盘编号 {snapshot['selected_disk_numbers']}")
+
+
+
+def test_successful_main_flow_with_custom_json_path() -> None:
+    custom_path = "D:\\custom\\demo.json"
+    captured = io.StringIO()
+    with redirect_stdout(captured):
+        snapshot = run_minimal_main_flow(
+            input_func=lambda prompt: "a",
+            preflight_runner=build_successful_preflight_report,
+            config_path=custom_path,
+        )
+
+    output = captured.getvalue()
+    if f"配置文件: {custom_path}" not in output:
+        raise AssertionError("主流程未使用 -j 传入的自定义 JSON 路径")
+    if snapshot.get("config_path") != custom_path:
+        raise AssertionError("主流程快照中的 config_path 未使用自定义 JSON 路径")
+
+
+
+def test_main_uses_json_argument() -> None:
+    received_config_paths: list[str | Path | None] = []
+    original_runner = main_module.run_minimal_main_flow
+
+    def fake_run_minimal_main_flow(input_func=input, preflight_runner=None, config_path: str | Path | None = None) -> dict:
+        received_config_paths.append(config_path)
+        return {
+            "config_path": str(config_path),
+            "partition_info": {},
+            "image_info": {},
+            "software_paths": {},
+            "copy_info": {},
+            "disk_count": 1,
+            "selected_disk_numbers": [1],
+        }
+
+    main_module.run_minimal_main_flow = fake_run_minimal_main_flow
+    try:
+        captured = io.StringIO()
+        with redirect_stdout(captured):
+            exit_code = main_module.main(["-j", "D:\\json\\custom.json"])
+    finally:
+        main_module.run_minimal_main_flow = original_runner
+
+    if exit_code != 0:
+        raise AssertionError(f"main 使用 -j 参数时应返回 0，实际为: {exit_code}")
+    if received_config_paths != ["D:\\json\\custom.json"]:
+        raise AssertionError(f"main 未将 -j 参数传递给主流程: {received_config_paths}")
 
 
 
@@ -134,7 +196,10 @@ def test_failed_preflight_main_flow() -> None:
 
 def main() -> int:
     try:
+        test_parse_command_line_args()
         test_successful_main_flow()
+        test_successful_main_flow_with_custom_json_path()
+        test_main_uses_json_argument()
         test_failed_preflight_main_flow()
         return 0
     except Exception as exc:
