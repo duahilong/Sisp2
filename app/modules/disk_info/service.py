@@ -1,4 +1,5 @@
 import json
+import math
 import subprocess
 from typing import Any
 
@@ -74,12 +75,23 @@ foreach ($disk in $disks) {
 $result | ConvertTo-Json -Depth 6
 """.strip()
 
+INVALID_SIZE_DISPLAY = "大小异常"
+UNKNOWN_SIZE_DISPLAY = "未知"
+
 
 def format_size(size_bytes: Any) -> str:
+    if size_bytes is None:
+        return UNKNOWN_SIZE_DISPLAY
+    if isinstance(size_bytes, bool):
+        return INVALID_SIZE_DISPLAY
     if not isinstance(size_bytes, (int, float)):
-        return "未知"
-    units = ["B", "KB", "MB", "GB", "TB"]
+        return INVALID_SIZE_DISPLAY
+
     value = float(size_bytes)
+    if math.isnan(value) or math.isinf(value) or value < 0:
+        return INVALID_SIZE_DISPLAY
+
+    units = ["B", "KB", "MB", "GB", "TB"]
     for unit in units:
         if value < 1024 or unit == units[-1]:
             return f"{value:.2f} {unit}"
