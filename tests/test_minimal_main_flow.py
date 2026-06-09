@@ -45,28 +45,7 @@ def build_failed_preflight_report(config_path: str | Path | None = None) -> dict
 
 
 
-def validate_snapshot(snapshot: dict) -> None:
-    required_keys = [
-        "config_path",
-        "partition_info",
-        "image_info",
-        "software_paths",
-        "copy_info",
-        "disk_count",
-        "selected_disk_numbers",
-    ]
-
-    missing_keys = [key for key in required_keys if key not in snapshot]
-    if missing_keys:
-        raise AssertionError(f"主流程快照缺少字段: {'、'.join(missing_keys)}")
-
-    if not snapshot.get("config_path"):
-        raise AssertionError("config_path 不能为空")
-
-    if not isinstance(snapshot.get("disk_count"), int) or snapshot.get("disk_count") <= 0:
-        raise AssertionError("disk_count 必须为大于 0 的整数")
-
-    selected_disk_numbers = snapshot.get("selected_disk_numbers")
+def validate_selected_disk_numbers(selected_disk_numbers: list[int]) -> None:
     if not isinstance(selected_disk_numbers, list) or not selected_disk_numbers:
         raise AssertionError("selected_disk_numbers 必须为非空列表")
 
@@ -101,7 +80,7 @@ def test_successful_main_flow() -> None:
 
     captured = io.StringIO()
     with redirect_stdout(captured):
-        snapshot = run_minimal_main_flow(
+        selected_disk_numbers = run_minimal_main_flow(
             input_func=lambda prompt: str(target_number),
             preflight_runner=build_successful_preflight_report,
         )
@@ -111,10 +90,17 @@ def test_successful_main_flow() -> None:
         raise AssertionError("运行前检查全部通过时不应输出检查通过信息")
     if "Sisp 当前演示入口" not in output:
         raise AssertionError("主流程成功时未继续进入正式演示入口")
+    if "当前主程序持有的关键数据:" in output:
+        raise AssertionError("用户完成硬盘选择后不应继续输出演示性关键数据")
+    if "演示运行完成" in output or "演示运行结束" in output:
+        raise AssertionError("用户完成硬盘选择后不应继续输出演示性收尾信息")
 
-    validate_snapshot(snapshot)
+    validate_selected_disk_numbers(selected_disk_numbers)
+    if selected_disk_numbers != [target_number]:
+        raise AssertionError(f"主流程选择结果不正确: {selected_disk_numbers}，期望: {[target_number]}")
+
     print(output)
-    print(f"最小主流程成功路径测试结果: 通过，已选择硬盘编号 {snapshot['selected_disk_numbers']}")
+    print(f"最小主流程成功路径测试结果: 通过，已选择硬盘编号 {selected_disk_numbers}")
 
 
 
@@ -122,7 +108,7 @@ def test_successful_main_flow_with_custom_json_path() -> None:
     custom_path = "D:\\custom\\demo.json"
     captured = io.StringIO()
     with redirect_stdout(captured):
-        snapshot = run_minimal_main_flow(
+        selected_disk_numbers = run_minimal_main_flow(
             input_func=lambda prompt: "a",
             preflight_runner=build_successful_preflight_report,
             config_path=custom_path,
@@ -131,8 +117,7 @@ def test_successful_main_flow_with_custom_json_path() -> None:
     output = captured.getvalue()
     if f"配置文件: {custom_path}" not in output:
         raise AssertionError("主流程未使用 -j 传入的自定义 JSON 路径")
-    if snapshot.get("config_path") != custom_path:
-        raise AssertionError("主流程快照中的 config_path 未使用自定义 JSON 路径")
+    validate_selected_disk_numbers(selected_disk_numbers)
 
 
 
@@ -140,17 +125,9 @@ def test_main_uses_json_argument() -> None:
     received_config_paths: list[str | Path | None] = []
     original_runner = main_module.run_minimal_main_flow
 
-    def fake_run_minimal_main_flow(input_func=input, preflight_runner=None, config_path: str | Path | None = None) -> dict:
+    def fake_run_minimal_main_flow(input_func=input, preflight_runner=None, config_path: str | Path | None = None) -> list[int]:
         received_config_paths.append(config_path)
-        return {
-            "config_path": str(config_path),
-            "partition_info": {},
-            "image_info": {},
-            "software_paths": {},
-            "copy_info": {},
-            "disk_count": 1,
-            "selected_disk_numbers": [1],
-        }
+        return [1]
 
     main_module.run_minimal_main_flow = fake_run_minimal_main_flow
     try:
@@ -160,10 +137,13 @@ def test_main_uses_json_argument() -> None:
     finally:
         main_module.run_minimal_main_flow = original_runner
 
+    output = captured.getvalue()
     if exit_code != 0:
         raise AssertionError(f"main 使用 -j 参数时应返回 0，实际为: {exit_code}")
     if received_config_paths != ["D:\\json\\custom.json"]:
         raise AssertionError(f"main 未将 -j 参数传递给主流程: {received_config_paths}")
+    if "演示运行完成" in output or "演示运行结束" in output:
+        raise AssertionError("main 不应在第一阶段结束后输出演示性收尾信息")
 
 
 
