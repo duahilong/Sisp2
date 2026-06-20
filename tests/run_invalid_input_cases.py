@@ -1,7 +1,6 @@
 import io
 import sys
 from contextlib import redirect_stdout
-from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -9,7 +8,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.main import run_minimal_main_flow
-from app.modules.disk_info.service import scan_disk_summaries
+import app.main as main_module
 
 
 OUTPUT_PATH = PROJECT_ROOT / "tests" / "invalid_input_results.txt"
@@ -18,6 +17,26 @@ TEST_CASES = [
     ("非法字符 abc", "abc"),
     ("不存在的磁盘编号 99", "99"),
     ("中文逗号输入 1，2", "1，2"),
+]
+SAMPLE_DISK_SUMMARIES = [
+    {
+        "disk_number": 0,
+        "model": "System Disk",
+        "size_display": "931.51 GB",
+        "partition_style": "GPT",
+        "bus_type": "NVMe",
+        "drive_letters": ["C"],
+        "is_boot": True,
+        "is_system": True,
+    },
+    {
+        "disk_number": 1,
+        "model": "Target Disk",
+        "size_display": "476.94 GB",
+        "partition_style": "GPT",
+        "bus_type": "SATA",
+        "drive_letters": [],
+    },
 ]
 
 
@@ -38,6 +57,7 @@ def build_successful_preflight_report(config_path: str | Path | None = None) -> 
             "image_info": {"image_path": "D:\\sisp2\\img\\111.GHO"},
             "software_paths": {"ghost64_path": "D:\\sisp2\\sw\\ghost64.exe", "bcdboot_path": "D:\\sisp2\\sw\\bcdboot.exe"},
             "copy_info": {"source_dir": "D:\\常用软件"},
+            "excluded_disk_names": [],
         },
     }
 
@@ -47,8 +67,10 @@ def run_case(case_name: str, user_input: str) -> str:
     captured = io.StringIO()
     status = "通过"
     exception_text = "无"
+    original_scan_disk_summaries = main_module.scan_disk_summaries
 
     try:
+        main_module.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
         with redirect_stdout(captured):
             run_minimal_main_flow(
                 input_func=lambda prompt: user_input,
@@ -57,6 +79,8 @@ def run_case(case_name: str, user_input: str) -> str:
     except Exception as exc:
         status = "出现异常"
         exception_text = f"{type(exc).__name__}: {exc}"
+    finally:
+        main_module.scan_disk_summaries = original_scan_disk_summaries
 
     output = captured.getvalue().rstrip()
     input_display = user_input if user_input else "<空输入>"
@@ -78,15 +102,11 @@ def run_case(case_name: str, user_input: str) -> str:
 
 def main() -> int:
     try:
-        disks = scan_disk_summaries()
-        if not disks:
-            raise RuntimeError("没有检测到可供测试的硬盘摘要信息")
-
         sections = [
             "Sisp 第一阶段异常输入自动测试结果",
-            f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "生成时间: 固定时间（安全测试使用模拟磁盘数据）",
             f"输出文件: {OUTPUT_PATH}",
-            f"检测到磁盘数量: {len(disks)}",
+            f"检测到磁盘数量: {len(SAMPLE_DISK_SUMMARIES)}",
         ]
 
         for case_name, user_input in TEST_CASES:

@@ -7,7 +7,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.modules.user_interaction.service import build_disk_summary_text, get_display_width, parse_selected_disk_numbers, prompt_disk_selection
+import app.modules.user_interaction.service as user_interaction_service
+from app.modules.user_interaction.service import apply_disk_protection, build_disk_summary_text, get_display_width, parse_selected_disk_numbers, prompt_disk_selection, run_user_interaction
 
 SAMPLE_DISKS = [
     {
@@ -53,6 +54,7 @@ def test_build_disk_summary_text() -> None:
     assert_contains(output, "连接方式")
     assert_contains(output, "盘符")
     assert_contains(output, "分区表格式")
+    assert_contains(output, "状态")
     assert_contains(output, "Samsung SSD 980 PRO 1TB")
     assert_contains(output, "931.51 GB")
     assert_contains(output, "NVMe")
@@ -60,6 +62,7 @@ def test_build_disk_summary_text() -> None:
     assert_contains(output, "C，D")
     assert_contains(output, "WDC WD10EZEX")
     assert_contains(output, "MBR")
+    assert_contains(output, "可选")
 
     forbidden_chars = ["┌", "┬", "┐", "├", "┼", "┤", "└", "┴", "┘", "│"]
     for char in forbidden_chars:
@@ -98,6 +101,10 @@ def test_parse_selected_disk_numbers() -> None:
         if selected != expected:
             raise AssertionError(f"输入 {selection_text!r} 的选择结果不正确: {selected}，期望: {expected}")
 
+    selected_all_selectable = parse_selected_disk_numbers("a", available_numbers, [2, 3])
+    if selected_all_selectable != [2, 3]:
+        raise AssertionError(f"输入 'a' 时应只选择可选硬盘: {selected_all_selectable}")
+
 
 
 def test_parse_selected_disk_numbers_invalid() -> None:
@@ -133,6 +140,99 @@ def test_prompt_disk_selection() -> None:
 
 
 
+def test_apply_disk_protection() -> None:
+    disks = apply_disk_protection(
+        [
+            {"disk_number": 0, "model": "System Disk", "is_system": True},
+            {"disk_number": 1, "model": "Target Disk"},
+            {"disk_number": 2, "model": "Excluded Disk"},
+            {"disk_number": 3, "model": "Offline Disk", "is_offline": True},
+            {"disk_number": 4, "model": "Read Only Disk", "is_read_only": True},
+        ],
+        ["Excluded Disk"],
+    )
+
+    if disks[0].get("is_selectable"):
+        raise AssertionError("系统盘不应可选")
+    if not disks[1].get("is_selectable"):
+        raise AssertionError("普通目标盘应可选")
+    if disks[2].get("is_selectable"):
+        raise AssertionError("配置排除盘不应可选")
+    if disks[3].get("is_selectable"):
+        raise AssertionError("离线盘不应可选")
+    if disks[4].get("is_selectable"):
+        raise AssertionError("只读盘不应可选")
+
+    if "系统盘" not in disks[0].get("protection_reasons", []):
+        raise AssertionError("系统盘保护原因不正确")
+    if "配置排除盘" not in disks[2].get("protection_reasons", []):
+        raise AssertionError("配置排除盘保护原因不正确")
+
+
+
+def test_build_disk_summary_text_with_protected_disk() -> None:
+    disks = apply_disk_protection(
+        [
+            {"disk_number": 0, "model": "System Disk", "is_system": True, "drive_letters": ["C"]},
+            {"disk_number": 1, "model": "Target Disk", "drive_letters": []},
+        ],
+        [],
+    )
+    output = build_disk_summary_text(disks)
+    assert_contains(output, "受保护：系统盘")
+    assert_contains(output, "可选")
+
+
+
+def test_prompt_disk_selection_rejects_protected_disk() -> None:
+    disks = apply_disk_protection(
+        [
+            {"disk_number": 0, "model": "System Disk", "is_system": True},
+            {"disk_number": 1, "model": "Target Disk"},
+        ],
+        [],
+    )
+
+    try:
+        prompt_disk_selection(disks, input_func=lambda prompt: "0")
+    except ValueError as exc:
+        if "硬盘编号 0 不可选择" not in str(exc):
+            raise AssertionError(f"错误信息不正确: {exc}") from exc
+    else:
+        raise AssertionError("选择受保护硬盘时应失败")
+
+    selected_all = prompt_disk_selection(disks, input_func=lambda prompt: "a")
+    if selected_all != [1]:
+        raise AssertionError(f"全选时应只选择可选硬盘: {selected_all}")
+
+
+
+def test_run_user_interaction_applies_excluded_disk_names() -> None:
+    original_scan_disk_summaries = user_interaction_service.scan_disk_summaries
+    user_interaction_service.scan_disk_summaries = lambda: [
+        {"disk_number": 0, "model": "Excluded Disk", "drive_letters": ["C"]},
+        {"disk_number": 1, "model": "Target Disk", "drive_letters": []},
+    ]
+
+    captured = io.StringIO()
+    try:
+        with redirect_stdout(captured):
+            selected = run_user_interaction(
+                input_func=lambda prompt: "a",
+                excluded_disk_names=["Excluded Disk"],
+            )
+    finally:
+        user_interaction_service.scan_disk_summaries = original_scan_disk_summaries
+
+    if selected != [1]:
+        raise AssertionError(f"run_user_interaction 应只返回可选硬盘: {selected}")
+
+    output = captured.getvalue()
+    assert_contains(output, "受保护：配置排除盘")
+    assert_contains(output, "可选")
+
+
+
 def main() -> int:
     try:
         captured = io.StringIO()
@@ -142,6 +242,10 @@ def main() -> int:
         test_parse_selected_disk_numbers()
         test_parse_selected_disk_numbers_invalid()
         test_prompt_disk_selection()
+        test_apply_disk_protection()
+        test_build_disk_summary_text_with_protected_disk()
+        test_prompt_disk_selection_rejects_protected_disk()
+        test_run_user_interaction_applies_excluded_disk_names()
         print("模块9测试结果: 通过")
         return 0
     except Exception as exc:

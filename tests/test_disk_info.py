@@ -6,7 +6,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.modules.disk_info.service import INVALID_SIZE_DISPLAY, UNKNOWN_SIZE_DISPLAY, format_size, scan_disk_summaries, summarize_disk
+from app.modules.disk_info.service import INVALID_SIZE_DISPLAY, UNKNOWN_SIZE_DISPLAY, format_size, summarize_disk
 
 
 
@@ -60,6 +60,29 @@ def test_summarize_disk_with_invalid_size() -> None:
 
 
 
+def test_summarize_disk_includes_safety_flags() -> None:
+    summary = summarize_disk(
+        {
+            "disk_number": 0,
+            "friendly_name": "System Disk",
+            "size_bytes": 1024,
+            "partition_style": "GPT",
+            "bus_type": "NVMe",
+            "is_boot": True,
+            "is_system": True,
+            "is_offline": False,
+            "is_read_only": True,
+            "partitions": [],
+        }
+    )
+
+    assert_equal(summary.get("is_boot"), True, "is_boot 摘要不正确")
+    assert_equal(summary.get("is_system"), True, "is_system 摘要不正确")
+    assert_equal(summary.get("is_offline"), False, "is_offline 摘要不正确")
+    assert_equal(summary.get("is_read_only"), True, "is_read_only 摘要不正确")
+
+
+
 def print_disk_summary(disks: list[dict]) -> None:
     print("=" * 80)
     print(f"共检测到 {len(disks)} 块磁盘")
@@ -83,8 +106,7 @@ def main() -> int:
         test_format_size()
         test_format_size_invalid_values()
         test_summarize_disk_with_invalid_size()
-        disks = scan_disk_summaries()
-        print_disk_summary(disks)
+        test_summarize_disk_includes_safety_flags()
         print("模块1测试结果: 通过")
         return 0
     except Exception as exc:

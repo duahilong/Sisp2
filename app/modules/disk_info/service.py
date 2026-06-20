@@ -166,6 +166,10 @@ def summarize_disk(disk: dict[str, Any]) -> dict[str, Any]:
         "partition_style": disk.get("partition_style"),
         "bus_type": disk.get("bus_type"),
         "drive_letters": collect_drive_letters(disk),
+        "is_boot": bool(disk.get("is_boot")),
+        "is_system": bool(disk.get("is_system")),
+        "is_offline": bool(disk.get("is_offline")),
+        "is_read_only": bool(disk.get("is_read_only")),
     }
 
 

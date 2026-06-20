@@ -7,7 +7,7 @@ from app.modules.disk_info.service import scan_disk_summaries
 
 
 InputFunc = Callable[[str], str]
-TABLE_HEADERS = ["编号", "硬盘型号", "容量", "连接方式", "盘符", "分区表格式"]
+TABLE_HEADERS = ["编号", "硬盘型号", "容量", "连接方式", "盘符", "分区表格式", "状态"]
 COLUMN_SEPARATOR = "  "
 EXIT_SELECTION = "q"
 SELECT_ALL_SELECTION = "a"
@@ -18,6 +18,11 @@ def build_table_rows(disks: list[dict]) -> list[list[str]]:
     rows: list[list[str]] = []
     for disk in disks:
         drive_letters = "，".join(disk.get("drive_letters") or []) or "无"
+        protection_reasons = disk.get("protection_reasons") or []
+        if disk.get("is_selectable") is False:
+            status = f"受保护：{'，'.join(protection_reasons)}" if protection_reasons else "受保护"
+        else:
+            status = "可选"
         rows.append(
             [
                 str(disk.get("disk_number")),
@@ -26,6 +31,7 @@ def build_table_rows(disks: list[dict]) -> list[list[str]]:
                 str(disk.get("bus_type") or "未知"),
                 drive_letters,
                 str(disk.get("partition_style") or "未知"),
+                status,
             ]
         )
     return rows
@@ -81,6 +87,67 @@ def print_disk_summaries(disks: list[dict]) -> None:
 
 
 
+def build_protection_reasons(disk: dict, excluded_disk_names: list[str]) -> list[str]:
+    reasons: list[str] = []
+    model = str(disk.get("model") or "").strip()
+
+    if model and model in excluded_disk_names:
+        reasons.append("配置排除盘")
+    if disk.get("is_boot"):
+        reasons.append("启动盘")
+    if disk.get("is_system"):
+        reasons.append("系统盘")
+    if disk.get("is_offline"):
+        reasons.append("离线盘")
+    if disk.get("is_read_only"):
+        reasons.append("只读盘")
+
+    return reasons
+
+
+
+def apply_disk_protection(disks: list[dict], excluded_disk_names: list[str] | None = None) -> list[dict]:
+    excluded_names = excluded_disk_names or []
+    protected_disks: list[dict] = []
+
+    for disk in disks:
+        protected_disk = dict(disk)
+        protection_reasons = build_protection_reasons(protected_disk, excluded_names)
+        protected_disk["protection_reasons"] = protection_reasons
+        protected_disk["is_selectable"] = not protection_reasons
+        protected_disks.append(protected_disk)
+
+    return protected_disks
+
+
+
+def build_disk_lookup(disks: list[dict]) -> dict[int, dict]:
+    return {disk["disk_number"]: disk for disk in disks if isinstance(disk.get("disk_number"), int)}
+
+
+
+def get_selectable_disk_numbers(disks: list[dict]) -> list[int]:
+    return [
+        disk.get("disk_number")
+        for disk in disks
+        if isinstance(disk.get("disk_number"), int) and disk.get("is_selectable", True)
+    ]
+
+
+
+def validate_selected_disks_are_selectable(selected_numbers: list[int], disks: list[dict]) -> None:
+    disk_lookup = build_disk_lookup(disks)
+    for number in selected_numbers:
+        disk = disk_lookup.get(number)
+        if not disk:
+            raise ValueError(f"硬盘编号不存在: {number}")
+
+        if disk.get("is_selectable") is False:
+            reasons = "，".join(disk.get("protection_reasons") or [])
+            raise ValueError(f"硬盘编号 {number} 不可选择: {reasons or '受保护'}")
+
+
+
 def append_disk_number(selected_numbers: list[int], disk_number: int, available_disk_numbers: list[int]) -> None:
     if disk_number not in available_disk_numbers:
         raise ValueError(f"硬盘编号不存在: {disk_number}")
@@ -105,7 +172,11 @@ def parse_range_token(token: str, available_disk_numbers: list[int], selected_nu
 
 
 
-def parse_selected_disk_numbers(selection_text: str, available_disk_numbers: list[int]) -> list[int]:
+def parse_selected_disk_numbers(
+    selection_text: str,
+    available_disk_numbers: list[int],
+    selectable_disk_numbers: list[int] | None = None,
+) -> list[int]:
     normalized = selection_text.replace("，", ",").strip()
     if not normalized:
         raise ValueError("输入不能为空，请输入硬盘编号")
@@ -115,7 +186,8 @@ def parse_selected_disk_numbers(selection_text: str, available_disk_numbers: lis
         return []
 
     if lowered == SELECT_ALL_SELECTION:
-        return sorted(dict.fromkeys(available_disk_numbers))
+        selected_numbers = selectable_disk_numbers if selectable_disk_numbers is not None else available_disk_numbers
+        return sorted(dict.fromkeys(selected_numbers))
 
     special_tokens = re.split(r"[\s,]+", lowered)
     if EXIT_SELECTION in special_tokens:
@@ -148,13 +220,19 @@ def prompt_disk_selection(disks: list[dict], input_func: InputFunc = input) -> l
     if not available_disk_numbers:
         raise ValueError("没有可供选择的硬盘编号")
 
+    selectable_disk_numbers = get_selectable_disk_numbers(disks)
+    if not selectable_disk_numbers:
+        raise ValueError("没有可供选择的非受保护硬盘")
+
     prompt_text = "请输入磁盘编号（单个数字3、范围1-3、多个数字1,3,5或1 3 5、字母a表示全部磁盘，q退出）："
     selection_text = input_func(prompt_text)
-    return parse_selected_disk_numbers(selection_text, available_disk_numbers)
+    selected_numbers = parse_selected_disk_numbers(selection_text, available_disk_numbers, selectable_disk_numbers)
+    validate_selected_disks_are_selectable(selected_numbers, disks)
+    return selected_numbers
 
 
 
-def run_user_interaction(input_func: InputFunc = input) -> list[int]:
-    disks = scan_disk_summaries()
+def run_user_interaction(input_func: InputFunc = input, excluded_disk_names: list[str] | None = None) -> list[int]:
+    disks = apply_disk_protection(scan_disk_summaries(), excluded_disk_names)
     print_disk_summaries(disks)
     return prompt_disk_selection(disks, input_func)
