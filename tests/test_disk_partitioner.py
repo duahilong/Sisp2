@@ -30,13 +30,12 @@ def test_build_partition_disk_script() -> None:
     assert_contains(script, "IsReadOnly")
     assert_contains(script, "IsOffline")
     assert_contains(script, "PartitionStyle -ne 'GPT'")
-    assert_contains(script, "$remainingSize = $diskSize - $efiSize - $msrSize - $cSize")
-    assert_contains(script, "$halfSize = [UInt64]([Math]::Floor($remainingSize / 2))")
-    assert_contains(script, "Get-Partition -DiskNumber 2")
-    assert_contains(script, "e3c9e316-0b5c-4db8-817d-f92df00215ae")
-    assert_contains(script, "$msrSize = if ($msrPartition) { $msrPartition.Size } else { 0 }")
+    assert_contains(script, "$usedSpace = (Get-Partition -DiskNumber 2 | Measure-Object -Property Size -Sum).Sum")
+    assert_contains(script, "$freeSpace = $diskSize - $usedSpace")
+    assert_contains(script, "$halfSize = [UInt64]([Math]::Floor($freeSpace / 2))")
     assert_contains(script, "New-Partition -DiskNumber 2 -Size $halfSize -AssignDriveLetter")
     assert_contains(script, "NewFileSystemLabel 'Data1'")
+    assert_contains(script, "New-Partition -DiskNumber 2 -UseMaximumSize -AssignDriveLetter")
     assert_contains(script, "NewFileSystemLabel 'Data2'")
 
 
