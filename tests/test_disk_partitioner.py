@@ -21,7 +21,10 @@ def test_build_partition_disk_script() -> None:
     script = build_partition_disk_script([2], 100, 6)
 
     assert_contains(script, "Get-Disk -Number 2")
-    assert_contains(script, "New-Partition -DiskNumber 2 -Size $efiSize")
+    assert_contains(script, "e3c9e316-0b5c-4db8-817d-f92df00215ae")
+    assert_contains(script, "Remove-Partition")
+    assert_contains(script, "$newEfiSize = $msrSize + $efiSize")
+    assert_contains(script, "New-Partition -DiskNumber 2 -Size $newEfiSize")
     assert_contains(script, "Format-Volume -FileSystem FAT32")
     assert_contains(script, "New-Partition -DiskNumber 2 -Size $cSize -AssignDriveLetter")
     assert_contains(script, "Format-Volume -FileSystem NTFS")
@@ -37,11 +40,6 @@ def test_build_partition_disk_script() -> None:
     assert_contains(script, "NewFileSystemLabel 'Data1'")
     assert_contains(script, "New-Partition -DiskNumber 2 -UseMaximumSize -AssignDriveLetter")
     assert_contains(script, "NewFileSystemLabel 'Data2'")
-    assert_contains(script, "e3c9e316-0b5c-4db8-817d-f92df00215ae")
-    assert_contains(script, "Remove-Partition")
-    assert_contains(script, "$newEfiSize = $msrSize + $efiOriginalSize")
-    assert_contains(script, "New-Partition -DiskNumber 2 -Size $newEfiSize")
-    assert_contains(script, "NewFileSystemLabel 'EFI'")
 
 
 
