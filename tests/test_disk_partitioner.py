@@ -30,6 +30,14 @@ def test_build_partition_disk_script() -> None:
     assert_contains(script, "IsReadOnly")
     assert_contains(script, "IsOffline")
     assert_contains(script, "PartitionStyle -ne 'GPT'")
+    assert_contains(script, "$remainingSize = $diskSize - $efiSize - $msrSize - $cSize")
+    assert_contains(script, "$halfSize = [UInt64]([Math]::Floor($remainingSize / 2))")
+    assert_contains(script, "Get-Partition -DiskNumber 2")
+    assert_contains(script, "e3c9e316-0b5c-4db8-817d-f92df00215ae")
+    assert_contains(script, "$msrSize = if ($msrPartition) { $msrPartition.Size } else { 0 }")
+    assert_contains(script, "New-Partition -DiskNumber 2 -Size $halfSize -AssignDriveLetter")
+    assert_contains(script, "NewFileSystemLabel 'Data1'")
+    assert_contains(script, "NewFileSystemLabel 'Data2'")
 
 
 
@@ -79,6 +87,12 @@ def test_partition_and_format_disks_success() -> None:
                     "c_partition_number": 2,
                     "c_drive_letter": "F",
                     "c_file_system": "NTFS",
+                    "d1_partition_number": 3,
+                    "d1_drive_letter": "G",
+                    "d1_file_system": "NTFS",
+                    "d2_partition_number": 4,
+                    "d2_drive_letter": "H",
+                    "d2_file_system": "NTFS",
                 }
             ),
             stderr="",
@@ -117,17 +131,36 @@ def test_partition_and_format_disks_parse_failure() -> None:
 
 
 def test_partition_and_format_disks_abnormal_result() -> None:
-    def fake_runner(script: str) -> CompletedProcess[str]:
-        return CompletedProcess(
-            args=["powershell"],
-            returncode=0,
-            stdout=json.dumps({"disk_number": 2, "efi_file_system": "NTFS", "c_file_system": "NTFS", "c_drive_letter": "F"}),
-            stderr="",
-        )
+    cases = [
+        (
+            {"disk_number": 2, "efi_file_system": "NTFS", "c_file_system": "NTFS", "c_drive_letter": "F",
+             "d1_file_system": "NTFS", "d1_drive_letter": "G", "d2_file_system": "NTFS", "d2_drive_letter": "H"},
+            "EFI 分区不是 FAT32",
+        ),
+        (
+            {"disk_number": 2, "efi_file_system": "FAT32", "c_file_system": "FAT32", "c_drive_letter": "F",
+             "d1_file_system": "NTFS", "d1_drive_letter": "G", "d2_file_system": "NTFS", "d2_drive_letter": "H"},
+            "C 分区不是 NTFS",
+        ),
+        (
+            {"disk_number": 2, "efi_file_system": "FAT32", "c_file_system": "NTFS", "c_drive_letter": "F",
+             "d1_file_system": "FAT32", "d1_drive_letter": "G", "d2_file_system": "NTFS", "d2_drive_letter": "H"},
+            "Data1 分区不是 NTFS",
+        ),
+        (
+            {"disk_number": 2, "efi_file_system": "FAT32", "c_file_system": "NTFS", "c_drive_letter": "F",
+             "d1_file_system": "NTFS", "d1_drive_letter": "G", "d2_file_system": "FAT32", "d2_drive_letter": "H"},
+            "Data2 分区不是 NTFS",
+        ),
+    ]
 
-    results = partition_and_format_disks([2], {"efi_size_mb": 100, "c_size_gb": 6}, powershell_runner=fake_runner)
-    if results[0].get("passed"):
-        raise AssertionError(f"异常分区结果不应通过: {results}")
+    for mock_data, description in cases:
+        def fake_runner(script: str, _data=mock_data) -> CompletedProcess[str]:
+            return CompletedProcess(args=["powershell"], returncode=0, stdout=json.dumps(_data), stderr="")
+
+        results = partition_and_format_disks([2], {"efi_size_mb": 100, "c_size_gb": 6}, powershell_runner=fake_runner)
+        if results[0].get("passed"):
+            raise AssertionError(f"异常分区结果不应通过: {description}")
 
 
 

@@ -45,6 +45,15 @@ def build_partition_disk_script(disk_numbers: list[int], efi_size_mb: int | floa
                 "$efiVolume = $efiPartition | Format-Volume -FileSystem FAT32 -NewFileSystemLabel 'EFI' -Confirm:$false",
                 f"$cPartition = New-Partition -DiskNumber {disk_number} -Size $cSize -AssignDriveLetter",
                 "$cVolume = $cPartition | Format-Volume -FileSystem NTFS -NewFileSystemLabel 'Windows' -Confirm:$false",
+                f"$diskSize = (Get-Disk -Number {disk_number}).Size",
+                f"$msrPartition = Get-Partition -DiskNumber {disk_number} -ErrorAction SilentlyContinue | Where-Object {{ $_.GptType -eq '{{e3c9e316-0b5c-4db8-817d-f92df00215ae}}' }}",
+                "$msrSize = if ($msrPartition) { $msrPartition.Size } else { 0 }",
+                "$remainingSize = $diskSize - $efiSize - $msrSize - $cSize",
+                "$halfSize = [UInt64]([Math]::Floor($remainingSize / 2))",
+                f"$d1Partition = New-Partition -DiskNumber {disk_number} -Size $halfSize -AssignDriveLetter",
+                "$d1Volume = $d1Partition | Format-Volume -FileSystem NTFS -NewFileSystemLabel 'Data1' -Confirm:$false",
+                f"$d2Partition = New-Partition -DiskNumber {disk_number} -Size $halfSize -AssignDriveLetter",
+                "$d2Volume = $d2Partition | Format-Volume -FileSystem NTFS -NewFileSystemLabel 'Data2' -Confirm:$false",
                 "$results += [PSCustomObject]@{",
                 f"    disk_number = {disk_number}",
                 "    efi_partition_number = $efiPartition.PartitionNumber",
@@ -54,6 +63,14 @@ def build_partition_disk_script(disk_numbers: list[int], efi_size_mb: int | floa
                 "    c_drive_letter = $cPartition.DriveLetter",
                 "    c_size_bytes = $cPartition.Size",
                 "    c_file_system = $cVolume.FileSystem",
+                "    d1_partition_number = $d1Partition.PartitionNumber",
+                "    d1_drive_letter = $d1Partition.DriveLetter",
+                "    d1_size_bytes = $d1Partition.Size",
+                "    d1_file_system = $d1Volume.FileSystem",
+                "    d2_partition_number = $d2Partition.PartitionNumber",
+                "    d2_drive_letter = $d2Partition.DriveLetter",
+                "    d2_size_bytes = $d2Partition.Size",
+                "    d2_file_system = $d2Volume.FileSystem",
                 "}",
             ]
         )
@@ -101,7 +118,11 @@ def build_success_results(partitioned_disks: list[dict[str, Any]]) -> list[dict[
     results: list[dict[str, Any]] = []
     for disk in partitioned_disks:
         disk_number = disk.get("disk_number")
-        passed = disk.get("efi_file_system") == "FAT32" and disk.get("c_file_system") == "NTFS" and bool(disk.get("c_drive_letter"))
+        efi_ok = disk.get("efi_file_system") == "FAT32"
+        c_ok = disk.get("c_file_system") == "NTFS" and bool(disk.get("c_drive_letter"))
+        d1_ok = disk.get("d1_file_system") == "NTFS" and bool(disk.get("d1_drive_letter"))
+        d2_ok = disk.get("d2_file_system") == "NTFS" and bool(disk.get("d2_drive_letter"))
+        passed = efi_ok and c_ok and d1_ok and d2_ok
         message = "硬盘分区和格式化完成" if passed else "硬盘分区或格式化结果异常"
         results.append(
             {
