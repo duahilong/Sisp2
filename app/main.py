@@ -112,7 +112,7 @@ def launch_worker_windows(disk_numbers: list[int], config_path: str | None = Non
         if config_path:
             command_parts.extend(["-j", config_path])
 
-        quoted_command = "& " + " ".join(quote_powershell_argument(part) for part in command_parts)
+        quoted_command = "chcp 65001 | Out-Null; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & " + " ".join(quote_powershell_argument(part) for part in command_parts)
         subprocess.Popen(
             ["powershell", "-NoExit", "-Command", quoted_command],
             cwd=PROJECT_ROOT,

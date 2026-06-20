@@ -329,8 +329,8 @@ def test_launch_worker_windows_uses_powershell() -> None:
         raise AssertionError(f"worker 窗口启动命令不正确: {launched}")
     if "--worker-disk" not in launched[0][0][-1]:
         raise AssertionError(f"worker 命令缺少 --worker-disk: {launched}")
-    if not launched[0][0][-1].startswith("& 'py'"):
-        raise AssertionError(f"worker 命令未使用 PowerShell 调用运算符和引用参数: {launched}")
+    if not launched[0][0][-1].startswith("chcp 65001"):
+        raise AssertionError(f"worker 命令未设置 UTF-8 编码: {launched}")
     if "2" not in launched[0][0][-1] or "3" not in launched[1][0][-1]:
         raise AssertionError(f"worker 命令未包含正确硬盘编号: {launched}")
     if "D:\\json\\custom.json" not in launched[0][0][-1]:
