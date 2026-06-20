@@ -307,7 +307,7 @@ def test_launch_worker_windows_uses_powershell() -> None:
     launched: list[tuple[list[str], Path | str | None]] = []
     original_popen = main_module.subprocess.Popen
 
-    def fake_popen(args, cwd=None):
+    def fake_popen(args, cwd=None, creationflags=0):
         launched.append((args, cwd))
 
         class FakeProcess:

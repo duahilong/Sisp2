@@ -116,6 +116,7 @@ def launch_worker_windows(disk_numbers: list[int], config_path: str | None = Non
         subprocess.Popen(
             ["powershell", "-NoExit", "-Command", quoted_command],
             cwd=PROJECT_ROOT,
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
         )
         print(f"硬盘 {disk_number}: 已启动独立执行窗口")
 

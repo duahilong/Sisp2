@@ -22,6 +22,8 @@ def test_build_initialize_disk_script() -> None:
 
     assert_contains(script, "Get-Disk -Number 2")
     assert_contains(script, "Clear-Disk -Number 2 -RemoveData -RemoveOEM -Confirm:$false")
+    assert_contains(script, "$diskAfterClear = Get-Disk -Number 2")
+    assert_contains(script, "if ($diskAfterClear.PartitionStyle -ne 'GPT')")
     assert_contains(script, "Initialize-Disk -Number 2 -PartitionStyle GPT")
     assert_contains(script, "IsBoot")
     assert_contains(script, "IsSystem")
