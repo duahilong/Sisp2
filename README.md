@@ -56,6 +56,10 @@ Sisp 使用 Python、PowerShell 和外部工具，围绕硬盘信息获取、磁
 - 验证分区和格式化结果
 - 默认安全测试
 
+当前真实磁盘操作使用 Windows PowerShell Storage 模块实现。初始化阶段使用 `Clear-Disk` 清除目标硬盘数据，并根据清盘后的分区表状态决定是否执行 `Initialize-Disk -PartitionStyle GPT`；分区阶段使用 `New-Partition` 和 `Format-Volume` 创建并格式化 EFI、Windows、Data1、Data2 分区。
+
+为提升 USB 硬盘和多 worker 场景下的稳定性，分区模块会在每次创建分区前刷新目标硬盘状态，并基于 `LargestFreeExtent` 判断最大连续可用空间是否足够。当前流程不主动创建、删除或合并 MSR 分区，EFI 分区大小直接使用配置字段 `efi_size`。
+
 ## 尚未完成的内容
 - 调用 `ghost64.exe` 写入镜像
 - 镜像写入结果验证
@@ -111,6 +115,9 @@ py .\app\main.py --worker-disk 2 -j .\json\win11.json
 - 选择多个硬盘时，主窗口为每个硬盘启动一个独立 PowerShell worker 窗口。
 - 每个 worker 窗口只处理一个硬盘。
 - 每个 worker 会重新执行运行前检查、重新读取配置、重新扫描硬盘并重新应用磁盘保护。
+- 主程序自动启动 worker 时，会同时传入目标硬盘的 `UniqueId`、`SerialNumber`、型号和容量。
+- worker 重新扫描硬盘后，会对传入的硬盘身份信息进行二次确认；若硬盘编号对应的设备与主窗口选中的设备不一致，则中止执行。
+- 主窗口启动多个 worker 时，会在相邻 worker 之间等待 3 秒，降低多个 USB 硬盘同时初始化和分区时的存储服务抖动。
 - worker 窗口执行完成后默认保持打开，方便查看结果。
 
 ## 配置说明
@@ -216,6 +223,7 @@ py .\tests\test_disk_info_raw.py
 - 默认禁止操作系统盘、启动盘和配置中 `excluded_disk_names` 命中的硬盘
 - 破坏性操作前必须显示目标硬盘编号、型号、容量和盘符
 - 任一步失败后必须中止后续破坏性操作，并输出失败原因
+- 初始化和分区步骤必须在 PowerShell 层再次校验目标硬盘不是系统盘、启动盘、离线盘或只读盘
 
 ## 相关文档
 - `Docs/项目整体.md`

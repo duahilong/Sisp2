@@ -38,6 +38,20 @@ def build_partitioned_disk(overrides: dict | None = None, partitions: list[dict]
                 "drive_letter": "F",
                 "volume": {"file_system": "NTFS", "file_system_label": "Windows"},
             },
+            {
+                "partition_number": 4,
+                "type": "Basic",
+                "size_bytes": 3 * 1024 * 1024 * 1024,
+                "drive_letter": "G",
+                "volume": {"file_system": "NTFS", "file_system_label": "Data1"},
+            },
+            {
+                "partition_number": 5,
+                "type": "Basic",
+                "size_bytes": 3 * 1024 * 1024 * 1024,
+                "drive_letter": "H",
+                "volume": {"file_system": "NTFS", "file_system_label": "Data2"},
+            },
         ],
     }
     if overrides:
@@ -120,6 +134,29 @@ def test_validate_partitioned_disks_wrong_windows_label() -> None:
 
 
 
+def test_validate_partitioned_disks_missing_data_partition() -> None:
+    partitions = [partition for partition in build_partitioned_disk()["partitions"] if (partition.get("volume") or {}).get("file_system_label") != "Data1"]
+    results = validate_partitioned_disks([2], PARTITION_INFO, disk_scanner=lambda: [build_partitioned_disk(partitions=partitions)])
+    assert_failed(results[0], "未检测到 Data1 分区")
+
+
+
+def test_validate_partitioned_disks_wrong_data_file_system() -> None:
+    disk = build_partitioned_disk()
+    disk["partitions"][4]["volume"]["file_system"] = "FAT32"
+    results = validate_partitioned_disks([2], PARTITION_INFO, disk_scanner=lambda: [disk])
+    assert_failed(results[0], "Data2 分区文件系统不是 NTFS")
+
+
+
+def test_validate_partitioned_disks_missing_data_drive_letter() -> None:
+    disk = build_partitioned_disk()
+    disk["partitions"][3]["drive_letter"] = None
+    results = validate_partitioned_disks([2], PARTITION_INFO, disk_scanner=lambda: [disk])
+    assert_failed(results[0], "Data1 分区未分配盘符")
+
+
+
 def test_validate_partitioned_disks_rejects_empty_numbers() -> None:
     try:
         validate_partitioned_disks([], PARTITION_INFO, disk_scanner=lambda: [build_partitioned_disk()])
@@ -142,6 +179,9 @@ def main() -> int:
         test_validate_partitioned_disks_missing_windows_partition()
         test_validate_partitioned_disks_wrong_windows_size()
         test_validate_partitioned_disks_wrong_windows_label()
+        test_validate_partitioned_disks_missing_data_partition()
+        test_validate_partitioned_disks_wrong_data_file_system()
+        test_validate_partitioned_disks_missing_data_drive_letter()
         test_validate_partitioned_disks_rejects_empty_numbers()
         print("分区和格式化结果验证测试结果: 通过")
         return 0

@@ -161,6 +161,8 @@ def summarize_disk(disk: dict[str, Any]) -> dict[str, Any]:
     return {
         "disk_number": disk.get("disk_number"),
         "model": disk.get("friendly_name"),
+        "serial_number": disk.get("serial_number"),
+        "unique_id": disk.get("unique_id"),
         "size_bytes": disk.get("size_bytes"),
         "size_display": format_size(disk.get("size_bytes")),
         "partition_style": disk.get("partition_style"),

@@ -1,6 +1,7 @@
 import argparse
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -18,7 +19,8 @@ from app.preflight import print_preflight_report, run_preflight_checks
 
 
 PreflightRunner = Callable[[str | Path | None], dict[str, Any]]
-WorkerLauncher = Callable[[list[int], str | None], None]
+WorkerLauncher = Callable[[list[dict[str, Any]], str | None], None]
+Sleeper = Callable[[float], None]
 
 
 
@@ -26,6 +28,10 @@ def parse_command_line_args(argv: list[str] | None = None) -> argparse.Namespace
     parser = argparse.ArgumentParser()
     parser.add_argument("-j", dest="config_path", help="JSON 配置文件路径")
     parser.add_argument("--worker-disk", dest="worker_disk", type=int, help="worker 模式：处理指定硬盘编号，可由主程序自动启动，也可用于单盘调试")
+    parser.add_argument("--worker-unique-id", dest="worker_unique_id", help="worker 模式：目标硬盘 UniqueId，用于二次确认硬盘身份")
+    parser.add_argument("--worker-serial-number", dest="worker_serial_number", help="worker 模式：目标硬盘 SerialNumber，用于二次确认硬盘身份")
+    parser.add_argument("--worker-model", dest="worker_model", help="worker 模式：目标硬盘型号，用于二次确认硬盘身份")
+    parser.add_argument("--worker-size-bytes", dest="worker_size_bytes", type=int, help="worker 模式：目标硬盘容量字节数，用于二次确认硬盘身份")
     return parser.parse_args(argv)
 
 
@@ -41,6 +47,75 @@ def find_disk_summary(disk_summaries: list[dict[str, Any]], disk_number: int) ->
         if disk.get("disk_number") == disk_number:
             return disk
     return None
+
+
+
+def build_worker_disk_identity(disk: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "disk_number": disk.get("disk_number"),
+        "unique_id": disk.get("unique_id"),
+        "serial_number": disk.get("serial_number"),
+        "model": disk.get("model"),
+        "size_bytes": disk.get("size_bytes"),
+    }
+
+
+
+def build_worker_disk_identities(disk_summaries: list[dict[str, Any]], disk_numbers: list[int]) -> list[dict[str, Any]]:
+    identities: list[dict[str, Any]] = []
+    for disk_number in disk_numbers:
+        disk = find_disk_summary(disk_summaries, disk_number)
+        if not disk:
+            raise RuntimeError(f"未找到目标硬盘: {disk_number}")
+        identities.append(build_worker_disk_identity(disk))
+    return identities
+
+
+
+def normalize_identity_value(value: Any) -> str:
+    return str(value or "").strip()
+
+
+
+def validate_worker_disk_identity(disk: dict[str, Any], expected_identity: dict[str, Any] | None = None) -> None:
+    if not expected_identity:
+        return
+
+    disk_number = disk.get("disk_number")
+    expected_unique_id = normalize_identity_value(expected_identity.get("unique_id"))
+    expected_serial_number = normalize_identity_value(expected_identity.get("serial_number"))
+    expected_model = normalize_identity_value(expected_identity.get("model"))
+    expected_size_bytes = expected_identity.get("size_bytes")
+
+    actual_unique_id = normalize_identity_value(disk.get("unique_id"))
+    actual_serial_number = normalize_identity_value(disk.get("serial_number"))
+    actual_model = normalize_identity_value(disk.get("model"))
+    actual_size_bytes = disk.get("size_bytes")
+
+    mismatches: list[str] = []
+    if expected_unique_id and actual_unique_id != expected_unique_id:
+        mismatches.append("UniqueId 不一致")
+    if expected_serial_number and actual_serial_number != expected_serial_number:
+        mismatches.append("SerialNumber 不一致")
+    if expected_model and actual_model != expected_model:
+        mismatches.append("硬盘型号不一致")
+    if isinstance(expected_size_bytes, int) and actual_size_bytes != expected_size_bytes:
+        mismatches.append("硬盘容量不一致")
+
+    if mismatches:
+        raise RuntimeError(f"目标硬盘身份校验失败: {disk_number}，{'，'.join(mismatches)}")
+
+
+
+def build_failed_result_message(results: list[dict[str, Any]]) -> str:
+    messages: list[str] = []
+    for result in results:
+        if result.get("passed"):
+            continue
+        disk_number = result.get("disk_number")
+        message = result.get("message") or "未知错误"
+        messages.append(f"硬盘 {disk_number}: {message}")
+    return "；".join(messages) or "未知错误"
 
 
 
@@ -65,7 +140,11 @@ def quote_powershell_argument(value: str) -> str:
 
 
 
-def run_single_disk_flow(disk_number: int, config_payload: dict[str, Any]) -> None:
+def run_single_disk_flow(
+    disk_number: int,
+    config_payload: dict[str, Any],
+    expected_identity: dict[str, Any] | None = None,
+) -> None:
     excluded_disk_names = config_payload.get("excluded_disk_names") or []
     disk_summaries = apply_disk_protection(scan_disk_summaries(), excluded_disk_names)
     disk = find_disk_summary(disk_summaries, disk_number)
@@ -74,35 +153,55 @@ def run_single_disk_flow(disk_number: int, config_payload: dict[str, Any]) -> No
     if disk.get("is_selectable") is False:
         reasons = "，".join(disk.get("protection_reasons") or [])
         raise RuntimeError(f"目标硬盘不可操作: {disk_number}，原因: {reasons or '受保护'}")
+    validate_worker_disk_identity(disk, expected_identity)
 
     print(build_target_disk_text(disk))
     print(f"开始处理硬盘 {disk_number}: {disk.get('model') or '未知'}")
     initialize_results = initialize_disks([disk_number])
     print_initialize_results(initialize_results)
     if not all(result.get("passed") for result in initialize_results):
-        raise RuntimeError("硬盘初始化失败")
+        raise RuntimeError(f"硬盘初始化失败: {build_failed_result_message(initialize_results)}")
 
     validation_results = validate_initialized_disks(initialize_results)
     print_initialization_validation_results(validation_results)
     if not all(result.get("passed") for result in validation_results):
-        raise RuntimeError("初始化结果验证失败")
+        raise RuntimeError(f"初始化结果验证失败: {build_failed_result_message(validation_results)}")
 
     partition_results = partition_and_format_disks([disk_number], config_payload.get("partition_info") or {})
     print_partition_results(partition_results)
     if not all(result.get("passed") for result in partition_results):
-        raise RuntimeError("硬盘分区和格式化失败")
+        raise RuntimeError(f"硬盘分区和格式化失败: {build_failed_result_message(partition_results)}")
 
     partition_validation_results = validate_partitioned_disks([disk_number], config_payload.get("partition_info") or {})
     print_partition_validation_results(partition_validation_results)
     if not all(result.get("passed") for result in partition_validation_results):
-        raise RuntimeError("分区和格式化结果验证失败")
+        raise RuntimeError(f"分区和格式化结果验证失败: {build_failed_result_message(partition_validation_results)}")
 
     print(f"硬盘 {disk_number} 当前阶段处理完成")
 
 
 
-def launch_worker_windows(disk_numbers: list[int], config_path: str | None = None) -> None:
-    for disk_number in disk_numbers:
+def normalize_worker_disk_identity(disk_identity: int | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(disk_identity, int):
+        return {"disk_number": disk_identity}
+    return dict(disk_identity)
+
+
+
+def launch_worker_windows(
+    disk_identities: list[int | dict[str, Any]],
+    config_path: str | None = None,
+    start_interval_seconds: float = 3.0,
+    sleep_func: Sleeper | None = None,
+) -> None:
+    sleeper = sleep_func or time.sleep
+
+    for index, raw_identity in enumerate(disk_identities):
+        disk_identity = normalize_worker_disk_identity(raw_identity)
+        disk_number = disk_identity.get("disk_number")
+        if not isinstance(disk_number, int):
+            raise ValueError(f"worker 硬盘编号必须为整数: {disk_number}")
+
         command_parts = [
             "py",
             str(PROJECT_ROOT / "app" / "main.py"),
@@ -111,14 +210,33 @@ def launch_worker_windows(disk_numbers: list[int], config_path: str | None = Non
         ]
         if config_path:
             command_parts.extend(["-j", config_path])
+        if disk_identity.get("unique_id"):
+            command_parts.extend(["--worker-unique-id", str(disk_identity.get("unique_id"))])
+        if disk_identity.get("serial_number"):
+            command_parts.extend(["--worker-serial-number", str(disk_identity.get("serial_number"))])
+        if disk_identity.get("model"):
+            command_parts.extend(["--worker-model", str(disk_identity.get("model"))])
+        if isinstance(disk_identity.get("size_bytes"), int):
+            command_parts.extend(["--worker-size-bytes", str(disk_identity.get("size_bytes"))])
 
-        quoted_command = "chcp 65001 | Out-Null; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & " + " ".join(quote_powershell_argument(part) for part in command_parts)
+        quoted_command = (
+            "$env:PYTHONUTF8 = '1'; "
+            "$env:PYTHONIOENCODING = 'utf-8'; "
+            "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; "
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+            "$OutputEncoding = [System.Text.Encoding]::UTF8; "
+            "& "
+            + " ".join(quote_powershell_argument(part) for part in command_parts)
+        )
         subprocess.Popen(
-            ["powershell", "-NoExit", "-Command", quoted_command],
+            ["powershell", "-NoExit", "-NoProfile", "-Command", quoted_command],
             cwd=PROJECT_ROOT,
             creationflags=subprocess.CREATE_NEW_CONSOLE,
         )
         print(f"硬盘 {disk_number}: 已启动独立执行窗口")
+        if index < len(disk_identities) - 1 and start_interval_seconds > 0:
+            print(f"等待 {start_interval_seconds:g} 秒后启动下一个 worker")
+            sleeper(start_interval_seconds)
 
 
 
@@ -152,7 +270,7 @@ def run_minimal_main_flow(
     if len(selected_disk_numbers) > 1:
         launcher = worker_launcher or launch_worker_windows
         print("已选择多个硬盘，将为每个硬盘启动独立执行窗口")
-        launcher(selected_disk_numbers, get_config_path_for_worker(config_payload))
+        launcher(build_worker_disk_identities(disk_summaries, selected_disk_numbers), get_config_path_for_worker(config_payload))
         return selected_disk_numbers
 
     if selected_disk_numbers:
@@ -166,6 +284,7 @@ def run_worker_flow(
     disk_number: int,
     preflight_runner: PreflightRunner | None = None,
     config_path: str | Path | None = None,
+    expected_identity: dict[str, Any] | None = None,
 ) -> None:
     runner = preflight_runner or run_preflight_checks
     preflight_report = runner(config_path)
@@ -181,7 +300,7 @@ def run_worker_flow(
     print(f"Sisp Worker 硬盘 {disk_number}")
     print("=" * 80)
     print(f"配置文件: {config_payload.get('config_path')}")
-    run_single_disk_flow(disk_number, config_payload)
+    run_single_disk_flow(disk_number, config_payload, expected_identity)
 
 
 
@@ -189,7 +308,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_command_line_args(argv)
         if args.worker_disk is not None:
-            run_worker_flow(args.worker_disk, config_path=args.config_path)
+            expected_identity = {
+                "unique_id": args.worker_unique_id,
+                "serial_number": args.worker_serial_number,
+                "model": args.worker_model,
+                "size_bytes": args.worker_size_bytes,
+            }
+            run_worker_flow(args.worker_disk, config_path=args.config_path, expected_identity=expected_identity)
         else:
             run_minimal_main_flow(config_path=args.config_path)
         return 0

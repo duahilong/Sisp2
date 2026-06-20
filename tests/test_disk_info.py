@@ -41,6 +41,8 @@ def test_summarize_disk_with_invalid_size() -> None:
         {
             "disk_number": 7,
             "friendly_name": "Demo Disk",
+            "serial_number": "SN-DEMO",
+            "unique_id": "UID-DEMO",
             "size_bytes": -1,
             "partition_style": "GPT",
             "bus_type": "USB",
@@ -55,6 +57,8 @@ def test_summarize_disk_with_invalid_size() -> None:
 
     assert_equal(summary.get("disk_number"), 7, "磁盘编号摘要不正确")
     assert_equal(summary.get("model"), "Demo Disk", "磁盘型号摘要不正确")
+    assert_equal(summary.get("serial_number"), "SN-DEMO", "硬盘序列号摘要不正确")
+    assert_equal(summary.get("unique_id"), "UID-DEMO", "硬盘 UniqueId 摘要不正确")
     assert_equal(summary.get("size_display"), INVALID_SIZE_DISPLAY, "非法容量摘要显示不正确")
     assert_equal(summary.get("drive_letters"), ["E"], "盘符摘要不正确")
 

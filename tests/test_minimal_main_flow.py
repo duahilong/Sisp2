@@ -14,6 +14,9 @@ SAMPLE_DISK_SUMMARIES = [
     {
         "disk_number": 0,
         "model": "System Disk",
+        "serial_number": "SN-SYSTEM",
+        "unique_id": "UID-SYSTEM",
+        "size_bytes": 1000204886016,
         "size_display": "931.51 GB",
         "partition_style": "GPT",
         "bus_type": "NVMe",
@@ -26,6 +29,9 @@ SAMPLE_DISK_SUMMARIES = [
     {
         "disk_number": 1,
         "model": "Target Disk",
+        "serial_number": "SN-TARGET-1",
+        "unique_id": "UID-TARGET-1",
+        "size_bytes": 512040894464,
         "size_display": "476.94 GB",
         "partition_style": "GPT",
         "bus_type": "SATA",
@@ -38,6 +44,9 @@ SAMPLE_DISK_SUMMARIES = [
     {
         "disk_number": 2,
         "model": "Second Target Disk",
+        "serial_number": "SN-TARGET-2",
+        "unique_id": "UID-TARGET-2",
+        "size_bytes": 14398909440,
         "size_display": "13.41 GB",
         "partition_style": "GPT",
         "bus_type": "USB",
@@ -103,9 +112,30 @@ def test_parse_command_line_args() -> None:
     if default_args.config_path is not None:
         raise AssertionError("未传入 -j 参数时，config_path 应为 None")
 
-    worker_args = parse_command_line_args(["--worker-disk", "2", "-j", "D:\\temp\\demo.json"])
+    worker_args = parse_command_line_args([
+        "--worker-disk",
+        "2",
+        "--worker-unique-id",
+        "UID-TARGET-2",
+        "--worker-serial-number",
+        "SN-TARGET-2",
+        "--worker-model",
+        "Second Target Disk",
+        "--worker-size-bytes",
+        "14398909440",
+        "-j",
+        "D:\\temp\\demo.json",
+    ])
     if worker_args.worker_disk != 2:
         raise AssertionError(f"--worker-disk 参数解析结果不正确: {worker_args.worker_disk}")
+    if worker_args.worker_unique_id != "UID-TARGET-2":
+        raise AssertionError(f"worker UniqueId 参数解析结果不正确: {worker_args.worker_unique_id}")
+    if worker_args.worker_serial_number != "SN-TARGET-2":
+        raise AssertionError(f"worker SerialNumber 参数解析结果不正确: {worker_args.worker_serial_number}")
+    if worker_args.worker_model != "Second Target Disk":
+        raise AssertionError(f"worker 型号参数解析结果不正确: {worker_args.worker_model}")
+    if worker_args.worker_size_bytes != 14398909440:
+        raise AssertionError(f"worker 容量参数解析结果不正确: {worker_args.worker_size_bytes}")
     if worker_args.config_path != "D:\\temp\\demo.json":
         raise AssertionError(f"worker 模式 -j 参数解析结果不正确: {worker_args.config_path}")
 
@@ -243,11 +273,11 @@ def test_multi_disk_main_flow_launches_worker_windows() -> None:
     original_run_single_disk_flow = main_module.run_single_disk_flow
     main_module.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
 
-    launched: list[tuple[list[int], str | None]] = []
+    launched: list[tuple[list[dict], str | None]] = []
     current_process_calls: list[int] = []
 
-    def fake_launcher(disk_numbers: list[int], config_path: str | None) -> None:
-        launched.append((disk_numbers, config_path))
+    def fake_launcher(disk_identities: list[dict], config_path: str | None) -> None:
+        launched.append((disk_identities, config_path))
 
     main_module.run_single_disk_flow = lambda disk_number, config_payload: current_process_calls.append(disk_number)
 
@@ -265,7 +295,23 @@ def test_multi_disk_main_flow_launches_worker_windows() -> None:
 
     if selected_disk_numbers != [1, 2]:
         raise AssertionError(f"多硬盘选择结果不正确: {selected_disk_numbers}")
-    if launched != [([1, 2], "D:\\Code-Project\\Sisp2\\json\\win11.json")]:
+    expected_identities = [
+        {
+            "disk_number": 1,
+            "unique_id": "UID-TARGET-1",
+            "serial_number": "SN-TARGET-1",
+            "model": "Target Disk",
+            "size_bytes": 512040894464,
+        },
+        {
+            "disk_number": 2,
+            "unique_id": "UID-TARGET-2",
+            "serial_number": "SN-TARGET-2",
+            "model": "Second Target Disk",
+            "size_bytes": 14398909440,
+        },
+    ]
+    if launched != [(expected_identities, "D:\\Code-Project\\Sisp2\\json\\win11.json")]:
         raise AssertionError(f"多硬盘未正确启动 worker: {launched}")
     if current_process_calls:
         raise AssertionError(f"多硬盘时不应在当前进程执行单盘流程: {current_process_calls}")
@@ -277,9 +323,9 @@ def test_multi_disk_main_flow_launches_worker_windows() -> None:
 
 
 def test_worker_flow_runs_single_disk_flow() -> None:
-    received: list[tuple[int, dict]] = []
+    received: list[tuple[int, dict, dict | None]] = []
     original_run_single_disk_flow = main_module.run_single_disk_flow
-    main_module.run_single_disk_flow = lambda disk_number, config_payload: received.append((disk_number, config_payload))
+    main_module.run_single_disk_flow = lambda disk_number, config_payload, expected_identity=None: received.append((disk_number, config_payload, expected_identity))
 
     captured = io.StringIO()
     try:
@@ -296,6 +342,8 @@ def test_worker_flow_runs_single_disk_flow() -> None:
         raise AssertionError(f"worker 模式未执行指定硬盘: {received}")
     if received[0][1].get("config_path") != "D:\\temp\\demo.json":
         raise AssertionError(f"worker 模式未使用指定配置路径: {received}")
+    if received[0][2] is not None:
+        raise AssertionError(f"未传入身份参数时 worker 不应携带身份校验数据: {received}")
 
     output = captured.getvalue()
     if "Sisp Worker 硬盘 2" not in output:
@@ -303,8 +351,37 @@ def test_worker_flow_runs_single_disk_flow() -> None:
 
 
 
+def test_validate_worker_disk_identity() -> None:
+    disk = SAMPLE_DISK_SUMMARIES[2]
+    expected_identity = {
+        "unique_id": "UID-TARGET-2",
+        "serial_number": "SN-TARGET-2",
+        "model": "Second Target Disk",
+        "size_bytes": 14398909440,
+    }
+    main_module.validate_worker_disk_identity(disk, expected_identity)
+
+    try:
+        main_module.validate_worker_disk_identity(disk, {**expected_identity, "unique_id": "WRONG-UID"})
+    except RuntimeError as exc:
+        if "UniqueId 不一致" not in str(exc):
+            raise AssertionError(f"硬盘身份不一致错误信息不正确: {exc}") from exc
+    else:
+        raise AssertionError("UniqueId 不一致时应拒绝执行")
+
+    try:
+        main_module.validate_worker_disk_identity(disk, {**expected_identity, "size_bytes": 1})
+    except RuntimeError as exc:
+        if "硬盘容量不一致" not in str(exc):
+            raise AssertionError(f"硬盘容量不一致错误信息不正确: {exc}") from exc
+    else:
+        raise AssertionError("硬盘容量不一致时应拒绝执行")
+
+
+
 def test_launch_worker_windows_uses_powershell() -> None:
     launched: list[tuple[list[str], Path | str | None]] = []
+    sleep_calls: list[float] = []
     original_popen = main_module.subprocess.Popen
 
     def fake_popen(args, cwd=None, creationflags=0):
@@ -319,45 +396,90 @@ def test_launch_worker_windows_uses_powershell() -> None:
     captured = io.StringIO()
     try:
         with redirect_stdout(captured):
-            main_module.launch_worker_windows([2, 3], "D:\\json\\custom.json")
+            main_module.launch_worker_windows(
+                [
+                    {"disk_number": 2, "unique_id": "UID-2", "serial_number": "SN-2", "model": "Disk 2", "size_bytes": 2000},
+                    {"disk_number": 3, "unique_id": "UID-3", "serial_number": "SN-3", "model": "Disk 3", "size_bytes": 3000},
+                ],
+                "D:\\json\\custom.json",
+                sleep_func=sleep_calls.append,
+            )
     finally:
         main_module.subprocess.Popen = original_popen
 
     if len(launched) != 2:
         raise AssertionError(f"应启动两个 worker 窗口，实际为: {launched}")
-    if launched[0][0][0] != "powershell" or launched[0][0][1] != "-NoExit":
+    if launched[0][0][0] != "powershell" or launched[0][0][1] != "-NoExit" or "-NoProfile" not in launched[0][0]:
         raise AssertionError(f"worker 窗口启动命令不正确: {launched}")
     if "--worker-disk" not in launched[0][0][-1]:
         raise AssertionError(f"worker 命令缺少 --worker-disk: {launched}")
-    if not launched[0][0][-1].startswith("chcp 65001"):
-        raise AssertionError(f"worker 命令未设置 UTF-8 编码: {launched}")
+    if "chcp 65001" in launched[0][0][-1]:
+        raise AssertionError(f"worker 命令不应切换控制台代码页: {launched}")
+    if "$env:PYTHONUTF8" not in launched[0][0][-1] or "PYTHONIOENCODING" not in launched[0][0][-1]:
+        raise AssertionError(f"worker 命令未设置 Python UTF-8 环境: {launched}")
+    if "OutputEncoding" not in launched[0][0][-1]:
+        raise AssertionError(f"worker 命令未设置 PowerShell 输出编码: {launched}")
     if "2" not in launched[0][0][-1] or "3" not in launched[1][0][-1]:
         raise AssertionError(f"worker 命令未包含正确硬盘编号: {launched}")
     if "D:\\json\\custom.json" not in launched[0][0][-1]:
         raise AssertionError(f"worker 命令未包含配置路径: {launched}")
+    if "--worker-unique-id" not in launched[0][0][-1] or "UID-2" not in launched[0][0][-1]:
+        raise AssertionError(f"worker 命令未包含 UniqueId: {launched}")
+    if "--worker-serial-number" not in launched[0][0][-1] or "SN-2" not in launched[0][0][-1]:
+        raise AssertionError(f"worker 命令未包含 SerialNumber: {launched}")
+    if "--worker-model" not in launched[0][0][-1] or "Disk 2" not in launched[0][0][-1]:
+        raise AssertionError(f"worker 命令未包含硬盘型号: {launched}")
+    if "--worker-size-bytes" not in launched[0][0][-1] or "2000" not in launched[0][0][-1]:
+        raise AssertionError(f"worker 命令未包含硬盘容量: {launched}")
+    if sleep_calls != [3.0]:
+        raise AssertionError(f"worker 启动间隔不正确: {sleep_calls}")
 
     output = captured.getvalue()
     if "硬盘 2: 已启动独立执行窗口" not in output or "硬盘 3: 已启动独立执行窗口" not in output:
         raise AssertionError("启动 worker 窗口时未输出提示")
+    if "等待 3 秒后启动下一个 worker" not in output:
+        raise AssertionError("启动 worker 窗口时未输出等待提示")
 
 
 
 def test_main_uses_worker_disk_argument() -> None:
-    received: list[tuple[int, str | Path | None]] = []
+    received: list[tuple[int, str | Path | None, dict]] = []
     original_runner = main_module.run_worker_flow
 
-    def fake_run_worker_flow(disk_number: int, preflight_runner=None, config_path: str | Path | None = None) -> None:
-        received.append((disk_number, config_path))
+    def fake_run_worker_flow(disk_number: int, preflight_runner=None, config_path: str | Path | None = None, expected_identity=None) -> None:
+        received.append((disk_number, config_path, expected_identity))
 
     main_module.run_worker_flow = fake_run_worker_flow
     try:
-        exit_code = main_module.main(["--worker-disk", "2", "-j", "D:\\json\\custom.json"])
+        exit_code = main_module.main([
+            "--worker-disk",
+            "2",
+            "--worker-unique-id",
+            "UID-TARGET-2",
+            "--worker-serial-number",
+            "SN-TARGET-2",
+            "--worker-model",
+            "Second Target Disk",
+            "--worker-size-bytes",
+            "14398909440",
+            "-j",
+            "D:\\json\\custom.json",
+        ])
     finally:
         main_module.run_worker_flow = original_runner
 
     if exit_code != 0:
         raise AssertionError(f"main worker 模式应返回 0，实际为: {exit_code}")
-    if received != [(2, "D:\\json\\custom.json")]:
+    if received != [(
+        2,
+        "D:\\json\\custom.json",
+        {
+            "unique_id": "UID-TARGET-2",
+            "serial_number": "SN-TARGET-2",
+            "model": "Second Target Disk",
+            "size_bytes": 14398909440,
+        },
+    )]:
         raise AssertionError(f"main 未正确调用 worker 模式: {received}")
 
 
@@ -405,7 +527,7 @@ def test_main_flow_stops_when_initialization_fails() -> None:
                 preflight_runner=build_successful_preflight_report,
             )
     except RuntimeError as exc:
-        if str(exc) != "硬盘初始化失败":
+        if str(exc) != "硬盘初始化失败: 硬盘 1: 初始化失败":
             raise AssertionError(f"初始化失败时异常信息不正确: {exc}")
     else:
         raise AssertionError("初始化失败时主流程应中止")
@@ -448,7 +570,7 @@ def test_main_flow_stops_when_initialization_validation_fails() -> None:
                 preflight_runner=build_successful_preflight_report,
             )
     except RuntimeError as exc:
-        if str(exc) != "初始化结果验证失败":
+        if str(exc) != "初始化结果验证失败: 硬盘 1: 初始化后分区表格式不是 GPT: MBR":
             raise AssertionError(f"初始化验证失败时异常信息不正确: {exc}")
     else:
         raise AssertionError("初始化验证失败时主流程应中止")
@@ -496,7 +618,7 @@ def test_main_flow_stops_when_partition_fails() -> None:
                 preflight_runner=build_successful_preflight_report,
             )
     except RuntimeError as exc:
-        if str(exc) != "硬盘分区和格式化失败":
+        if str(exc) != "硬盘分区和格式化失败: 硬盘 1: 分区失败":
             raise AssertionError(f"分区失败时异常信息不正确: {exc}")
     else:
         raise AssertionError("分区失败时主流程应中止")
@@ -550,7 +672,7 @@ def test_main_flow_stops_when_partition_validation_fails() -> None:
                 preflight_runner=build_successful_preflight_report,
             )
     except RuntimeError as exc:
-        if str(exc) != "分区和格式化结果验证失败":
+        if str(exc) != "分区和格式化结果验证失败: 硬盘 1: 分区验证失败":
             raise AssertionError(f"分区验证失败时异常信息不正确: {exc}")
     else:
         raise AssertionError("分区验证失败时主流程应中止")
@@ -600,6 +722,7 @@ def main() -> int:
         test_successful_main_flow_with_custom_json_path()
         test_multi_disk_main_flow_launches_worker_windows()
         test_worker_flow_runs_single_disk_flow()
+        test_validate_worker_disk_identity()
         test_launch_worker_windows_uses_powershell()
         test_main_uses_json_argument()
         test_main_uses_worker_disk_argument()
