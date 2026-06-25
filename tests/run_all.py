@@ -13,6 +13,7 @@ TEST_SCRIPTS = [
     PROJECT_ROOT / "tests" / "test_initialization_validator.py",
     PROJECT_ROOT / "tests" / "test_disk_partitioner.py",
     PROJECT_ROOT / "tests" / "test_partition_validator.py",
+    PROJECT_ROOT / "tests" / "test_ghost_writer.py",
     PROJECT_ROOT / "tests" / "test_minimal_main_flow.py",
     PROJECT_ROOT / "tests" / "test_user_interaction_integration.py",
     PROJECT_ROOT / "tests" / "run_invalid_input_cases.py",

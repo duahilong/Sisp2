@@ -204,6 +204,7 @@ def test_successful_main_flow() -> None:
     original_initialize_disks = main_module.initialize_disks
     original_partition_and_format_disks = main_module.partition_and_format_disks
     original_validate_partitioned_disks = main_module.validate_partitioned_disks
+    original_write_ghost_image = main_module.write_ghost_image
     main_module.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
     main_module.initialize_disks = lambda disk_numbers: [
         {
@@ -229,6 +230,9 @@ def test_successful_main_flow() -> None:
         {"disk_number": number, "passed": True, "message": "分区和格式化结果验证通过"}
         for number in disk_numbers
     ]
+    main_module.write_ghost_image = lambda gho_exe, win_gho, disk_number, windows_drive_letter: {
+        "disk_number": disk_number, "passed": True, "message": "Ghost 镜像写入成功"
+    }
 
     captured = io.StringIO()
     try:
@@ -242,6 +246,7 @@ def test_successful_main_flow() -> None:
         main_module.initialize_disks = original_initialize_disks
         main_module.partition_and_format_disks = original_partition_and_format_disks
         main_module.validate_partitioned_disks = original_validate_partitioned_disks
+        main_module.write_ghost_image = original_write_ghost_image
 
     output = captured.getvalue()
     if "管理员权限检查" in output or "PowerShell 可用性检查" in output or "配置文件存在性检查" in output or "配置文件可解析性检查" in output:
@@ -278,6 +283,7 @@ def test_successful_main_flow_with_custom_json_path() -> None:
     original_initialize_disks = main_module.initialize_disks
     original_partition_and_format_disks = main_module.partition_and_format_disks
     original_validate_partitioned_disks = main_module.validate_partitioned_disks
+    original_write_ghost_image = main_module.write_ghost_image
     main_module.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
     main_module.initialize_disks = lambda disk_numbers: [
         {
@@ -303,6 +309,9 @@ def test_successful_main_flow_with_custom_json_path() -> None:
         {"disk_number": number, "passed": True, "message": "分区和格式化结果验证通过"}
         for number in disk_numbers
     ]
+    main_module.write_ghost_image = lambda gho_exe, win_gho, disk_number, windows_drive_letter: {
+        "disk_number": disk_number, "passed": True, "message": "Ghost 镜像写入成功"
+    }
 
     captured = io.StringIO()
     try:
@@ -317,6 +326,7 @@ def test_successful_main_flow_with_custom_json_path() -> None:
         main_module.initialize_disks = original_initialize_disks
         main_module.partition_and_format_disks = original_partition_and_format_disks
         main_module.validate_partitioned_disks = original_validate_partitioned_disks
+        main_module.write_ghost_image = original_write_ghost_image
 
     output = captured.getvalue()
     if f"配置文件: {custom_path}" not in output:

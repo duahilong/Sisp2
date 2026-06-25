@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.modules.disk_info.service import scan_disk_summaries
 from app.modules.disk_initializer.service import initialize_disks, print_initialize_results
 from app.modules.disk_partitioner.service import partition_and_format_disks, print_partition_results
+from app.modules.ghost_writer.service import print_ghost_results, write_ghost_image
 from app.modules.initialization_validator.service import print_initialization_validation_results, validate_initialized_disks
 from app.modules.partition_validator.service import print_partition_validation_results, validate_partitioned_disks
 from app.modules.user_interaction.service import apply_disk_protection, print_disk_summaries, prompt_disk_selection
@@ -217,6 +218,14 @@ def run_single_disk_flow(
     print_partition_validation_results(partition_validation_results)
     if not all(result.get("passed") for result in partition_validation_results):
         raise RuntimeError(f"分区和格式化结果验证失败: {build_failed_result_message(partition_validation_results)}")
+
+    gho_exe = (config_payload.get("software_paths") or {}).get("ghost64_path")
+    win_gho = (config_payload.get("image_info") or {}).get("image_path")
+    windows_drive_letter = (drive_letters or {}).get("windows") or (partition_results[0].get("partitions") or {}).get("c_drive_letter")
+    ghost_results = [write_ghost_image(gho_exe, win_gho, disk_number, windows_drive_letter)]
+    print_ghost_results(ghost_results)
+    if not all(result.get("passed") for result in ghost_results):
+        raise RuntimeError(f"Ghost 镜像写入失败: {build_failed_result_message(ghost_results)}")
 
     print(f"硬盘 {disk_number} 当前阶段处理完成")
 
