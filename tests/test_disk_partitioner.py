@@ -103,6 +103,7 @@ def test_partition_and_format_disks_success() -> None:
                     "disk_number": 2,
                     "efi_partition_number": 1,
                     "efi_file_system": "FAT32",
+                    "efi_drive_letter": "E",
                     "c_partition_number": 2,
                     "c_drive_letter": "F",
                     "c_file_system": "NTFS",
@@ -191,6 +192,7 @@ def test_partition_and_format_disks_drive_letter_mismatch() -> None:
             stdout=json.dumps({
                 "disk_number": 2,
                 "efi_file_system": "FAT32",
+                "efi_drive_letter": "E",
                 "c_drive_letter": "X",
                 "c_file_system": "NTFS",
                 "d1_drive_letter": "G",
@@ -210,6 +212,34 @@ def test_partition_and_format_disks_drive_letter_mismatch() -> None:
 
 
 
+def test_partition_and_format_disks_efi_drive_letter_mismatch() -> None:
+    def fake_runner(script: str) -> CompletedProcess[str]:
+        return CompletedProcess(
+            args=["powershell"],
+            returncode=0,
+            stdout=json.dumps({
+                "disk_number": 2,
+                "efi_file_system": "FAT32",
+                "efi_drive_letter": "Z",
+                "c_drive_letter": "F",
+                "c_file_system": "NTFS",
+                "d1_drive_letter": "G",
+                "d1_file_system": "NTFS",
+                "d2_drive_letter": "H",
+                "d2_file_system": "NTFS",
+            }),
+            stderr="",
+        )
+
+    results = partition_and_format_disks(
+        [2], {"efi_size_mb": 100, "c_size_gb": 6}, powershell_runner=fake_runner,
+        drive_letters={"efi": "E", "windows": "F", "data1": "G", "data2": "H"},
+    )
+    if results[0].get("passed"):
+        raise AssertionError(f"EFI 盘符不匹配时不应通过: {results}")
+
+
+
 def main() -> int:
     try:
         test_build_partition_disk_script()
@@ -221,6 +251,7 @@ def main() -> int:
         test_partition_and_format_disks_parse_failure()
         test_partition_and_format_disks_abnormal_result()
         test_partition_and_format_disks_drive_letter_mismatch()
+        test_partition_and_format_disks_efi_drive_letter_mismatch()
         print("模块5分区格式化测试结果: 通过")
         return 0
     except Exception as exc:

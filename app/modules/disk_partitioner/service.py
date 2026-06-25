@@ -121,6 +121,7 @@ def build_partition_disk_script(disk_numbers: list[int], efi_size_mb: int | floa
                 "    efi_partition_number = $efiPartition.PartitionNumber",
                 "    efi_size_bytes = $efiPartition.Size",
                 "    efi_file_system = $efiVolume.FileSystem",
+                "    efi_drive_letter = $efiPartition.DriveLetter",
                 "    c_partition_number = $cPartition.PartitionNumber",
                 "    c_drive_letter = $cPartition.DriveLetter",
                 "    c_size_bytes = $cPartition.Size",
@@ -167,6 +168,8 @@ def build_success_results(partitioned_disks: list[dict[str, Any]], drive_letters
         d2_ok = disk.get("d2_file_system") == "NTFS" and bool(disk.get("d2_drive_letter"))
         passed = efi_ok and c_ok and d1_ok and d2_ok
         if passed and drive_letters:
+            if drive_letters.get("efi") and str(disk.get("efi_drive_letter") or "").upper() != drive_letters["efi"].upper():
+                passed = False
             if drive_letters.get("windows") and str(disk.get("c_drive_letter") or "").upper() != drive_letters["windows"].upper():
                 passed = False
             if drive_letters.get("data1") and str(disk.get("d1_drive_letter") or "").upper() != drive_letters["data1"].upper():
