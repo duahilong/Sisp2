@@ -65,6 +65,13 @@ def build_partition_disk_script(disk_numbers: list[int], efi_size_mb: int | floa
                 "if ($disk.PartitionStyle -ne 'GPT') {",
                 f'    throw "硬盘分区表格式不是 GPT，无法继续分区: {disk_number}"',
                 "}",
+                f"$msrPartition = Get-Partition -DiskNumber {disk_number} -ErrorAction SilentlyContinue | Where-Object {{ $_.GptType -eq '{{e3c9e316-0b5c-4db8-817d-f92df00215ae}}' }}",
+                "if ($msrPartition) {",
+                f"    Remove-Partition -DiskNumber {disk_number} -PartitionNumber $msrPartition.PartitionNumber -Confirm:$false",
+                "    Start-Sleep -Seconds 1",
+                f"    Update-Disk -Number {disk_number} -ErrorAction SilentlyContinue",
+                "    Start-Sleep -Seconds 1",
+                "}",
             ]
         )
 
