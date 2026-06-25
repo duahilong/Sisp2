@@ -2,18 +2,29 @@ import json
 import subprocess
 from typing import Any, Callable
 
+from app.modules.common.service import run_powershell as _run_powershell
+
 
 PowershellRunner = Callable[[str], subprocess.CompletedProcess[str]]
 
 
 
-def build_partition_disk_script(disk_numbers: list[int], efi_size_mb: int | float, c_size_gb: int | float) -> str:
+def build_partition_disk_script(disk_numbers: list[int], efi_size_mb: int | float, c_size_gb: int | float, drive_letters: dict[str, str] | None = None) -> str:
     if not disk_numbers:
         raise ValueError("分区硬盘编号不能为空")
     if not isinstance(efi_size_mb, (int, float)) or isinstance(efi_size_mb, bool) or efi_size_mb <= 0:
         raise ValueError("EFI 分区大小必须为大于 0 的数字")
     if not isinstance(c_size_gb, (int, float)) or isinstance(c_size_gb, bool) or c_size_gb <= 0:
         raise ValueError("C 分区大小必须为大于 0 的数字")
+    if drive_letters:
+        for key in ["efi", "windows", "data1", "data2"]:
+            if key not in drive_letters:
+                raise ValueError(f"盘符配置缺少: {key}")
+
+    efi_letter = (drive_letters or {}).get("efi")
+    windows_letter = (drive_letters or {}).get("windows")
+    data1_letter = (drive_letters or {}).get("data1")
+    data2_letter = (drive_letters or {}).get("data2")
 
     lines = [
         '$ErrorActionPreference = "Stop"',
@@ -54,14 +65,33 @@ def build_partition_disk_script(disk_numbers: list[int], efi_size_mb: int | floa
                 "if ($disk.PartitionStyle -ne 'GPT') {",
                 f'    throw "硬盘分区表格式不是 GPT，无法继续分区: {disk_number}"',
                 "}",
+            ]
+        )
+
+        if efi_letter or windows_letter or data1_letter or data2_letter:
+            assigned = [l for l in [efi_letter, windows_letter, data1_letter, data2_letter] if l]
+            lines.extend(
+                [
+                    f"$assignedLetters = @({', '.join(repr(l) for l in assigned)})",
+                    "foreach ($letter in $assignedLetters) {",
+                    "    $existingVolume = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue",
+                    "    if ($existingVolume) {",
+                    f"        throw \"盘符 $letter 已被占用，无法继续分区: {disk_number}\"",
+                    "    }",
+                    "}",
+                ]
+            )
+
+        lines.extend(
+            [
                 f"$disk = Wait-DiskReady -DiskNumber {disk_number} -RequiredBytes $efiSize -StepName '创建 EFI 分区'",
                 "$newEfiSize = $efiSize",
-                f"$efiPartition = New-Partition -DiskNumber {disk_number} -Size $newEfiSize -GptType '{{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}}'",
+                f"$efiPartition = New-Partition -DiskNumber {disk_number} -Size $newEfiSize -GptType '{{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}}'{" -DriveLetter '" + efi_letter + "'" if efi_letter else ""}",
                 "Start-Sleep -Seconds 1",
                 "$efiVolume = $efiPartition | Format-Volume -FileSystem FAT32 -NewFileSystemLabel 'EFI' -Confirm:$false",
                 "Start-Sleep -Seconds 1",
                 f"$disk = Wait-DiskReady -DiskNumber {disk_number} -RequiredBytes $cSize -StepName '创建 Windows 分区'",
-                f"$cPartition = New-Partition -DiskNumber {disk_number} -Size $cSize -AssignDriveLetter",
+                f"$cPartition = New-Partition -DiskNumber {disk_number} -Size $cSize{" -DriveLetter '" + windows_letter + "'" if windows_letter else " -AssignDriveLetter"}",
                 "Start-Sleep -Seconds 1",
                 "$cVolume = $cPartition | Format-Volume -FileSystem NTFS -NewFileSystemLabel 'Windows' -Confirm:$false",
                 "Start-Sleep -Seconds 1",
@@ -71,12 +101,12 @@ def build_partition_disk_script(disk_numbers: list[int], efi_size_mb: int | floa
                 "if ($halfSize -lt 1MB) {",
                 f"    throw \"目标硬盘剩余空间不足，无法创建 Data1 分区: {disk_number}\"",
                 "}",
-                f"$d1Partition = New-Partition -DiskNumber {disk_number} -Size $halfSize -AssignDriveLetter",
+                f"$d1Partition = New-Partition -DiskNumber {disk_number} -Size $halfSize{" -DriveLetter '" + data1_letter + "'" if data1_letter else " -AssignDriveLetter"}",
                 "Start-Sleep -Seconds 1",
                 "$d1Volume = $d1Partition | Format-Volume -FileSystem NTFS -NewFileSystemLabel 'Data1' -Confirm:$false",
                 "Start-Sleep -Seconds 1",
                 f"$disk = Wait-DiskReady -DiskNumber {disk_number} -RequiredBytes 1 -StepName '创建 Data2 分区'",
-                f"$d2Partition = New-Partition -DiskNumber {disk_number} -UseMaximumSize -AssignDriveLetter",
+                f"$d2Partition = New-Partition -DiskNumber {disk_number} -UseMaximumSize{" -DriveLetter '" + data2_letter + "'" if data2_letter else " -AssignDriveLetter"}",
                 "Start-Sleep -Seconds 1",
                 "$d2Volume = $d2Partition | Format-Volume -FileSystem NTFS -NewFileSystemLabel 'Data2' -Confirm:$false",
                 "$results += [PSCustomObject]@{",
@@ -105,25 +135,6 @@ def build_partition_disk_script(disk_numbers: list[int], efi_size_mb: int | floa
 
 
 
-def run_powershell(script: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [
-            "powershell",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + script,
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-
-
-
 def parse_partitioned_disks(stdout: str) -> list[dict[str, Any]]:
     text = stdout.strip()
     if not text:
@@ -139,7 +150,7 @@ def parse_partitioned_disks(stdout: str) -> list[dict[str, Any]]:
 
 
 
-def build_success_results(partitioned_disks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_success_results(partitioned_disks: list[dict[str, Any]], drive_letters: dict[str, str] | None = None) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for disk in partitioned_disks:
         disk_number = disk.get("disk_number")
@@ -148,6 +159,13 @@ def build_success_results(partitioned_disks: list[dict[str, Any]]) -> list[dict[
         d1_ok = disk.get("d1_file_system") == "NTFS" and bool(disk.get("d1_drive_letter"))
         d2_ok = disk.get("d2_file_system") == "NTFS" and bool(disk.get("d2_drive_letter"))
         passed = efi_ok and c_ok and d1_ok and d2_ok
+        if passed and drive_letters:
+            if drive_letters.get("windows") and str(disk.get("c_drive_letter") or "").upper() != drive_letters["windows"].upper():
+                passed = False
+            if drive_letters.get("data1") and str(disk.get("d1_drive_letter") or "").upper() != drive_letters["data1"].upper():
+                passed = False
+            if drive_letters.get("data2") and str(disk.get("d2_drive_letter") or "").upper() != drive_letters["data2"].upper():
+                passed = False
         message = "硬盘分区和格式化完成" if passed else "硬盘分区或格式化结果异常"
         results.append(
             {
@@ -165,11 +183,12 @@ def partition_and_format_disks(
     disk_numbers: list[int],
     partition_info: dict[str, Any],
     powershell_runner: PowershellRunner | None = None,
+    drive_letters: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     efi_size_mb = partition_info.get("efi_size_mb")
     c_size_gb = partition_info.get("c_size_gb")
-    script = build_partition_disk_script(disk_numbers, efi_size_mb, c_size_gb)
-    runner = powershell_runner or run_powershell
+    script = build_partition_disk_script(disk_numbers, efi_size_mb, c_size_gb, drive_letters=drive_letters)
+    runner = powershell_runner or _run_powershell
     completed = runner(script)
 
     if completed.returncode != 0:
@@ -197,7 +216,7 @@ def partition_and_format_disks(
             for disk_number in disk_numbers
         ]
 
-    return build_success_results(partitioned_disks)
+    return build_success_results(partitioned_disks, drive_letters=drive_letters)
 
 
 

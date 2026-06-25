@@ -22,6 +22,11 @@ PreflightRunner = Callable[[str | Path | None], dict[str, Any]]
 WorkerLauncher = Callable[[list[dict[str, Any]], str | None], None]
 Sleeper = Callable[[float], None]
 
+AVAILABLE_DRIVE_LETTERS = [
+    "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+    "A", "B",
+]
+
 
 
 def parse_command_line_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -32,6 +37,7 @@ def parse_command_line_args(argv: list[str] | None = None) -> argparse.Namespace
     parser.add_argument("--worker-serial-number", dest="worker_serial_number", help="worker 模式：目标硬盘 SerialNumber，用于二次确认硬盘身份")
     parser.add_argument("--worker-model", dest="worker_model", help="worker 模式：目标硬盘型号，用于二次确认硬盘身份")
     parser.add_argument("--worker-size-bytes", dest="worker_size_bytes", type=int, help="worker 模式：目标硬盘容量字节数，用于二次确认硬盘身份")
+    parser.add_argument("--worker-drive-letters", dest="worker_drive_letters", help="worker 模式：分配的盘符列表（逗号分隔，如 E,F,G,H），分别对应 EFI、Windows、Data1、Data2")
     return parser.parse_args(argv)
 
 
@@ -107,6 +113,40 @@ def validate_worker_disk_identity(disk: dict[str, Any], expected_identity: dict[
 
 
 
+def build_drive_letter_allocations(disk_numbers: list[int]) -> dict[int, dict[str, str]]:
+    allocations: dict[int, dict[str, str]] = {}
+    index = 0
+    for disk_number in disk_numbers:
+        if index + 4 > len(AVAILABLE_DRIVE_LETTERS):
+            raise RuntimeError(f"可用盘符不足，无法为硬盘 {disk_number} 分配 4 个盘符")
+        letters = AVAILABLE_DRIVE_LETTERS[index:index + 4]
+        allocations[disk_number] = {
+            "efi": letters[0],
+            "windows": letters[1],
+            "data1": letters[2],
+            "data2": letters[3],
+        }
+        index += 4
+    return allocations
+
+
+
+def parse_worker_drive_letters(text: str) -> dict[str, str]:
+    letters = [part.strip().upper() for part in text.split(",")]
+    if len(letters) != 4:
+        raise ValueError(f"盘符参数必须为 4 个字母（EFI,Windows,Data1,Data2），实际为: {text}")
+    for letter in letters:
+        if len(letter) != 1 or not letter.isalpha():
+            raise ValueError(f"盘符必须为单个字母: {letter}")
+    return {
+        "efi": letters[0],
+        "windows": letters[1],
+        "data1": letters[2],
+        "data2": letters[3],
+    }
+
+
+
 def build_failed_result_message(results: list[dict[str, Any]]) -> str:
     messages: list[str] = []
     for result in results:
@@ -144,6 +184,7 @@ def run_single_disk_flow(
     disk_number: int,
     config_payload: dict[str, Any],
     expected_identity: dict[str, Any] | None = None,
+    drive_letters: dict[str, str] | None = None,
 ) -> None:
     excluded_disk_names = config_payload.get("excluded_disk_names") or []
     disk_summaries = apply_disk_protection(scan_disk_summaries(), excluded_disk_names)
@@ -167,12 +208,12 @@ def run_single_disk_flow(
     if not all(result.get("passed") for result in validation_results):
         raise RuntimeError(f"初始化结果验证失败: {build_failed_result_message(validation_results)}")
 
-    partition_results = partition_and_format_disks([disk_number], config_payload.get("partition_info") or {})
+    partition_results = partition_and_format_disks([disk_number], config_payload.get("partition_info") or {}, drive_letters=drive_letters)
     print_partition_results(partition_results)
     if not all(result.get("passed") for result in partition_results):
         raise RuntimeError(f"硬盘分区和格式化失败: {build_failed_result_message(partition_results)}")
 
-    partition_validation_results = validate_partitioned_disks([disk_number], config_payload.get("partition_info") or {})
+    partition_validation_results = validate_partitioned_disks([disk_number], config_payload.get("partition_info") or {}, drive_letters=drive_letters)
     print_partition_validation_results(partition_validation_results)
     if not all(result.get("passed") for result in partition_validation_results):
         raise RuntimeError(f"分区和格式化结果验证失败: {build_failed_result_message(partition_validation_results)}")
@@ -218,6 +259,9 @@ def launch_worker_windows(
             command_parts.extend(["--worker-model", str(disk_identity.get("model"))])
         if isinstance(disk_identity.get("size_bytes"), int):
             command_parts.extend(["--worker-size-bytes", str(disk_identity.get("size_bytes"))])
+        if disk_identity.get("drive_letters"):
+            dl = disk_identity["drive_letters"]
+            command_parts.extend(["--worker-drive-letters", f"{dl['efi']},{dl['windows']},{dl['data1']},{dl['data2']}"])
 
         quoted_command = (
             "$env:PYTHONUTF8 = '1'; "
@@ -262,7 +306,7 @@ def run_minimal_main_flow(
         raise RuntimeError("模块1未返回任何硬盘摘要信息")
 
     print("=" * 80)
-    print("Sisp 当前演示入口")
+    print("Sisp")
     print("=" * 80)
     print(f"配置文件: {config_payload.get('config_path')}")
     print_disk_summaries(disk_summaries)
@@ -270,11 +314,16 @@ def run_minimal_main_flow(
     if len(selected_disk_numbers) > 1:
         launcher = worker_launcher or launch_worker_windows
         print("已选择多个硬盘，将为每个硬盘启动独立执行窗口")
-        launcher(build_worker_disk_identities(disk_summaries, selected_disk_numbers), get_config_path_for_worker(config_payload))
+        allocations = build_drive_letter_allocations(selected_disk_numbers)
+        identities = build_worker_disk_identities(disk_summaries, selected_disk_numbers)
+        for identity in identities:
+            identity["drive_letters"] = allocations.get(identity["disk_number"])
+        launcher(identities, get_config_path_for_worker(config_payload))
         return selected_disk_numbers
 
     if selected_disk_numbers:
-        run_single_disk_flow(selected_disk_numbers[0], config_payload)
+        allocations = build_drive_letter_allocations(selected_disk_numbers)
+        run_single_disk_flow(selected_disk_numbers[0], config_payload, drive_letters=allocations.get(selected_disk_numbers[0]))
 
     return selected_disk_numbers
 
@@ -285,6 +334,7 @@ def run_worker_flow(
     preflight_runner: PreflightRunner | None = None,
     config_path: str | Path | None = None,
     expected_identity: dict[str, Any] | None = None,
+    drive_letters: dict[str, str] | None = None,
 ) -> None:
     runner = preflight_runner or run_preflight_checks
     preflight_report = runner(config_path)
@@ -300,7 +350,7 @@ def run_worker_flow(
     print(f"Sisp Worker 硬盘 {disk_number}")
     print("=" * 80)
     print(f"配置文件: {config_payload.get('config_path')}")
-    run_single_disk_flow(disk_number, config_payload, expected_identity)
+    run_single_disk_flow(disk_number, config_payload, expected_identity, drive_letters=drive_letters)
 
 
 
@@ -314,7 +364,8 @@ def main(argv: list[str] | None = None) -> int:
                 "model": args.worker_model,
                 "size_bytes": args.worker_size_bytes,
             }
-            run_worker_flow(args.worker_disk, config_path=args.config_path, expected_identity=expected_identity)
+            drive_letters = parse_worker_drive_letters(args.worker_drive_letters) if args.worker_drive_letters else None
+            run_worker_flow(args.worker_disk, config_path=args.config_path, expected_identity=expected_identity, drive_letters=drive_letters)
         else:
             run_minimal_main_flow(config_path=args.config_path)
         return 0

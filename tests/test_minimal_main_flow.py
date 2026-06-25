@@ -8,7 +8,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import app.main as main_module
-from app.main import parse_command_line_args, run_minimal_main_flow
+from app.main import parse_command_line_args, run_minimal_main_flow, build_drive_letter_allocations, parse_worker_drive_letters
 
 SAMPLE_DISK_SUMMARIES = [
     {
@@ -103,6 +103,59 @@ def validate_selected_disk_numbers(selected_disk_numbers: list[int]) -> None:
 
 
 
+def test_build_drive_letter_allocations() -> None:
+    single = build_drive_letter_allocations([2])
+    if single != {2: {"efi": "E", "windows": "F", "data1": "G", "data2": "H"}}:
+        raise AssertionError(f"单盘盘符分配不正确: {single}")
+
+    multi = build_drive_letter_allocations([2, 3])
+    if multi != {
+        2: {"efi": "E", "windows": "F", "data1": "G", "data2": "H"},
+        3: {"efi": "I", "windows": "J", "data1": "K", "data2": "L"},
+    }:
+        raise AssertionError(f"多盘盘符分配不正确: {multi}")
+
+    triple = build_drive_letter_allocations([2, 3, 4])
+    if triple[4] != {"efi": "M", "windows": "N", "data1": "O", "data2": "P"}:
+        raise AssertionError(f"三盘第三块盘符分配不正确: {triple}")
+
+
+
+def test_build_drive_letter_allocations_overflow() -> None:
+    many_disks = list(range(2, 26))
+    try:
+        build_drive_letter_allocations(many_disks)
+    except RuntimeError as exc:
+        if "可用盘符不足" not in str(exc):
+            raise AssertionError(f"盘符不足错误信息不正确: {exc}") from exc
+    else:
+        raise AssertionError("盘符不足时应报错")
+
+
+
+def test_parse_worker_drive_letters() -> None:
+    result = parse_worker_drive_letters("E,F,G,H")
+    if result != {"efi": "E", "windows": "F", "data1": "G", "data2": "H"}:
+        raise AssertionError(f"盘符解析不正确: {result}")
+
+    try:
+        parse_worker_drive_letters("E,F,G")
+    except ValueError as exc:
+        if "4 个字母" not in str(exc):
+            raise AssertionError(f"盘符数量错误信息不正确: {exc}") from exc
+    else:
+        raise AssertionError("3 个盘符时应报错")
+
+    try:
+        parse_worker_drive_letters("E1,F,G,H")
+    except ValueError as exc:
+        if "单个字母" not in str(exc):
+            raise AssertionError(f"盘符格式错误信息不正确: {exc}") from exc
+    else:
+        raise AssertionError("非字母盘符时应报错")
+
+
+
 def test_parse_command_line_args() -> None:
     args = parse_command_line_args(["-j", "D:\\temp\\demo.json"])
     if args.config_path != "D:\\temp\\demo.json":
@@ -123,6 +176,8 @@ def test_parse_command_line_args() -> None:
         "Second Target Disk",
         "--worker-size-bytes",
         "14398909440",
+        "--worker-drive-letters",
+        "E,F,G,H",
         "-j",
         "D:\\temp\\demo.json",
     ])
@@ -136,6 +191,8 @@ def test_parse_command_line_args() -> None:
         raise AssertionError(f"worker 型号参数解析结果不正确: {worker_args.worker_model}")
     if worker_args.worker_size_bytes != 14398909440:
         raise AssertionError(f"worker 容量参数解析结果不正确: {worker_args.worker_size_bytes}")
+    if worker_args.worker_drive_letters != "E,F,G,H":
+        raise AssertionError(f"worker 盘符参数解析结果不正确: {worker_args.worker_drive_letters}")
     if worker_args.config_path != "D:\\temp\\demo.json":
         raise AssertionError(f"worker 模式 -j 参数解析结果不正确: {worker_args.config_path}")
 
@@ -164,11 +221,11 @@ def test_successful_main_flow() -> None:
         }
         for number in disk_numbers
     ]
-    main_module.partition_and_format_disks = lambda disk_numbers, partition_info: [
+    main_module.partition_and_format_disks = lambda disk_numbers, partition_info, drive_letters=None: [
         {"disk_number": number, "passed": True, "message": "硬盘分区和格式化完成", "partitions": {"c_drive_letter": "F"}}
         for number in disk_numbers
     ]
-    main_module.validate_partitioned_disks = lambda disk_numbers, partition_info: [
+    main_module.validate_partitioned_disks = lambda disk_numbers, partition_info, disk_scanner=None, drive_letters=None: [
         {"disk_number": number, "passed": True, "message": "分区和格式化结果验证通过"}
         for number in disk_numbers
     ]
@@ -189,8 +246,8 @@ def test_successful_main_flow() -> None:
     output = captured.getvalue()
     if "管理员权限检查" in output or "PowerShell 可用性检查" in output or "配置文件存在性检查" in output or "配置文件可解析性检查" in output:
         raise AssertionError("运行前检查全部通过时不应输出检查通过信息")
-    if "Sisp 当前演示入口" not in output:
-        raise AssertionError("主流程成功时未继续进入正式演示入口")
+    if "Sisp" not in output:
+        raise AssertionError("主流程成功时未继续进入正式入口")
     if "当前主程序持有的关键数据:" in output:
         raise AssertionError("用户完成硬盘选择后不应继续输出演示性关键数据")
     if "演示运行完成" in output or "演示运行结束" in output:
@@ -238,11 +295,11 @@ def test_successful_main_flow_with_custom_json_path() -> None:
         }
         for number in disk_numbers
     ]
-    main_module.partition_and_format_disks = lambda disk_numbers, partition_info: [
+    main_module.partition_and_format_disks = lambda disk_numbers, partition_info, drive_letters=None: [
         {"disk_number": number, "passed": True, "message": "硬盘分区和格式化完成", "partitions": {"c_drive_letter": "F"}}
         for number in disk_numbers
     ]
-    main_module.validate_partitioned_disks = lambda disk_numbers, partition_info: [
+    main_module.validate_partitioned_disks = lambda disk_numbers, partition_info, disk_scanner=None, drive_letters=None: [
         {"disk_number": number, "passed": True, "message": "分区和格式化结果验证通过"}
         for number in disk_numbers
     ]
@@ -279,7 +336,7 @@ def test_multi_disk_main_flow_launches_worker_windows() -> None:
     def fake_launcher(disk_identities: list[dict], config_path: str | None) -> None:
         launched.append((disk_identities, config_path))
 
-    main_module.run_single_disk_flow = lambda disk_number, config_payload: current_process_calls.append(disk_number)
+    main_module.run_single_disk_flow = lambda disk_number, config_payload, expected_identity=None, drive_letters=None: current_process_calls.append(disk_number)
 
     captured = io.StringIO()
     try:
@@ -302,6 +359,7 @@ def test_multi_disk_main_flow_launches_worker_windows() -> None:
             "serial_number": "SN-TARGET-1",
             "model": "Target Disk",
             "size_bytes": 512040894464,
+            "drive_letters": {"efi": "E", "windows": "F", "data1": "G", "data2": "H"},
         },
         {
             "disk_number": 2,
@@ -309,6 +367,7 @@ def test_multi_disk_main_flow_launches_worker_windows() -> None:
             "serial_number": "SN-TARGET-2",
             "model": "Second Target Disk",
             "size_bytes": 14398909440,
+            "drive_letters": {"efi": "I", "windows": "J", "data1": "K", "data2": "L"},
         },
     ]
     if launched != [(expected_identities, "D:\\Code-Project\\Sisp2\\json\\win11.json")]:
@@ -325,7 +384,7 @@ def test_multi_disk_main_flow_launches_worker_windows() -> None:
 def test_worker_flow_runs_single_disk_flow() -> None:
     received: list[tuple[int, dict, dict | None]] = []
     original_run_single_disk_flow = main_module.run_single_disk_flow
-    main_module.run_single_disk_flow = lambda disk_number, config_payload, expected_identity=None: received.append((disk_number, config_payload, expected_identity))
+    main_module.run_single_disk_flow = lambda disk_number, config_payload, expected_identity=None, drive_letters=None: received.append((disk_number, config_payload, expected_identity))
 
     captured = io.StringIO()
     try:
@@ -398,8 +457,8 @@ def test_launch_worker_windows_uses_powershell() -> None:
         with redirect_stdout(captured):
             main_module.launch_worker_windows(
                 [
-                    {"disk_number": 2, "unique_id": "UID-2", "serial_number": "SN-2", "model": "Disk 2", "size_bytes": 2000},
-                    {"disk_number": 3, "unique_id": "UID-3", "serial_number": "SN-3", "model": "Disk 3", "size_bytes": 3000},
+                    {"disk_number": 2, "unique_id": "UID-2", "serial_number": "SN-2", "model": "Disk 2", "size_bytes": 2000, "drive_letters": {"efi": "E", "windows": "F", "data1": "G", "data2": "H"}},
+                    {"disk_number": 3, "unique_id": "UID-3", "serial_number": "SN-3", "model": "Disk 3", "size_bytes": 3000, "drive_letters": {"efi": "I", "windows": "J", "data1": "K", "data2": "L"}},
                 ],
                 "D:\\json\\custom.json",
                 sleep_func=sleep_calls.append,
@@ -431,6 +490,8 @@ def test_launch_worker_windows_uses_powershell() -> None:
         raise AssertionError(f"worker 命令未包含硬盘型号: {launched}")
     if "--worker-size-bytes" not in launched[0][0][-1] or "2000" not in launched[0][0][-1]:
         raise AssertionError(f"worker 命令未包含硬盘容量: {launched}")
+    if "--worker-drive-letters" not in launched[0][0][-1] or "E,F,G,H" not in launched[0][0][-1]:
+        raise AssertionError(f"worker 命令未包含盘符: {launched}")
     if sleep_calls != [3.0]:
         raise AssertionError(f"worker 启动间隔不正确: {sleep_calls}")
 
@@ -443,11 +504,11 @@ def test_launch_worker_windows_uses_powershell() -> None:
 
 
 def test_main_uses_worker_disk_argument() -> None:
-    received: list[tuple[int, str | Path | None, dict]] = []
+    received: list[tuple[int, str | Path | None, dict, dict | None]] = []
     original_runner = main_module.run_worker_flow
 
-    def fake_run_worker_flow(disk_number: int, preflight_runner=None, config_path: str | Path | None = None, expected_identity=None) -> None:
-        received.append((disk_number, config_path, expected_identity))
+    def fake_run_worker_flow(disk_number: int, preflight_runner=None, config_path: str | Path | None = None, expected_identity=None, drive_letters=None) -> None:
+        received.append((disk_number, config_path, expected_identity, drive_letters))
 
     main_module.run_worker_flow = fake_run_worker_flow
     try:
@@ -462,6 +523,8 @@ def test_main_uses_worker_disk_argument() -> None:
             "Second Target Disk",
             "--worker-size-bytes",
             "14398909440",
+            "--worker-drive-letters",
+            "E,F,G,H",
             "-j",
             "D:\\json\\custom.json",
         ])
@@ -479,6 +542,7 @@ def test_main_uses_worker_disk_argument() -> None:
             "model": "Second Target Disk",
             "size_bytes": 14398909440,
         },
+        {"efi": "E", "windows": "F", "data1": "G", "data2": "H"},
     )]:
         raise AssertionError(f"main 未正确调用 worker 模式: {received}")
 
@@ -605,7 +669,7 @@ def test_main_flow_stops_when_partition_fails() -> None:
         }
         for number in disk_numbers
     ]
-    main_module.partition_and_format_disks = lambda disk_numbers, partition_info: [
+    main_module.partition_and_format_disks = lambda disk_numbers, partition_info, drive_letters=None: [
         {"disk_number": number, "passed": False, "message": "分区失败", "partitions": None}
         for number in disk_numbers
     ]
@@ -655,11 +719,11 @@ def test_main_flow_stops_when_partition_validation_fails() -> None:
         }
         for number in disk_numbers
     ]
-    main_module.partition_and_format_disks = lambda disk_numbers, partition_info: [
+    main_module.partition_and_format_disks = lambda disk_numbers, partition_info, drive_letters=None: [
         {"disk_number": number, "passed": True, "message": "硬盘分区和格式化完成", "partitions": {"c_drive_letter": "F"}}
         for number in disk_numbers
     ]
-    main_module.validate_partitioned_disks = lambda disk_numbers, partition_info: [
+    main_module.validate_partitioned_disks = lambda disk_numbers, partition_info, disk_scanner=None, drive_letters=None: [
         {"disk_number": number, "passed": False, "message": "分区验证失败", "partitions": None}
         for number in disk_numbers
     ]
@@ -705,8 +769,8 @@ def test_failed_preflight_main_flow() -> None:
     output = captured.getvalue()
     if "管理员权限检查：当前程序未以管理员权限运行，请重新以管理员身份启动" not in output:
         raise AssertionError("运行前检查失败时未输出失败项错误信息")
-    if "Sisp 当前演示入口" in output:
-        raise AssertionError("运行前检查失败后主流程不应继续进入正式演示入口")
+    if "Sisp\n========" in output:
+        raise AssertionError("运行前检查失败后主流程不应继续进入正式入口")
     if "当前主程序持有的关键数据:" in output:
         raise AssertionError("运行前检查失败后不应输出主流程关键数据")
 
@@ -717,6 +781,9 @@ def test_failed_preflight_main_flow() -> None:
 
 def main() -> int:
     try:
+        test_build_drive_letter_allocations()
+        test_build_drive_letter_allocations_overflow()
+        test_parse_worker_drive_letters()
         test_parse_command_line_args()
         test_successful_main_flow()
         test_successful_main_flow_with_custom_json_path()

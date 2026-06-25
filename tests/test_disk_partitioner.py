@@ -42,6 +42,22 @@ def test_build_partition_disk_script() -> None:
 
 
 
+def test_build_partition_disk_script_with_drive_letters() -> None:
+    script = build_partition_disk_script([2], 100, 6, drive_letters={"efi": "E", "windows": "F", "data1": "G", "data2": "H"})
+
+    assert_contains(script, "$assignedLetters = @('E', 'F', 'G', 'H')")
+    assert_contains(script, "Get-Volume -DriveLetter $letter")
+    assert_contains(script, "-DriveLetter 'E'")
+    assert_contains(script, "-DriveLetter 'F'")
+    assert_contains(script, "-DriveLetter 'G'")
+    assert_contains(script, "-DriveLetter 'H'")
+    assert_contains(script, "New-Partition -DiskNumber 2 -Size $newEfiSize")
+    assert_contains(script, "New-Partition -DiskNumber 2 -Size $cSize")
+    assert_contains(script, "New-Partition -DiskNumber 2 -Size $halfSize")
+    assert_contains(script, "New-Partition -DiskNumber 2 -UseMaximumSize")
+
+
+
 def test_build_partition_disk_script_rejects_invalid_inputs() -> None:
     cases = [
         ([], 100, 6, "不能为空"),
@@ -99,7 +115,7 @@ def test_partition_and_format_disks_success() -> None:
             stderr="",
         )
 
-    results = partition_and_format_disks([2], {"efi_size_mb": 100, "c_size_gb": 6}, powershell_runner=fake_runner)
+    results = partition_and_format_disks([2], {"efi_size_mb": 100, "c_size_gb": 6}, powershell_runner=fake_runner, drive_letters={"efi": "E", "windows": "F", "data1": "G", "data2": "H"})
     if not captured_scripts:
         raise AssertionError("partition_and_format_disks 未执行注入的 PowerShell runner")
     if not results[0].get("passed"):
@@ -165,15 +181,44 @@ def test_partition_and_format_disks_abnormal_result() -> None:
 
 
 
+def test_partition_and_format_disks_drive_letter_mismatch() -> None:
+    def fake_runner(script: str) -> CompletedProcess[str]:
+        return CompletedProcess(
+            args=["powershell"],
+            returncode=0,
+            stdout=json.dumps({
+                "disk_number": 2,
+                "efi_file_system": "FAT32",
+                "c_drive_letter": "X",
+                "c_file_system": "NTFS",
+                "d1_drive_letter": "G",
+                "d1_file_system": "NTFS",
+                "d2_drive_letter": "H",
+                "d2_file_system": "NTFS",
+            }),
+            stderr="",
+        )
+
+    results = partition_and_format_disks(
+        [2], {"efi_size_mb": 100, "c_size_gb": 6}, powershell_runner=fake_runner,
+        drive_letters={"efi": "E", "windows": "F", "data1": "G", "data2": "H"},
+    )
+    if results[0].get("passed"):
+        raise AssertionError(f"盘符不匹配时不应通过: {results}")
+
+
+
 def main() -> int:
     try:
         test_build_partition_disk_script()
+        test_build_partition_disk_script_with_drive_letters()
         test_build_partition_disk_script_rejects_invalid_inputs()
         test_parse_partitioned_disks()
         test_partition_and_format_disks_success()
         test_partition_and_format_disks_failure()
         test_partition_and_format_disks_parse_failure()
         test_partition_and_format_disks_abnormal_result()
+        test_partition_and_format_disks_drive_letter_mismatch()
         print("模块5分区格式化测试结果: 通过")
         return 0
     except Exception as exc:

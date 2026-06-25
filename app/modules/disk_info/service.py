@@ -1,7 +1,8 @@
 import json
 import math
-import subprocess
 from typing import Any
+
+from app.modules.common.service import run_powershell
 
 
 POWERSHELL_SCRIPT = r"""
@@ -101,31 +102,17 @@ def format_size(size_bytes: Any) -> str:
 
 
 def run_powershell_json(script: str) -> list[dict[str, Any]]:
-    completed = subprocess.run(
-        [
-            "powershell",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + script,
-        ],
-        capture_output=True,
-        text=False,
-    )
-
-    stdout = completed.stdout.decode("utf-8", errors="replace")
-    stderr = completed.stderr.decode("utf-8", errors="replace")
+    completed = run_powershell(script)
 
     if completed.returncode != 0:
         raise RuntimeError(
             "PowerShell 执行失败\n"
             f"退出码: {completed.returncode}\n"
-            f"标准输出:\n{stdout}\n"
-            f"标准错误:\n{stderr}"
+            f"标准输出:\n{completed.stdout}\n"
+            f"标准错误:\n{completed.stderr}"
         )
 
-    stdout = stdout.strip()
+    stdout = (completed.stdout or "").strip()
     if not stdout:
         raise RuntimeError("PowerShell 没有返回任何内容")
 

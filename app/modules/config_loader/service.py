@@ -55,8 +55,6 @@ def validate_string_list(config: dict[str, Any], key: str) -> None:
     value = config.get(key)
     if not isinstance(value, list):
         raise ValueError(f"配置字段 {key} 必须为列表")
-    if not value:
-        raise ValueError(f"配置字段 {key} 不能为空列表")
 
     invalid_items = [item for item in value if not isinstance(item, str) or not item.strip()]
     if invalid_items:

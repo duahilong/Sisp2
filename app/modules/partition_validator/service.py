@@ -34,7 +34,10 @@ def find_efi_partition(partitions: list[dict[str, Any]]) -> dict[str, Any] | Non
 def find_windows_partition(partitions: list[dict[str, Any]]) -> dict[str, Any] | None:
     for partition in partitions:
         volume = partition.get("volume") or {}
-        if partition.get("type") == "Basic" and volume.get("file_system") == "NTFS" and partition.get("drive_letter"):
+        if (partition.get("type") == "Basic"
+                and volume.get("file_system") == "NTFS"
+                and partition.get("drive_letter")
+                and volume.get("file_system_label") == "Windows"):
             return partition
     return None
 
@@ -49,7 +52,7 @@ def find_data_partition(partitions: list[dict[str, Any]], label: str) -> dict[st
 
 
 
-def validate_data_partition(partitions: list[dict[str, Any]], disk_number: Any, label: str) -> dict[str, Any] | None:
+def validate_data_partition(partitions: list[dict[str, Any]], disk_number: Any, label: str, expected_drive_letter: str | None = None) -> dict[str, Any] | None:
     partition = find_data_partition(partitions, label)
     if not partition:
         return {"disk_number": disk_number, "passed": False, "message": f"分区验证失败: 未检测到 {label} 分区"}
@@ -57,14 +60,17 @@ def validate_data_partition(partitions: list[dict[str, Any]], disk_number: Any, 
     volume = partition.get("volume") or {}
     if volume.get("file_system") != "NTFS":
         return {"disk_number": disk_number, "passed": False, "message": f"分区验证失败: {label} 分区文件系统不是 NTFS"}
-    if not partition.get("drive_letter"):
+    actual_letter = str(partition.get("drive_letter") or "").upper()
+    if not actual_letter:
         return {"disk_number": disk_number, "passed": False, "message": f"分区验证失败: {label} 分区未分配盘符"}
+    if expected_drive_letter and actual_letter != expected_drive_letter.upper():
+        return {"disk_number": disk_number, "passed": False, "message": f"分区验证失败: {label} 分区盘符不正确，期望 {expected_drive_letter}，实际 {actual_letter}"}
 
     return None
 
 
 
-def validate_partitioned_disk(disk: dict[str, Any], partition_info: dict[str, Any]) -> dict[str, Any]:
+def validate_partitioned_disk(disk: dict[str, Any], partition_info: dict[str, Any], drive_letters: dict[str, str] | None = None) -> dict[str, Any]:
     disk_number = disk.get("disk_number")
 
     if disk.get("partition_style") != "GPT":
@@ -88,6 +94,11 @@ def validate_partitioned_disk(disk: dict[str, Any], partition_info: dict[str, An
     expected_efi_size = int(efi_size_mb * 1024 * 1024)
     if not is_size_close(efi_partition.get("size_bytes"), expected_efi_size):
         return {"disk_number": disk_number, "passed": False, "message": "分区验证失败: EFI 分区大小不符合配置"}
+    expected_efi_letter = (drive_letters or {}).get("efi")
+    if expected_efi_letter:
+        actual_efi_letter = str(efi_partition.get("drive_letter") or "").upper()
+        if actual_efi_letter != expected_efi_letter.upper():
+            return {"disk_number": disk_number, "passed": False, "message": f"分区验证失败: EFI 分区盘符不正确，期望 {expected_efi_letter}，实际 {actual_efi_letter}"}
 
     windows_partition = find_windows_partition(partitions)
     if not windows_partition:
@@ -105,9 +116,18 @@ def validate_partitioned_disk(disk: dict[str, Any], partition_info: dict[str, An
         return {"disk_number": disk_number, "passed": False, "message": "分区验证失败: Windows 分区文件系统不是 NTFS"}
     if volume.get("file_system_label") != "Windows":
         return {"disk_number": disk_number, "passed": False, "message": "分区验证失败: Windows 分区卷标不正确"}
+    expected_windows_letter = (drive_letters or {}).get("windows")
+    if expected_windows_letter:
+        actual_windows_letter = str(windows_partition.get("drive_letter") or "").upper()
+        if actual_windows_letter != expected_windows_letter.upper():
+            return {"disk_number": disk_number, "passed": False, "message": f"分区验证失败: Windows 分区盘符不正确，期望 {expected_windows_letter}，实际 {actual_windows_letter}"}
 
-    for label in ["Data1", "Data2"]:
-        failed_result = validate_data_partition(partitions, disk_number, label)
+    data_drive_letters = {
+        "Data1": (drive_letters or {}).get("data1"),
+        "Data2": (drive_letters or {}).get("data2"),
+    }
+    for label, expected_letter in data_drive_letters.items():
+        failed_result = validate_data_partition(partitions, disk_number, label, expected_drive_letter=expected_letter)
         if failed_result:
             return failed_result
 
@@ -119,6 +139,7 @@ def validate_partitioned_disks(
     disk_numbers: list[int],
     partition_info: dict[str, Any],
     disk_scanner: DiskScanner | None = None,
+    drive_letters: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     if not disk_numbers:
         raise ValueError("分区验证硬盘编号不能为空")
@@ -132,7 +153,7 @@ def validate_partitioned_disks(
         if not disk:
             results.append({"disk_number": disk_number, "passed": False, "message": "分区验证失败: 未找到目标硬盘"})
             continue
-        results.append(validate_partitioned_disk(disk, partition_info))
+        results.append(validate_partitioned_disk(disk, partition_info, drive_letters=drive_letters))
 
     return results
 

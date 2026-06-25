@@ -81,8 +81,8 @@ def validate_payload(payload: dict) -> None:
     if excluded_disk_names != config.get("excluded_disk_names"):
         raise AssertionError("excluded_disk_names 与原始配置不一致")
 
-    if not isinstance(excluded_disk_names, list) or not excluded_disk_names:
-        raise AssertionError("excluded_disk_names 必须为非空列表")
+    if not isinstance(excluded_disk_names, list):
+        raise AssertionError("excluded_disk_names 必须为列表")
 
     for item in excluded_disk_names:
         if not isinstance(item, str) or not item.strip():
@@ -154,20 +154,6 @@ def run_negative_tests() -> None:
             "excluded_disk_names": ["Disk A"],
         },
         "配置字段 efi_size 必须大于 0",
-    )
-
-    expect_load_config_failure(
-        {
-            "description": "Windows 11 配置",
-            "win_gho": "D:/img/system.gho",
-            "efi_size": 100,
-            "c_size": 1536,
-            "software_file": "D:/软件",
-            "gho_exe": "D:/sw/ghost64.exe",
-            "bcd_exe": "D:/sw/bcdboot.exe",
-            "excluded_disk_names": [],
-        },
-        "配置字段 excluded_disk_names 不能为空列表",
     )
 
     expect_load_config_failure(

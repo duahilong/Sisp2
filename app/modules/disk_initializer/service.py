@@ -2,6 +2,8 @@ import json
 import subprocess
 from typing import Any, Callable
 
+from app.modules.common.service import run_powershell as _run_powershell
+
 
 PowershellRunner = Callable[[str], subprocess.CompletedProcess[str]]
 
@@ -64,25 +66,6 @@ def build_initialize_disk_script(disk_numbers: list[int]) -> str:
 
 
 
-def run_powershell(script: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [
-            "powershell",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + script,
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-
-
-
 def parse_initialized_disks(stdout: str) -> list[dict[str, Any]]:
     text = stdout.strip()
     if not text:
@@ -122,7 +105,7 @@ def initialize_disks(
     powershell_runner: PowershellRunner | None = None,
 ) -> list[dict[str, Any]]:
     script = build_initialize_disk_script(disk_numbers)
-    runner = powershell_runner or run_powershell
+    runner = powershell_runner or _run_powershell
     completed = runner(script)
 
     if completed.returncode != 0:
