@@ -11,6 +11,7 @@ if exist Sisp.spec del Sisp.spec
 
 echo 开始打包...
 pyinstaller --onefile --name Sisp --console ^
+  --icon=app.ico ^
   --add-data "json;json" ^
   --hidden-import app.modules.common ^
   --hidden-import app.modules.common.service ^
