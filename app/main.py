@@ -274,7 +274,7 @@ def normalize_worker_disk_identity(disk_identity: int | dict[str, Any]) -> dict[
 def launch_worker_windows(
     disk_identities: list[int | dict[str, Any]],
     config_path: str | None = None,
-    start_interval_seconds: float = 3.0,
+    start_interval_seconds: float = 6.0,
     sleep_func: Sleeper | None = None,
 ) -> None:
     sleeper = sleep_func or time.sleep
