@@ -70,7 +70,20 @@ def validate_string_list(config: dict[str, Any], key: str) -> None:
 
 
 
-def validate_config(config: dict[str, Any]) -> dict[str, Any]:
+def validate_path_exists(config: dict[str, Any], key: str, check_exists: bool = True) -> None:
+    """校验路径字段，可选是否检查路径存在"""
+    value = config.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"配置字段 {key} 必须为非空字符串")
+
+    if check_exists:
+        path = Path(value)
+        if not path.exists():
+            raise ValueError(f"配置字段 {key} 路径不存在: {value}")
+
+
+
+def validate_config(config: dict[str, Any], check_paths: bool = False) -> dict[str, Any]:
     missing_keys = [key for key in REQUIRED_KEYS if key not in config]
     if missing_keys:
         missing_text = "、".join(missing_keys)
@@ -84,6 +97,10 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     validate_positive_number(config, "efi_size")
     validate_positive_number(config, "c_size")
     validate_string_list(config, "excluded_disk_names")
+
+    if check_paths:
+        validate_path_exists(config, "gho_exe", check_exists=True)
+        validate_path_exists(config, "bcd_exe", check_exists=True)
 
     return config
 

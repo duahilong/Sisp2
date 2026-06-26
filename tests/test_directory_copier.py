@@ -2,12 +2,13 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.modules.directory_copier.service import copy_directory, verify_copy_result, count_files_recursive
+from app.modules.directory_copier.service import copy_directory, verify_copy_result, count_files_recursive, get_system_drive_letter
 
 
 
@@ -23,7 +24,8 @@ def test_copy_directory_success() -> None:
 
         drive_letter = str(Path(tmp_dir))[0]
 
-        result = copy_directory(str(source_dir), drive_letter, 2)
+        with patch('app.modules.directory_copier.service.get_system_drive_letter', return_value='Z'):
+            result = copy_directory(str(source_dir), drive_letter, 2)
 
         if not result.get("passed"):
             raise AssertionError(f"拷贝成功时应通过: {result}")

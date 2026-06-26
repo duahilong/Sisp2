@@ -1,6 +1,7 @@
 import os
 import shutil
 import stat
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,13 @@ from typing import Any
 FILE_ATTRIBUTE_HIDDEN = 0x02
 FILE_ATTRIBUTE_SYSTEM = 0x04
 FILE_ATTRIBUTE_READONLY = 0x01
+
+
+def get_system_drive_letter() -> str:
+    """获取系统盘盘符"""
+    if sys.platform == "win32":
+        return os.environ.get("SystemDrive", "C:")[0].upper()
+    return "C"
 
 
 
@@ -82,6 +90,14 @@ def copy_directory(
             "disk_number": disk_number,
             "passed": False,
             "message": "Data1 分区盘符为空，无法拷贝",
+        }
+
+    system_drive = get_system_drive_letter()
+    if data1_drive_letter.upper() == system_drive:
+        return {
+            "disk_number": disk_number,
+            "passed": False,
+            "message": f"拒绝向系统盘 {system_drive}: 写入数据",
         }
 
     target_root = Path(f"{data1_drive_letter}:\\")
