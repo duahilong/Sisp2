@@ -1,4 +1,5 @@
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -303,6 +304,10 @@ def launch_worker_windows(
             dl = disk_identity["drive_letters"]
             command_parts.extend(["--worker-drive-letters", f"{dl['efi']},{dl['windows']},{dl['data1']},{dl['data2']}"])
 
+        env = os.environ.copy()
+        if getattr(sys, 'frozen', False):
+            env['PYINSTALLER_RESET_ENVIRONMENT'] = '1'
+
         quoted_command = (
             "$env:PYTHONUTF8 = '1'; "
             "$env:PYTHONIOENCODING = 'utf-8'; "
@@ -316,6 +321,7 @@ def launch_worker_windows(
             ["powershell", "-NoExit", "-NoProfile", "-Command", quoted_command],
             cwd=PROJECT_ROOT,
             creationflags=subprocess.CREATE_NEW_CONSOLE,
+            env=env,
         )
         print(f"硬盘 {disk_number}: 已启动独立执行窗口")
         if index < len(disk_identities) - 1 and start_interval_seconds > 0:
