@@ -25,6 +25,7 @@ from app.modules.initialization_validator.service import print_initialization_va
 from app.modules.partition_validator.service import print_partition_validation_results, validate_partitioned_disks
 from app.modules.user_interaction.service import apply_disk_protection, print_disk_summaries, prompt_disk_selection
 from app.modules.directory_copier.service import copy_directory, print_copy_results
+from app.modules.boot_creator.service import create_boot_record, print_boot_results
 from app.preflight import print_preflight_report, run_preflight_checks
 
 
@@ -250,6 +251,13 @@ def run_single_disk_flow(
     print_copy_results(copy_results)
     if not all(result.get("passed") for result in copy_results):
         raise RuntimeError(f"目录拷贝失败: {build_failed_result_message(copy_results)}")
+
+    bcd_exe = (config_payload.get("software_paths") or {}).get("bcdboot_path")
+    efi_drive_letter = (drive_letters or {}).get("efi") or (partition_results[0].get("partitions") or {}).get("efi_drive_letter")
+    boot_results = [create_boot_record(bcd_exe, windows_drive_letter, efi_drive_letter, disk_number)]
+    print_boot_results(boot_results)
+    if not all(result.get("passed") for result in boot_results):
+        raise RuntimeError(f"引导记录创建失败: {build_failed_result_message(boot_results)}")
 
     print(f"硬盘 {disk_number} 当前阶段处理完成")
 

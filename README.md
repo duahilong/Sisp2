@@ -21,8 +21,10 @@ Sisp 使用 Python、PowerShell 和外部工具，围绕硬盘信息获取、磁
 - 镜像写入结果验证
 - 拷贝目录到特定位置
 - 拷贝结果验证
+- 调用 `bcdboot.exe` 创建引导记录
+- 引导结果验证
 
-当前尚未进入引导创建与整体结果汇总阶段。
+当前尚未进入整体结果汇总阶段。
 
 ## 当前已实现内容
 - 主程序入口可运行
@@ -63,14 +65,14 @@ Sisp 使用 Python、PowerShell 和外部工具，围绕硬盘信息获取、磁
 - 镜像写入结果验证
 - 拷贝目录到特定位置
 - 拷贝结果验证
+- 调用 `bcdboot.exe` 创建引导记录
+- 引导结果验证
 
 当前真实磁盘操作使用 Windows PowerShell Storage 模块实现。初始化阶段使用 `Clear-Disk` 清除目标硬盘数据，并根据清盘后的分区表状态决定是否执行 `Initialize-Disk -PartitionStyle GPT`；分区阶段使用 `New-Partition` 和 `Format-Volume` 创建并格式化 EFI、Windows、Data1、Data2 分区。
 
 为提升 USB 硬盘和多 worker 场景下的稳定性，分区模块会在每次创建分区前刷新目标硬盘状态，并基于 `LargestFreeExtent` 判断最大连续可用空间是否足够。`Initialize-Disk` 会自动创建 MSR 分区，分区器会在创建新分区前删除 MSR 分区，释放的空间被后续分区自动利用。最终磁盘上不再有 MSR 分区，EFI 分区大小直接使用配置字段 `efi_size`。
 
 ## 尚未完成的内容
-- 调用 `bcdboot.exe` 创建引导记录
-- 引导结果验证
 - 整体完成验证与结果汇总
 - 执行日志文件与失败排障能力
 
@@ -173,6 +175,7 @@ Sisp2/
 │   │   ├── disk_partitioner/ # 分区和格式化模块
 │   │   ├── ghost_writer/   # 镜像写入模块
 │   │   ├── directory_copier/ # 目录拷贝模块
+│   │   ├── boot_creator/   # 引导记录创建模块
 │   │   ├── initialization_validator/ # 初始化结果验证模块
 │   │   ├── partition_validator/ # 分区和格式化结果验证模块
 │   │   └── user_interaction/ # 用户交互模块
@@ -198,6 +201,7 @@ Sisp2/
 - 分区和格式化结果验证
 - 镜像写入
 - 目录拷贝
+- 引导记录创建
 - 多硬盘 worker 主流程
 
 默认安全测试入口：

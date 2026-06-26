@@ -206,6 +206,7 @@ def test_successful_main_flow() -> None:
     original_validate_partitioned_disks = main_module.validate_partitioned_disks
     original_write_ghost_image = main_module.write_ghost_image
     original_copy_directory = main_module.copy_directory
+    original_create_boot_record = main_module.create_boot_record
     main_module.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
     main_module.initialize_disks = lambda disk_numbers: [
         {
@@ -224,7 +225,7 @@ def test_successful_main_flow() -> None:
         for number in disk_numbers
     ]
     main_module.partition_and_format_disks = lambda disk_numbers, partition_info, drive_letters=None: [
-        {"disk_number": number, "passed": True, "message": "硬盘分区和格式化完成", "partitions": {"c_drive_letter": "F", "d1_drive_letter": "G"}}
+        {"disk_number": number, "passed": True, "message": "硬盘分区和格式化完成", "partitions": {"c_drive_letter": "F", "d1_drive_letter": "G", "efi_drive_letter": "E"}}
         for number in disk_numbers
     ]
     main_module.validate_partitioned_disks = lambda disk_numbers, partition_info, disk_scanner=None, drive_letters=None: [
@@ -236,6 +237,9 @@ def test_successful_main_flow() -> None:
     }
     main_module.copy_directory = lambda source_dir, data1_drive_letter, disk_number: {
         "disk_number": disk_number, "passed": True, "message": "目录拷贝成功"
+    }
+    main_module.create_boot_record = lambda bcd_exe, windows_drive_letter, efi_drive_letter, disk_number: {
+        "disk_number": disk_number, "passed": True, "message": "引导记录创建成功"
     }
 
     captured = io.StringIO()
@@ -252,6 +256,7 @@ def test_successful_main_flow() -> None:
         main_module.validate_partitioned_disks = original_validate_partitioned_disks
         main_module.write_ghost_image = original_write_ghost_image
         main_module.copy_directory = original_copy_directory
+        main_module.create_boot_record = original_create_boot_record
 
     output = captured.getvalue()
     if "管理员权限检查" in output or "PowerShell 可用性检查" in output or "配置文件存在性检查" in output or "配置文件可解析性检查" in output:
@@ -274,6 +279,8 @@ def test_successful_main_flow() -> None:
         raise AssertionError("主流程分区格式化后未进入分区验证模块")
     if "硬盘 1 目录拷贝通过" not in output:
         raise AssertionError("主流程分区验证后未进入目录拷贝模块")
+    if "硬盘 1 引导创建通过" not in output:
+        raise AssertionError("主流程目录拷贝后未进入引导创建模块")
 
     validate_selected_disk_numbers(selected_disk_numbers)
     if selected_disk_numbers != [target_number]:
@@ -292,6 +299,7 @@ def test_successful_main_flow_with_custom_json_path() -> None:
     original_validate_partitioned_disks = main_module.validate_partitioned_disks
     original_write_ghost_image = main_module.write_ghost_image
     original_copy_directory = main_module.copy_directory
+    original_create_boot_record = main_module.create_boot_record
     main_module.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
     main_module.initialize_disks = lambda disk_numbers: [
         {
@@ -310,7 +318,7 @@ def test_successful_main_flow_with_custom_json_path() -> None:
         for number in disk_numbers
     ]
     main_module.partition_and_format_disks = lambda disk_numbers, partition_info, drive_letters=None: [
-        {"disk_number": number, "passed": True, "message": "硬盘分区和格式化完成", "partitions": {"c_drive_letter": "F", "d1_drive_letter": "G"}}
+        {"disk_number": number, "passed": True, "message": "硬盘分区和格式化完成", "partitions": {"c_drive_letter": "F", "d1_drive_letter": "G", "efi_drive_letter": "E"}}
         for number in disk_numbers
     ]
     main_module.validate_partitioned_disks = lambda disk_numbers, partition_info, disk_scanner=None, drive_letters=None: [
@@ -322,6 +330,9 @@ def test_successful_main_flow_with_custom_json_path() -> None:
     }
     main_module.copy_directory = lambda source_dir, data1_drive_letter, disk_number: {
         "disk_number": disk_number, "passed": True, "message": "目录拷贝成功"
+    }
+    main_module.create_boot_record = lambda bcd_exe, windows_drive_letter, efi_drive_letter, disk_number: {
+        "disk_number": disk_number, "passed": True, "message": "引导记录创建成功"
     }
 
     captured = io.StringIO()
@@ -339,6 +350,7 @@ def test_successful_main_flow_with_custom_json_path() -> None:
         main_module.validate_partitioned_disks = original_validate_partitioned_disks
         main_module.write_ghost_image = original_write_ghost_image
         main_module.copy_directory = original_copy_directory
+        main_module.create_boot_record = original_create_boot_record
 
     output = captured.getvalue()
     if f"配置文件: {custom_path}" not in output:
