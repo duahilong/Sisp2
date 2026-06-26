@@ -365,6 +365,9 @@ def run_minimal_main_flow(
         for identity in identities:
             identity["drive_letters"] = allocations.get(identity["disk_number"])
         launcher(identities, get_config_path_for_worker(config_payload))
+        print()
+        print("所有 worker 窗口已启动，请在各窗口中查看执行结果")
+        input("按 Enter 键退出主程序...")
         return selected_disk_numbers
 
     if selected_disk_numbers:
