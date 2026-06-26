@@ -4,6 +4,8 @@ from typing import Any, Callable
 
 
 Ghostrunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
+GhostVerifier = Callable[[str], tuple[bool, str]]
+GHOST_TIMEOUT_SECONDS = 1800
 
 
 
@@ -25,7 +27,7 @@ def build_ghost_command(gho_exe: str, win_gho: str, disk_number: int) -> list[st
 
 
 
-def run_ghost(command: list[str]) -> subprocess.CompletedProcess[str]:
+def run_ghost(command: list[str], timeout: float = GHOST_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         capture_output=True,
@@ -33,6 +35,7 @@ def run_ghost(command: list[str]) -> subprocess.CompletedProcess[str]:
         encoding="utf-8",
         errors="replace",
         check=False,
+        timeout=timeout,
     )
 
 
@@ -55,10 +58,25 @@ def write_ghost_image(
     disk_number: int,
     windows_drive_letter: str,
     ghost_runner: Ghostrunner | None = None,
+    ghost_verifier: GhostVerifier | None = None,
 ) -> dict[str, Any]:
     command = build_ghost_command(gho_exe, win_gho, disk_number)
     runner = ghost_runner or run_ghost
-    completed = runner(command)
+
+    try:
+        completed = runner(command)
+    except FileNotFoundError:
+        return {
+            "disk_number": disk_number,
+            "passed": False,
+            "message": f"Ghost 可执行文件不存在: {gho_exe}",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "disk_number": disk_number,
+            "passed": False,
+            "message": f"Ghost 镜像写入超时（超过 {GHOST_TIMEOUT_SECONDS} 秒）",
+        }
 
     if completed.returncode != 0:
         stderr = (completed.stderr or "").strip() or "未知错误"
@@ -70,7 +88,8 @@ def write_ghost_image(
             "message": f"Ghost 镜像写入失败（返回码 {completed.returncode}）: {detail}",
         }
 
-    verified, verify_message = verify_ghost_result(windows_drive_letter)
+    verifier = ghost_verifier or verify_ghost_result
+    verified, verify_message = verifier(windows_drive_letter)
     if not verified:
         return {
             "disk_number": disk_number,

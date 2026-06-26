@@ -1,3 +1,4 @@
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -7,7 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.modules.ghost_writer.service import build_ghost_command, write_ghost_image
+from app.modules.ghost_writer.service import build_ghost_command, write_ghost_image, GhostVerifier
 
 
 
@@ -56,15 +57,19 @@ def test_build_ghost_command_rejects_invalid_inputs() -> None:
 
 def test_write_ghost_image_success() -> None:
     with tempfile.TemporaryDirectory() as tmp_dir:
-        windows_dir = Path(tmp_dir) / "Windows"
-        windows_dir.mkdir()
-        drive_letter = Path(tmp_dir).drive[0]
+        mock_windows_dir = Path(tmp_dir) / "Windows"
+        mock_windows_dir.mkdir()
 
         def fake_runner(command: list[str]) -> CompletedProcess[str]:
             return CompletedProcess(args=command, returncode=0, stdout="Ghost completed", stderr="")
 
+        def fake_verifier(drive_letter: str) -> tuple[bool, str]:
+            if mock_windows_dir.exists():
+                return True, f"验证通过: {mock_windows_dir} 存在"
+            return False, f"验证失败: {drive_letter}:\\Windows 不存在"
+
         result = write_ghost_image(
-            "D:\\sw\\ghost64.exe", "D:\\img\\111.GHO", 2, drive_letter, ghost_runner=fake_runner,
+            "D:\\sw\\ghost64.exe", "D:\\img\\111.GHO", 2, "X", ghost_runner=fake_runner, ghost_verifier=fake_verifier,
         )
         if not result.get("passed"):
             raise AssertionError(f"Ghost 成功时应通过: {result}")
@@ -77,7 +82,10 @@ def test_write_ghost_image_failure() -> None:
     def fake_runner(command: list[str]) -> CompletedProcess[str]:
         return CompletedProcess(args=command, returncode=1, stdout="", stderr="Ghost error")
 
-    result = write_ghost_image("D:\\sw\\ghost64.exe", "D:\\img\\111.GHO", 2, "F", ghost_runner=fake_runner)
+    def fake_verifier(drive_letter: str) -> tuple[bool, str]:
+        raise AssertionError("不应调用 verifier（returncode 非 0 时应提前返回）")
+
+    result = write_ghost_image("D:\\sw\\ghost64.exe", "D:\\img\\111.GHO", 2, "F", ghost_runner=fake_runner, ghost_verifier=fake_verifier)
     if result.get("passed"):
         raise AssertionError(f"Ghost 失败时不应通过: {result}")
     if "返回码 1" not in result.get("message", ""):
@@ -89,13 +97,48 @@ def test_write_ghost_image_verification_failure() -> None:
     def fake_runner(command: list[str]) -> CompletedProcess[str]:
         return CompletedProcess(args=command, returncode=0, stdout="Ghost completed", stderr="")
 
+    def fake_verifier(drive_letter: str) -> tuple[bool, str]:
+        return False, f"验证失败: {drive_letter}:\\Windows 不存在"
+
     result = write_ghost_image(
-        "D:\\sw\\ghost64.exe", "D:\\img\\111.GHO", 2, "Z", ghost_runner=fake_runner,
+        "D:\\sw\\ghost64.exe", "D:\\img\\111.GHO", 2, "Z", ghost_runner=fake_runner, ghost_verifier=fake_verifier,
     )
     if result.get("passed"):
         raise AssertionError(f"验证失败时不应通过: {result}")
     if "验证失败" not in result.get("message", ""):
         raise AssertionError(f"验证失败消息不正确: {result}")
+
+
+
+def test_write_ghost_image_file_not_found() -> None:
+    def fake_runner(command: list[str]) -> CompletedProcess[str]:
+        raise FileNotFoundError(f"[Errno 2] No such file or directory: '{command[0]}'")
+
+    result = write_ghost_image(
+        "D:\\nonexistent\\ghost64.exe", "D:\\img\\111.GHO", 2, "F", ghost_runner=fake_runner,
+    )
+    if result.get("passed"):
+        raise AssertionError(f"文件不存在时不应通过: {result}")
+    if "不存在" not in result.get("message", ""):
+        raise AssertionError(f"文件不存在错误消息不正确: {result}")
+    if result.get("disk_number") != 2:
+        raise AssertionError(f"disk_number 不正确: {result}")
+
+
+
+def test_write_ghost_image_timeout() -> None:
+    def fake_runner(command: list[str]) -> CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd=command, timeout=1800)
+
+    result = write_ghost_image(
+        "D:\\sw\\ghost64.exe", "D:\\img\\111.GHO", 2, "F", ghost_runner=fake_runner,
+    )
+    if result.get("passed"):
+        raise AssertionError(f"超时时不应通过: {result}")
+    if "超时" not in result.get("message", ""):
+        raise AssertionError(f"超时错误消息不正确: {result}")
+    if result.get("disk_number") != 2:
+        raise AssertionError(f"disk_number 不正确: {result}")
 
 
 
@@ -106,6 +149,8 @@ def main() -> int:
         test_write_ghost_image_success()
         test_write_ghost_image_failure()
         test_write_ghost_image_verification_failure()
+        test_write_ghost_image_file_not_found()
+        test_write_ghost_image_timeout()
         print("模块6镜像写入测试结果: 通过")
         return 0
     except Exception as exc:

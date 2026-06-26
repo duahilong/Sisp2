@@ -29,7 +29,7 @@ def build_partitioned_disk(overrides: dict | None = None, partitions: list[dict]
                 "gpt_type": "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}",
                 "size_bytes": 100 * 1024 * 1024,
                 "drive_letter": None,
-                "volume": None,
+                "volume": {"file_system": "FAT32", "file_system_label": "EFI"},
             },
             {
                 "partition_number": 3,
@@ -108,6 +108,22 @@ def test_validate_partitioned_disks_wrong_efi_size() -> None:
     disk["partitions"][1]["size_bytes"] = 200 * 1024 * 1024
     results = validate_partitioned_disks([2], PARTITION_INFO, disk_scanner=lambda: [disk])
     assert_failed(results[0], "EFI 分区大小")
+
+
+
+def test_validate_partitioned_disks_wrong_efi_file_system() -> None:
+    disk = build_partitioned_disk()
+    disk["partitions"][1]["volume"]["file_system"] = "NTFS"
+    results = validate_partitioned_disks([2], PARTITION_INFO, disk_scanner=lambda: [disk])
+    assert_failed(results[0], "EFI 分区文件系统不是 FAT32")
+
+
+
+def test_validate_partitioned_disks_wrong_efi_label() -> None:
+    disk = build_partitioned_disk()
+    disk["partitions"][1]["volume"]["file_system_label"] = "SYSTEM"
+    results = validate_partitioned_disks([2], PARTITION_INFO, disk_scanner=lambda: [disk])
+    assert_failed(results[0], "EFI 分区卷标不正确")
 
 
 
@@ -205,6 +221,8 @@ def main() -> int:
         test_validate_partitioned_disks_rejects_boot_or_system_disk()
         test_validate_partitioned_disks_missing_efi_partition()
         test_validate_partitioned_disks_wrong_efi_size()
+        test_validate_partitioned_disks_wrong_efi_file_system()
+        test_validate_partitioned_disks_wrong_efi_label()
         test_validate_partitioned_disks_missing_windows_partition()
         test_validate_partitioned_disks_wrong_windows_size()
         test_validate_partitioned_disks_wrong_windows_label()

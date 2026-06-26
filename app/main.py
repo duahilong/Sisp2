@@ -221,7 +221,15 @@ def run_single_disk_flow(
 
     gho_exe = (config_payload.get("software_paths") or {}).get("ghost64_path")
     win_gho = (config_payload.get("image_info") or {}).get("image_path")
+    if not gho_exe:
+        raise RuntimeError("配置中缺少 Ghost 可执行文件路径 (gho_exe)")
+    if not win_gho:
+        raise RuntimeError("配置中缺少 Ghost 镜像文件路径 (win_gho)")
+
     windows_drive_letter = (drive_letters or {}).get("windows") or (partition_results[0].get("partitions") or {}).get("c_drive_letter")
+    if not windows_drive_letter:
+        raise RuntimeError("无法确定 Windows 分区盘符，Ghost 镜像写入中止")
+
     ghost_results = [write_ghost_image(gho_exe, win_gho, disk_number, windows_drive_letter)]
     print_ghost_results(ghost_results)
     if not all(result.get("passed") for result in ghost_results):

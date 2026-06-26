@@ -92,8 +92,7 @@ def build_partition_disk_script(disk_numbers: list[int], efi_size_mb: int | floa
         lines.extend(
             [
                 f"$disk = Wait-DiskReady -DiskNumber {disk_number} -RequiredBytes $efiSize -StepName '创建 EFI 分区'",
-                "$newEfiSize = $efiSize",
-                f"$efiPartition = New-Partition -DiskNumber {disk_number} -Size $newEfiSize -GptType '{{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}}'{" -DriveLetter '" + efi_letter + "'" if efi_letter else ""}",
+                f"$efiPartition = New-Partition -DiskNumber {disk_number} -Size $efiSize -GptType '{{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}}'{" -DriveLetter '" + efi_letter + "'" if efi_letter else ""}",
                 "Start-Sleep -Seconds 1",
                 "$efiVolume = $efiPartition | Format-Volume -FileSystem FAT32 -NewFileSystemLabel 'EFI' -Confirm:$false",
                 "Start-Sleep -Seconds 1",

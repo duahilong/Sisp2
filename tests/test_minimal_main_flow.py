@@ -789,6 +789,54 @@ def test_failed_preflight_main_flow() -> None:
 
 
 
+def test_main_flow_stops_when_ghost_fails() -> None:
+    original_scan_disk_summaries = main_module.scan_disk_summaries
+    original_initialize_disks = main_module.initialize_disks
+    original_partition_and_format_disks = main_module.partition_and_format_disks
+    original_validate_partitioned_disks = main_module.validate_partitioned_disks
+    original_write_ghost_image = main_module.write_ghost_image
+    main_module.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
+    main_module.initialize_disks = lambda disk_numbers: [
+        {"disk_number": number, "passed": True, "message": "硬盘初始化完成", "disk": {"disk_number": number, "partition_style": "GPT", "is_boot": False, "is_system": False, "is_offline": False, "is_read_only": False}}
+        for number in disk_numbers
+    ]
+    main_module.partition_and_format_disks = lambda disk_numbers, partition_info, drive_letters=None: [
+        {"disk_number": number, "passed": True, "message": "硬盘分区和格式化完成", "partitions": {"c_drive_letter": "F"}}
+        for number in disk_numbers
+    ]
+    main_module.validate_partitioned_disks = lambda disk_numbers, partition_info, disk_scanner=None, drive_letters=None: [
+        {"disk_number": number, "passed": True, "message": "分区和格式化结果验证通过"}
+        for number in disk_numbers
+    ]
+    main_module.write_ghost_image = lambda gho_exe, win_gho, disk_number, windows_drive_letter: {
+        "disk_number": disk_number, "passed": False, "message": "Ghost 镜像写入失败"
+    }
+
+    captured = io.StringIO()
+    try:
+        with redirect_stdout(captured):
+            run_minimal_main_flow(
+                input_func=lambda prompt: "1",
+                preflight_runner=build_successful_preflight_report,
+            )
+    except RuntimeError as exc:
+        if "Ghost 镜像写入失败" not in str(exc):
+            raise AssertionError(f"Ghost 失败时异常信息不正确: {exc}")
+    else:
+        raise AssertionError("Ghost 失败时主流程应中止")
+    finally:
+        main_module.scan_disk_summaries = original_scan_disk_summaries
+        main_module.initialize_disks = original_initialize_disks
+        main_module.partition_and_format_disks = original_partition_and_format_disks
+        main_module.validate_partitioned_disks = original_validate_partitioned_disks
+        main_module.write_ghost_image = original_write_ghost_image
+
+    output = captured.getvalue()
+    if "硬盘 1 镜像写入失败" not in output:
+        raise AssertionError("Ghost 失败时未输出失败结果")
+
+
+
 def main() -> int:
     try:
         test_build_drive_letter_allocations()
@@ -807,6 +855,7 @@ def main() -> int:
         test_main_flow_stops_when_initialization_validation_fails()
         test_main_flow_stops_when_partition_fails()
         test_main_flow_stops_when_partition_validation_fails()
+        test_main_flow_stops_when_ghost_fails()
         test_failed_preflight_main_flow()
         return 0
     except Exception as exc:

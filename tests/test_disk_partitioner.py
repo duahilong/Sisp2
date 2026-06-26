@@ -25,8 +25,8 @@ def test_build_partition_disk_script() -> None:
     assert_contains(script, "LargestFreeExtent")
     assert_contains(script, "e3c9e316-0b5c-4db8-817d-f92df00215ae")
     assert_contains(script, "Remove-Partition")
-    assert_contains(script, "$newEfiSize = $efiSize")
-    assert_contains(script, "New-Partition -DiskNumber 2 -Size $newEfiSize")
+    assert_contains(script, "$efiSize = [UInt64]")
+    assert_contains(script, "New-Partition -DiskNumber 2 -Size $efiSize")
     assert_contains(script, "Format-Volume -FileSystem FAT32")
     assert_contains(script, "New-Partition -DiskNumber 2 -Size $cSize -AssignDriveLetter")
     assert_contains(script, "Format-Volume -FileSystem NTFS")
@@ -53,7 +53,7 @@ def test_build_partition_disk_script_with_drive_letters() -> None:
     assert_contains(script, "-DriveLetter 'F'")
     assert_contains(script, "-DriveLetter 'G'")
     assert_contains(script, "-DriveLetter 'H'")
-    assert_contains(script, "New-Partition -DiskNumber 2 -Size $newEfiSize")
+    assert_contains(script, "New-Partition -DiskNumber 2 -Size $efiSize")
     assert_contains(script, "New-Partition -DiskNumber 2 -Size $cSize")
     assert_contains(script, "New-Partition -DiskNumber 2 -Size $halfSize")
     assert_contains(script, "New-Partition -DiskNumber 2 -UseMaximumSize")
@@ -181,6 +181,8 @@ def test_partition_and_format_disks_abnormal_result() -> None:
         results = partition_and_format_disks([2], {"efi_size_mb": 100, "c_size_gb": 6}, powershell_runner=fake_runner)
         if results[0].get("passed"):
             raise AssertionError(f"异常分区结果不应通过: {description}")
+        if "结果异常" not in results[0].get("message", ""):
+            raise AssertionError(f"异常分区结果错误消息不正确，期望包含: 结果异常，实际: {results[0].get('message')}")
 
 
 

@@ -94,6 +94,13 @@ def validate_partitioned_disk(disk: dict[str, Any], partition_info: dict[str, An
     expected_efi_size = int(efi_size_mb * 1024 * 1024)
     if not is_size_close(efi_partition.get("size_bytes"), expected_efi_size):
         return {"disk_number": disk_number, "passed": False, "message": "分区验证失败: EFI 分区大小不符合配置"}
+
+    efi_volume = efi_partition.get("volume") or {}
+    if efi_volume.get("file_system") != "FAT32":
+        return {"disk_number": disk_number, "passed": False, "message": "分区验证失败: EFI 分区文件系统不是 FAT32"}
+    if efi_volume.get("file_system_label") != "EFI":
+        return {"disk_number": disk_number, "passed": False, "message": "分区验证失败: EFI 分区卷标不正确"}
+
     expected_efi_letter = (drive_letters or {}).get("efi")
     if expected_efi_letter:
         actual_efi_letter = str(efi_partition.get("drive_letter") or "").upper()
