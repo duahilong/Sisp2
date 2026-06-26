@@ -94,6 +94,15 @@ py -m pip install -r requirements.txt
 
 项目已兼容 PyInstaller 打包，可编译为单独的 exe 文件。
 
+**打包方式：**
+```powershell
+# 使用打包脚本
+.\build.bat
+
+# 或手动执行打包命令
+pyinstaller --onefile --name Sisp --console --add-data "json;json" app\main.py
+```
+
 **打包后目录结构：**
 ```
 发布目录/

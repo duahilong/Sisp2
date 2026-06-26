@@ -30,6 +30,7 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+*.spec
 
 # Large files and directories
 img/
