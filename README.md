@@ -90,6 +90,31 @@ py -m pip install -r requirements.txt
 当前已声明依赖：
 - `wcwidth>=0.2.13`
 
+## PyInstaller 打包支持
+
+项目已兼容 PyInstaller 打包，可编译为单独的 exe 文件。
+
+**打包后目录结构：**
+```
+发布目录/
+├── Sisp.exe                  # PyInstaller 打包后的 exe
+├── json/
+│   └── win11.json            # 配置文件（外部可修改）
+└── Sw/
+    ├── ghost64.exe           # 外部工具
+    └── bcdboot.exe           # 外部工具
+```
+
+**打包后使用方式：**
+```powershell
+Sisp.exe -j D:\Sisp\json\win11.json
+```
+
+**兼容性说明：**
+- 代码通过 `sys.frozen` 检测打包环境
+- 打包后使用 `sys.executable` 启动 worker 进程
+- 配置文件和外部工具路径使用绝对路径
+
 ## 运行方式
 默认读取 `json/win11.json`：
 
