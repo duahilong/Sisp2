@@ -1,9 +1,17 @@
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[3] / "json" / "win11.json"
+def get_default_config_path() -> Path:
+    """获取默认配置文件路径，兼容 PyInstaller 打包"""
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).parent / "json" / "win11.json"
+    return Path(__file__).resolve().parents[3] / "json" / "win11.json"
+
+
+DEFAULT_CONFIG_PATH = get_default_config_path()
 REQUIRED_KEYS = [
     "description",
     "win_gho",

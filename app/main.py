@@ -5,7 +5,15 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+def get_app_dir() -> Path:
+    """获取应用根目录，兼容 PyInstaller 打包"""
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parents[1]
+
+
+PROJECT_ROOT = get_app_dir()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -16,6 +24,7 @@ from app.modules.ghost_writer.service import print_ghost_results, write_ghost_im
 from app.modules.initialization_validator.service import print_initialization_validation_results, validate_initialized_disks
 from app.modules.partition_validator.service import print_partition_validation_results, validate_partitioned_disks
 from app.modules.user_interaction.service import apply_disk_protection, print_disk_summaries, prompt_disk_selection
+from app.modules.directory_copier.service import copy_directory, print_copy_results
 from app.preflight import print_preflight_report, run_preflight_checks
 
 
@@ -235,6 +244,13 @@ def run_single_disk_flow(
     if not all(result.get("passed") for result in ghost_results):
         raise RuntimeError(f"Ghost 镜像写入失败: {build_failed_result_message(ghost_results)}")
 
+    source_dir = (config_payload.get("copy_info") or {}).get("source_dir")
+    data1_drive_letter = (drive_letters or {}).get("data1") or (partition_results[0].get("partitions") or {}).get("d1_drive_letter")
+    copy_results = [copy_directory(source_dir, data1_drive_letter, disk_number)]
+    print_copy_results(copy_results)
+    if not all(result.get("passed") for result in copy_results):
+        raise RuntimeError(f"目录拷贝失败: {build_failed_result_message(copy_results)}")
+
     print(f"硬盘 {disk_number} 当前阶段处理完成")
 
 
@@ -260,12 +276,11 @@ def launch_worker_windows(
         if not isinstance(disk_number, int):
             raise ValueError(f"worker 硬盘编号必须为整数: {disk_number}")
 
-        command_parts = [
-            "py",
-            str(PROJECT_ROOT / "app" / "main.py"),
-            "--worker-disk",
-            str(disk_number),
-        ]
+        if getattr(sys, 'frozen', False):
+            command_parts = [sys.executable, "--worker-disk", str(disk_number)]
+        else:
+            command_parts = ["py", str(PROJECT_ROOT / "app" / "main.py"), "--worker-disk", str(disk_number)]
+
         if config_path:
             command_parts.extend(["-j", config_path])
         if disk_identity.get("unique_id"):
