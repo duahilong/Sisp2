@@ -421,6 +421,9 @@ def main(argv: list[str] | None = None) -> int:
             }
             drive_letters = parse_worker_drive_letters(args.worker_drive_letters) if args.worker_drive_letters else None
             run_worker_flow(args.worker_disk, config_path=args.config_path, expected_identity=expected_identity, drive_letters=drive_letters)
+            print()
+            input("按 Enter 键退出...")
+            return ErrorCode.SUCCESS
         else:
             run_minimal_main_flow(config_path=args.config_path)
         return ErrorCode.SUCCESS
