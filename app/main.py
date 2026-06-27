@@ -435,4 +435,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # 修复管理员模式下控制台黑屏问题：刷新输出缓冲区
+    os.environ['PYTHONUNBUFFERED'] = '1'
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+    print(end="", flush=True)
     raise SystemExit(main())
