@@ -1,6 +1,8 @@
 import subprocess
 from typing import Any
 
+from app.modules.common.constants import ErrorCode
+
 
 POWERSHELL_BASE_ARGS = [
     "powershell",
@@ -11,6 +13,91 @@ POWERSHELL_BASE_ARGS = [
 ]
 
 POWERSHELL_DEFAULT_TIMEOUT = 600
+
+
+class SispError(Exception):
+    """Sisp 项目自定义异常基类"""
+    
+    def __init__(self, message: str, error_code: int = ErrorCode.SUCCESS):
+        super().__init__(message)
+        self.error_code = error_code
+
+
+class PreflightError(SispError):
+    """运行前检查失败异常"""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.PREFLIGHT_FAILED)
+
+
+class InitializationError(SispError):
+    """硬盘初始化失败异常"""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.INITIALIZATION_FAILED)
+
+
+class PartitionError(SispError):
+    """分区和格式化失败异常"""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.PARTITION_FAILED)
+
+
+class GhostError(SispError):
+    """Ghost 镜像写入失败异常"""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.GHOST_FAILED)
+
+
+class CopyError(SispError):
+    """目录拷贝失败异常"""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.COPY_FAILED)
+
+
+class BootError(SispError):
+    """引导记录创建失败异常"""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.BOOT_FAILED)
+
+
+class ValidationError(SispError):
+    """验证失败异常"""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.VALIDATION_FAILED)
+
+
+class ConfigError(SispError):
+    """配置错误异常"""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.CONFIG_ERROR)
+
+
+class DiskProtectedError(SispError):
+    """硬盘受保护异常"""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.DISK_PROTECTED)
+
+
+class IdentityMismatchError(SispError):
+    """硬盘身份不匹配异常"""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.IDENTITY_MISMATCH)
+
+
+class PathTraversalError(SispError):
+    """路径遍历攻击异常"""
+    
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.PATH_TRAVERSAL)
 
 
 

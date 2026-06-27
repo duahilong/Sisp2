@@ -71,6 +71,15 @@ def copy_directory(
     disk_number: int,
 ) -> dict[str, Any]:
     source_path = Path(source_dir)
+    
+    # 路径遍历防护：检查源路径是否包含危险的路径组件
+    if ".." in source_dir:
+        return {
+            "disk_number": disk_number,
+            "passed": False,
+            "message": f"源路径包含不安全的路径组件 '..': {source_dir}",
+        }
+    
     if not source_path.exists():
         return {
             "disk_number": disk_number,
@@ -83,6 +92,22 @@ def copy_directory(
             "disk_number": disk_number,
             "passed": False,
             "message": f"源路径不是目录: {source_dir}",
+        }
+
+    # 验证源路径是否为绝对路径且解析后的路径与原始路径一致
+    try:
+        resolved_source = source_path.resolve()
+        if str(resolved_source) != str(source_path.resolve()):
+            return {
+                "disk_number": disk_number,
+                "passed": False,
+                "message": f"源路径解析异常，可能存在路径遍历攻击: {source_dir}",
+            }
+    except (OSError, ValueError) as exc:
+        return {
+            "disk_number": disk_number,
+            "passed": False,
+            "message": f"源路径解析失败: {exc}",
         }
 
     if not data1_drive_letter:
@@ -102,6 +127,22 @@ def copy_directory(
 
     target_root = Path(f"{data1_drive_letter}:\\")
     target_dir = target_root / source_path.name
+    
+    # 路径遍历防护：检查目标路径是否在预期的根目录下
+    try:
+        resolved_target = target_dir.resolve()
+        if not str(resolved_target).startswith(str(target_root.resolve())):
+            return {
+                "disk_number": disk_number,
+                "passed": False,
+                "message": f"目标路径不在预期的根目录下: {target_dir}",
+            }
+    except (OSError, ValueError) as exc:
+        return {
+            "disk_number": disk_number,
+            "passed": False,
+            "message": f"目标路径解析失败: {exc}",
+        }
 
     try:
         if target_dir.exists():

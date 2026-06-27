@@ -27,6 +27,12 @@ from app.modules.partition_validator.service import print_partition_validation_r
 from app.modules.user_interaction.service import apply_disk_protection, print_disk_summaries, prompt_disk_selection
 from app.modules.directory_copier.service import copy_directory, print_copy_results
 from app.modules.boot_creator.service import create_boot_record, print_boot_results
+from app.modules.common.constants import ErrorCode
+from app.modules.common.service import (
+    SispError, PreflightError, InitializationError, PartitionError,
+    GhostError, CopyError, BootError, ValidationError, ConfigError,
+    DiskProtectedError, IdentityMismatchError, PathTraversalError
+)
 from app.preflight import print_preflight_report, run_preflight_checks
 
 
@@ -121,7 +127,7 @@ def validate_worker_disk_identity(disk: dict[str, Any], expected_identity: dict[
         mismatches.append("硬盘容量不一致")
 
     if mismatches:
-        raise RuntimeError(f"目标硬盘身份校验失败: {disk_number}，{'，'.join(mismatches)}")
+        raise IdentityMismatchError(f"目标硬盘身份校验失败: {disk_number}，{'，'.join(mismatches)}")
 
 
 
@@ -202,10 +208,10 @@ def run_single_disk_flow(
     disk_summaries = apply_disk_protection(scan_disk_summaries(), excluded_disk_names)
     disk = find_disk_summary(disk_summaries, disk_number)
     if not disk:
-        raise RuntimeError(f"未找到目标硬盘: {disk_number}")
+        raise DiskProtectedError(f"未找到目标硬盘: {disk_number}")
     if disk.get("is_selectable") is False:
         reasons = "，".join(disk.get("protection_reasons") or [])
-        raise RuntimeError(f"目标硬盘不可操作: {disk_number}，原因: {reasons or '受保护'}")
+        raise DiskProtectedError(f"目标硬盘不可操作: {disk_number}，原因: {reasons or '受保护'}")
     validate_worker_disk_identity(disk, expected_identity)
 
     print(build_target_disk_text(disk))
@@ -213,52 +219,52 @@ def run_single_disk_flow(
     initialize_results = initialize_disks([disk_number])
     print_initialize_results(initialize_results)
     if not all(result.get("passed") for result in initialize_results):
-        raise RuntimeError(f"硬盘初始化失败: {build_failed_result_message(initialize_results)}")
+        raise InitializationError(f"硬盘初始化失败: {build_failed_result_message(initialize_results)}")
 
     validation_results = validate_initialized_disks(initialize_results)
     print_initialization_validation_results(validation_results)
     if not all(result.get("passed") for result in validation_results):
-        raise RuntimeError(f"初始化结果验证失败: {build_failed_result_message(validation_results)}")
+        raise ValidationError(f"初始化结果验证失败: {build_failed_result_message(validation_results)}")
 
     partition_results = partition_and_format_disks([disk_number], config_payload.get("partition_info") or {}, drive_letters=drive_letters)
     print_partition_results(partition_results)
     if not all(result.get("passed") for result in partition_results):
-        raise RuntimeError(f"硬盘分区和格式化失败: {build_failed_result_message(partition_results)}")
+        raise PartitionError(f"硬盘分区和格式化失败: {build_failed_result_message(partition_results)}")
 
     partition_validation_results = validate_partitioned_disks([disk_number], config_payload.get("partition_info") or {}, drive_letters=drive_letters)
     print_partition_validation_results(partition_validation_results)
     if not all(result.get("passed") for result in partition_validation_results):
-        raise RuntimeError(f"分区和格式化结果验证失败: {build_failed_result_message(partition_validation_results)}")
+        raise ValidationError(f"分区和格式化结果验证失败: {build_failed_result_message(partition_validation_results)}")
 
     gho_exe = (config_payload.get("software_paths") or {}).get("ghost64_path")
     win_gho = (config_payload.get("image_info") or {}).get("image_path")
     if not gho_exe:
-        raise RuntimeError("配置中缺少 Ghost 可执行文件路径 (gho_exe)")
+        raise ConfigError("配置中缺少 Ghost 可执行文件路径 (gho_exe)")
     if not win_gho:
-        raise RuntimeError("配置中缺少 Ghost 镜像文件路径 (win_gho)")
+        raise ConfigError("配置中缺少 Ghost 镜像文件路径 (win_gho)")
 
     windows_drive_letter = (drive_letters or {}).get("windows") or (partition_results[0].get("partitions") or {}).get("c_drive_letter")
     if not windows_drive_letter:
-        raise RuntimeError("无法确定 Windows 分区盘符，Ghost 镜像写入中止")
+        raise PartitionError("无法确定 Windows 分区盘符，Ghost 镜像写入中止")
 
     ghost_results = [write_ghost_image(gho_exe, win_gho, disk_number, windows_drive_letter)]
     print_ghost_results(ghost_results)
     if not all(result.get("passed") for result in ghost_results):
-        raise RuntimeError(f"Ghost 镜像写入失败: {build_failed_result_message(ghost_results)}")
+        raise GhostError(f"Ghost 镜像写入失败: {build_failed_result_message(ghost_results)}")
 
     source_dir = (config_payload.get("copy_info") or {}).get("source_dir")
     data1_drive_letter = (drive_letters or {}).get("data1") or (partition_results[0].get("partitions") or {}).get("d1_drive_letter")
     copy_results = [copy_directory(source_dir, data1_drive_letter, disk_number)]
     print_copy_results(copy_results)
     if not all(result.get("passed") for result in copy_results):
-        raise RuntimeError(f"目录拷贝失败: {build_failed_result_message(copy_results)}")
+        raise CopyError(f"目录拷贝失败: {build_failed_result_message(copy_results)}")
 
     bcd_exe = (config_payload.get("software_paths") or {}).get("bcdboot_path")
     efi_drive_letter = (drive_letters or {}).get("efi") or (partition_results[0].get("partitions") or {}).get("efi_drive_letter")
     boot_results = [create_boot_record(bcd_exe, windows_drive_letter, efi_drive_letter, disk_number)]
     print_boot_results(boot_results)
     if not all(result.get("passed") for result in boot_results):
-        raise RuntimeError(f"引导记录创建失败: {build_failed_result_message(boot_results)}")
+        raise BootError(f"引导记录创建失败: {build_failed_result_message(boot_results)}")
 
     print(f"硬盘 {disk_number} 当前阶段处理完成")
 
@@ -340,16 +346,16 @@ def run_minimal_main_flow(
     preflight_report = runner(config_path)
     print_preflight_report(preflight_report)
     if not preflight_report.get("all_passed"):
-        raise RuntimeError("运行前检查失败")
+        raise PreflightError("运行前检查失败")
 
     config_payload = preflight_report.get("config_payload")
     if not isinstance(config_payload, dict):
-        raise RuntimeError("运行前检查未返回可用的配置数据")
+        raise ConfigError("运行前检查未返回可用的配置数据")
 
     excluded_disk_names = config_payload.get("excluded_disk_names") or []
     disk_summaries = apply_disk_protection(scan_disk_summaries(), excluded_disk_names)
     if not disk_summaries:
-        raise RuntimeError("模块1未返回任何硬盘摘要信息")
+        raise DiskProtectedError("模块1未返回任何硬盘摘要信息")
 
     print("=" * 80)
     print("Sisp")
@@ -367,7 +373,7 @@ def run_minimal_main_flow(
         launcher(identities, get_config_path_for_worker(config_payload))
         print()
         print("所有 worker 窗口已启动，请在各窗口中查看执行结果")
-        input("按 Enter 键退出主程序...")
+        input_func("按 Enter 键退出主程序...")
         return selected_disk_numbers
 
     if selected_disk_numbers:
@@ -389,11 +395,11 @@ def run_worker_flow(
     preflight_report = runner(config_path)
     print_preflight_report(preflight_report)
     if not preflight_report.get("all_passed"):
-        raise RuntimeError("运行前检查失败")
+        raise PreflightError("运行前检查失败")
 
     config_payload = preflight_report.get("config_payload")
     if not isinstance(config_payload, dict):
-        raise RuntimeError("运行前检查未返回可用的配置数据")
+        raise ConfigError("运行前检查未返回可用的配置数据")
 
     print("=" * 80)
     print(f"Sisp Worker 硬盘 {disk_number}")
@@ -417,10 +423,15 @@ def main(argv: list[str] | None = None) -> int:
             run_worker_flow(args.worker_disk, config_path=args.config_path, expected_identity=expected_identity, drive_letters=drive_letters)
         else:
             run_minimal_main_flow(config_path=args.config_path)
-        return 0
+        return ErrorCode.SUCCESS
+    except SispError as exc:
+        print(f"运行失败: {exc}", file=sys.stderr)
+        input("按 Enter 键退出...")
+        return exc.error_code
     except Exception as exc:
         print(f"运行失败: {exc}", file=sys.stderr)
-        return 1
+        input("按 Enter 键退出...")
+        return ErrorCode.PREFLIGHT_FAILED
 
 
 if __name__ == "__main__":

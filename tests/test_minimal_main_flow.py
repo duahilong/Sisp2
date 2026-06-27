@@ -9,6 +9,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import app.main as main_module
 from app.main import parse_command_line_args, run_minimal_main_flow, build_drive_letter_allocations, parse_worker_drive_letters
+from app.modules.common.service import (
+    IdentityMismatchError, InitializationError, ValidationError,
+    PartitionError, PreflightError, GhostError
+)
 
 SAMPLE_DISK_SUMMARIES = [
     {
@@ -456,7 +460,7 @@ def test_validate_worker_disk_identity() -> None:
 
     try:
         main_module.validate_worker_disk_identity(disk, {**expected_identity, "unique_id": "WRONG-UID"})
-    except RuntimeError as exc:
+    except IdentityMismatchError as exc:
         if "UniqueId 不一致" not in str(exc):
             raise AssertionError(f"硬盘身份不一致错误信息不正确: {exc}") from exc
     else:
@@ -464,7 +468,7 @@ def test_validate_worker_disk_identity() -> None:
 
     try:
         main_module.validate_worker_disk_identity(disk, {**expected_identity, "size_bytes": 1})
-    except RuntimeError as exc:
+    except IdentityMismatchError as exc:
         if "硬盘容量不一致" not in str(exc):
             raise AssertionError(f"硬盘容量不一致错误信息不正确: {exc}") from exc
     else:
@@ -477,7 +481,7 @@ def test_launch_worker_windows_uses_powershell() -> None:
     sleep_calls: list[float] = []
     original_popen = main_module.subprocess.Popen
 
-    def fake_popen(args, cwd=None, creationflags=0):
+    def fake_popen(args, cwd=None, creationflags=0, env=None):
         launched.append((args, cwd))
 
         class FakeProcess:
@@ -526,13 +530,13 @@ def test_launch_worker_windows_uses_powershell() -> None:
         raise AssertionError(f"worker 命令未包含硬盘容量: {launched}")
     if "--worker-drive-letters" not in launched[0][0][-1] or "E,F,G,H" not in launched[0][0][-1]:
         raise AssertionError(f"worker 命令未包含盘符: {launched}")
-    if sleep_calls != [3.0]:
+    if sleep_calls != [6.0]:
         raise AssertionError(f"worker 启动间隔不正确: {sleep_calls}")
 
     output = captured.getvalue()
     if "硬盘 2: 已启动独立执行窗口" not in output or "硬盘 3: 已启动独立执行窗口" not in output:
         raise AssertionError("启动 worker 窗口时未输出提示")
-    if "等待 3 秒后启动下一个 worker" not in output:
+    if "等待 6 秒后启动下一个 worker" not in output:
         raise AssertionError("启动 worker 窗口时未输出等待提示")
 
 
@@ -624,7 +628,7 @@ def test_main_flow_stops_when_initialization_fails() -> None:
                 input_func=lambda prompt: "1",
                 preflight_runner=build_successful_preflight_report,
             )
-    except RuntimeError as exc:
+    except InitializationError as exc:
         if str(exc) != "硬盘初始化失败: 硬盘 1: 初始化失败":
             raise AssertionError(f"初始化失败时异常信息不正确: {exc}")
     else:
@@ -667,7 +671,7 @@ def test_main_flow_stops_when_initialization_validation_fails() -> None:
                 input_func=lambda prompt: "1",
                 preflight_runner=build_successful_preflight_report,
             )
-    except RuntimeError as exc:
+    except ValidationError as exc:
         if str(exc) != "初始化结果验证失败: 硬盘 1: 初始化后分区表格式不是 GPT: MBR":
             raise AssertionError(f"初始化验证失败时异常信息不正确: {exc}")
     else:
@@ -715,7 +719,7 @@ def test_main_flow_stops_when_partition_fails() -> None:
                 input_func=lambda prompt: "1",
                 preflight_runner=build_successful_preflight_report,
             )
-    except RuntimeError as exc:
+    except PartitionError as exc:
         if str(exc) != "硬盘分区和格式化失败: 硬盘 1: 分区失败":
             raise AssertionError(f"分区失败时异常信息不正确: {exc}")
     else:
@@ -769,7 +773,7 @@ def test_main_flow_stops_when_partition_validation_fails() -> None:
                 input_func=lambda prompt: "1",
                 preflight_runner=build_successful_preflight_report,
             )
-    except RuntimeError as exc:
+    except ValidationError as exc:
         if str(exc) != "分区和格式化结果验证失败: 硬盘 1: 分区验证失败":
             raise AssertionError(f"分区验证失败时异常信息不正确: {exc}")
     else:
@@ -794,7 +798,7 @@ def test_failed_preflight_main_flow() -> None:
                 input_func=lambda prompt: "1",
                 preflight_runner=build_failed_preflight_report,
             )
-    except RuntimeError as exc:
+    except PreflightError as exc:
         if str(exc) != "运行前检查失败":
             raise AssertionError(f"运行前检查失败时异常信息不正确: {exc}")
     else:
@@ -843,7 +847,7 @@ def test_main_flow_stops_when_ghost_fails() -> None:
                 input_func=lambda prompt: "1",
                 preflight_runner=build_successful_preflight_report,
             )
-    except RuntimeError as exc:
+    except GhostError as exc:
         if "Ghost 镜像写入失败" not in str(exc):
             raise AssertionError(f"Ghost 失败时异常信息不正确: {exc}")
     else:
