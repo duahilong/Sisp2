@@ -409,6 +409,16 @@ def run_worker_flow(
 
 
 
+def wait_for_exit() -> None:
+    """等待用户按 Enter 键退出，仅在交互式终端中生效"""
+    if sys.stdin.isatty():
+        try:
+            input("按 Enter 键退出...")
+        except (EOFError, KeyboardInterrupt):
+            pass
+
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_command_line_args(argv)
@@ -422,18 +432,18 @@ def main(argv: list[str] | None = None) -> int:
             drive_letters = parse_worker_drive_letters(args.worker_drive_letters) if args.worker_drive_letters else None
             run_worker_flow(args.worker_disk, config_path=args.config_path, expected_identity=expected_identity, drive_letters=drive_letters)
             print()
-            input("按 Enter 键退出...")
+            wait_for_exit()
             return ErrorCode.SUCCESS
         else:
             run_minimal_main_flow(config_path=args.config_path)
         return ErrorCode.SUCCESS
     except SispError as exc:
         print(f"运行失败: {exc}", file=sys.stderr)
-        input("按 Enter 键退出...")
+        wait_for_exit()
         return exc.error_code
     except Exception as exc:
         print(f"运行失败: {exc}", file=sys.stderr)
-        input("按 Enter 键退出...")
+        wait_for_exit()
         return ErrorCode.PREFLIGHT_FAILED
 
 
