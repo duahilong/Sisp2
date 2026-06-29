@@ -18,7 +18,7 @@ PROJECT_ROOT = get_app_dir()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.modules.disk_info.service import scan_disk_summaries
+from app.modules.disk_info.service import scan_disk_summaries, scan_used_drive_letters
 from app.modules.disk_initializer.service import initialize_disks, print_initialize_results
 from app.modules.disk_partitioner.service import partition_and_format_disks, print_partition_results
 from app.modules.ghost_writer.service import print_ghost_results, write_ghost_image
@@ -131,13 +131,22 @@ def validate_worker_disk_identity(disk: dict[str, Any], expected_identity: dict[
 
 
 
-def build_drive_letter_allocations(disk_numbers: list[int]) -> dict[int, dict[str, str]]:
+def build_drive_letter_allocations(
+    disk_numbers: list[int],
+    forbidden_letters: list[str] | set[str] | None = None,
+) -> dict[int, dict[str, str]]:
+    forbidden = {str(letter).upper() for letter in (forbidden_letters or [])}
+    pool = [letter for letter in AVAILABLE_DRIVE_LETTERS if letter not in forbidden]
     allocations: dict[int, dict[str, str]] = {}
     index = 0
     for disk_number in disk_numbers:
-        if index + 4 > len(AVAILABLE_DRIVE_LETTERS):
-            raise RuntimeError(f"可用盘符不足，无法为硬盘 {disk_number} 分配 4 个盘符")
-        letters = AVAILABLE_DRIVE_LETTERS[index:index + 4]
+        if index + 4 > len(pool):
+            occupied = [letter for letter in AVAILABLE_DRIVE_LETTERS if letter in forbidden]
+            raise RuntimeError(
+                f"可用盘符不足，无法为硬盘 {disk_number} 分配 4 个盘符，"
+                f"被占用: {occupied}"
+            )
+        letters = pool[index:index + 4]
         allocations[disk_number] = {
             "efi": letters[0],
             "windows": letters[1],
@@ -162,6 +171,21 @@ def parse_worker_drive_letters(text: str) -> dict[str, str]:
         "data1": letters[2],
         "data2": letters[3],
     }
+
+
+
+def build_forbidden_drive_letters(
+    disk_summaries: list[dict[str, Any]],
+    selected_disk_numbers: list[int],
+    used_letters: list[str],
+) -> list[str]:
+    selected_own: set[str] = set()
+    selected_set = set(selected_disk_numbers)
+    for disk in disk_summaries:
+        if disk.get("disk_number") in selected_set:
+            for letter in disk.get("drive_letters") or []:
+                selected_own.add(str(letter).upper())
+    return [str(letter).upper() for letter in used_letters if str(letter).upper() not in selected_own]
 
 
 
@@ -363,10 +387,16 @@ def run_minimal_main_flow(
     print(f"配置文件: {config_payload.get('config_path')}")
     print_disk_summaries(disk_summaries)
     selected_disk_numbers = prompt_disk_selection(disk_summaries, input_func=input_func)
+    if selected_disk_numbers:
+        used_letters = scan_used_drive_letters()
+        forbidden = build_forbidden_drive_letters(disk_summaries, selected_disk_numbers, used_letters)
+    else:
+        forbidden = []
+
     if len(selected_disk_numbers) > 1:
         launcher = worker_launcher or launch_worker_windows
         print("已选择多个硬盘，将为每个硬盘启动独立执行窗口")
-        allocations = build_drive_letter_allocations(selected_disk_numbers)
+        allocations = build_drive_letter_allocations(selected_disk_numbers, forbidden_letters=forbidden)
         identities = build_worker_disk_identities(disk_summaries, selected_disk_numbers)
         for identity in identities:
             identity["drive_letters"] = allocations.get(identity["disk_number"])
@@ -377,7 +407,7 @@ def run_minimal_main_flow(
         return selected_disk_numbers
 
     if selected_disk_numbers:
-        allocations = build_drive_letter_allocations(selected_disk_numbers)
+        allocations = build_drive_letter_allocations(selected_disk_numbers, forbidden_letters=forbidden)
         run_single_disk_flow(selected_disk_numbers[0], config_payload, drive_letters=allocations.get(selected_disk_numbers[0]))
 
     return selected_disk_numbers

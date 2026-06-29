@@ -68,9 +68,11 @@ def run_case(case_name: str, user_input: str) -> str:
     status = "通过"
     exception_text = "无"
     original_scan_disk_summaries = main_module.scan_disk_summaries
+    original_scan_used_drive_letters = main_module.scan_used_drive_letters
 
     try:
         main_module.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
+        main_module.scan_used_drive_letters = lambda: []
         with redirect_stdout(captured):
             run_minimal_main_flow(
                 input_func=lambda prompt: user_input,
@@ -81,6 +83,7 @@ def run_case(case_name: str, user_input: str) -> str:
         exception_text = f"{type(exc).__name__}: {exc}"
     finally:
         main_module.scan_disk_summaries = original_scan_disk_summaries
+        main_module.scan_used_drive_letters = original_scan_used_drive_letters
 
     output = captured.getvalue().rstrip()
     input_display = user_input if user_input else "<空输入>"

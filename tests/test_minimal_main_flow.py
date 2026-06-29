@@ -8,7 +8,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import app.main as main_module
-from app.main import parse_command_line_args, run_minimal_main_flow, build_drive_letter_allocations, parse_worker_drive_letters
+from app.main import parse_command_line_args, run_minimal_main_flow, build_drive_letter_allocations, parse_worker_drive_letters, build_forbidden_drive_letters
 from app.modules.common.service import (
     IdentityMismatchError, InitializationError, ValidationError,
     PartitionError, PreflightError, GhostError
@@ -205,6 +205,7 @@ def test_parse_command_line_args() -> None:
 def test_successful_main_flow() -> None:
     target_number = 1
     original_scan_disk_summaries = main_module.scan_disk_summaries
+    original_scan_used_drive_letters = main_module.scan_used_drive_letters
     original_initialize_disks = main_module.initialize_disks
     original_partition_and_format_disks = main_module.partition_and_format_disks
     original_validate_partitioned_disks = main_module.validate_partitioned_disks
@@ -212,6 +213,7 @@ def test_successful_main_flow() -> None:
     original_copy_directory = main_module.copy_directory
     original_create_boot_record = main_module.create_boot_record
     main_module.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
+    main_module.scan_used_drive_letters = lambda: []
     main_module.initialize_disks = lambda disk_numbers: [
         {
             "disk_number": number,
@@ -255,6 +257,7 @@ def test_successful_main_flow() -> None:
             )
     finally:
         main_module.scan_disk_summaries = original_scan_disk_summaries
+        main_module.scan_used_drive_letters = original_scan_used_drive_letters
         main_module.initialize_disks = original_initialize_disks
         main_module.partition_and_format_disks = original_partition_and_format_disks
         main_module.validate_partitioned_disks = original_validate_partitioned_disks
@@ -298,6 +301,7 @@ def test_successful_main_flow() -> None:
 def test_successful_main_flow_with_custom_json_path() -> None:
     custom_path = "D:\\custom\\demo.json"
     original_scan_disk_summaries = main_module.scan_disk_summaries
+    original_scan_used_drive_letters = main_module.scan_used_drive_letters
     original_initialize_disks = main_module.initialize_disks
     original_partition_and_format_disks = main_module.partition_and_format_disks
     original_validate_partitioned_disks = main_module.validate_partitioned_disks
@@ -305,6 +309,7 @@ def test_successful_main_flow_with_custom_json_path() -> None:
     original_copy_directory = main_module.copy_directory
     original_create_boot_record = main_module.create_boot_record
     main_module.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
+    main_module.scan_used_drive_letters = lambda: []
     main_module.initialize_disks = lambda disk_numbers: [
         {
             "disk_number": number,
@@ -349,6 +354,7 @@ def test_successful_main_flow_with_custom_json_path() -> None:
             )
     finally:
         main_module.scan_disk_summaries = original_scan_disk_summaries
+        main_module.scan_used_drive_letters = original_scan_used_drive_letters
         main_module.initialize_disks = original_initialize_disks
         main_module.partition_and_format_disks = original_partition_and_format_disks
         main_module.validate_partitioned_disks = original_validate_partitioned_disks
@@ -365,8 +371,10 @@ def test_successful_main_flow_with_custom_json_path() -> None:
 
 def test_multi_disk_main_flow_launches_worker_windows() -> None:
     original_scan_disk_summaries = main_module.scan_disk_summaries
+    original_scan_used_drive_letters = main_module.scan_used_drive_letters
     original_run_single_disk_flow = main_module.run_single_disk_flow
     main_module.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
+    main_module.scan_used_drive_letters = lambda: []
 
     launched: list[tuple[list[dict], str | None]] = []
     current_process_calls: list[int] = []
@@ -386,6 +394,7 @@ def test_multi_disk_main_flow_launches_worker_windows() -> None:
             )
     finally:
         main_module.scan_disk_summaries = original_scan_disk_summaries
+        main_module.scan_used_drive_letters = original_scan_used_drive_letters
         main_module.run_single_disk_flow = original_run_single_disk_flow
 
     if selected_disk_numbers != [1, 2]:
@@ -614,8 +623,10 @@ def test_main_uses_json_argument() -> None:
 
 def test_main_flow_stops_when_initialization_fails() -> None:
     original_scan_disk_summaries = main_module.scan_disk_summaries
+    original_scan_used_drive_letters = main_module.scan_used_drive_letters
     original_initialize_disks = main_module.initialize_disks
     main_module.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
+    main_module.scan_used_drive_letters = lambda: []
     main_module.initialize_disks = lambda disk_numbers: [
         {"disk_number": number, "passed": False, "message": "初始化失败", "disk": None}
         for number in disk_numbers
@@ -635,6 +646,7 @@ def test_main_flow_stops_when_initialization_fails() -> None:
         raise AssertionError("初始化失败时主流程应中止")
     finally:
         main_module.scan_disk_summaries = original_scan_disk_summaries
+        main_module.scan_used_drive_letters = original_scan_used_drive_letters
         main_module.initialize_disks = original_initialize_disks
 
     output = captured.getvalue()
@@ -645,8 +657,10 @@ def test_main_flow_stops_when_initialization_fails() -> None:
 
 def test_main_flow_stops_when_initialization_validation_fails() -> None:
     original_scan_disk_summaries = main_module.scan_disk_summaries
+    original_scan_used_drive_letters = main_module.scan_used_drive_letters
     original_initialize_disks = main_module.initialize_disks
     main_module.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
+    main_module.scan_used_drive_letters = lambda: []
     main_module.initialize_disks = lambda disk_numbers: [
         {
             "disk_number": number,
@@ -678,6 +692,7 @@ def test_main_flow_stops_when_initialization_validation_fails() -> None:
         raise AssertionError("初始化验证失败时主流程应中止")
     finally:
         main_module.scan_disk_summaries = original_scan_disk_summaries
+        main_module.scan_used_drive_letters = original_scan_used_drive_letters
         main_module.initialize_disks = original_initialize_disks
 
     output = captured.getvalue()
@@ -688,9 +703,11 @@ def test_main_flow_stops_when_initialization_validation_fails() -> None:
 
 def test_main_flow_stops_when_partition_fails() -> None:
     original_scan_disk_summaries = main_module.scan_disk_summaries
+    original_scan_used_drive_letters = main_module.scan_used_drive_letters
     original_initialize_disks = main_module.initialize_disks
     original_partition_and_format_disks = main_module.partition_and_format_disks
     main_module.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
+    main_module.scan_used_drive_letters = lambda: []
     main_module.initialize_disks = lambda disk_numbers: [
         {
             "disk_number": number,
@@ -726,6 +743,7 @@ def test_main_flow_stops_when_partition_fails() -> None:
         raise AssertionError("分区失败时主流程应中止")
     finally:
         main_module.scan_disk_summaries = original_scan_disk_summaries
+        main_module.scan_used_drive_letters = original_scan_used_drive_letters
         main_module.initialize_disks = original_initialize_disks
         main_module.partition_and_format_disks = original_partition_and_format_disks
 
@@ -737,10 +755,12 @@ def test_main_flow_stops_when_partition_fails() -> None:
 
 def test_main_flow_stops_when_partition_validation_fails() -> None:
     original_scan_disk_summaries = main_module.scan_disk_summaries
+    original_scan_used_drive_letters = main_module.scan_used_drive_letters
     original_initialize_disks = main_module.initialize_disks
     original_partition_and_format_disks = main_module.partition_and_format_disks
     original_validate_partitioned_disks = main_module.validate_partitioned_disks
     main_module.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
+    main_module.scan_used_drive_letters = lambda: []
     main_module.initialize_disks = lambda disk_numbers: [
         {
             "disk_number": number,
@@ -780,6 +800,7 @@ def test_main_flow_stops_when_partition_validation_fails() -> None:
         raise AssertionError("分区验证失败时主流程应中止")
     finally:
         main_module.scan_disk_summaries = original_scan_disk_summaries
+        main_module.scan_used_drive_letters = original_scan_used_drive_letters
         main_module.initialize_disks = original_initialize_disks
         main_module.partition_and_format_disks = original_partition_and_format_disks
         main_module.validate_partitioned_disks = original_validate_partitioned_disks
@@ -819,11 +840,13 @@ def test_failed_preflight_main_flow() -> None:
 
 def test_main_flow_stops_when_ghost_fails() -> None:
     original_scan_disk_summaries = main_module.scan_disk_summaries
+    original_scan_used_drive_letters = main_module.scan_used_drive_letters
     original_initialize_disks = main_module.initialize_disks
     original_partition_and_format_disks = main_module.partition_and_format_disks
     original_validate_partitioned_disks = main_module.validate_partitioned_disks
     original_write_ghost_image = main_module.write_ghost_image
     main_module.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
+    main_module.scan_used_drive_letters = lambda: []
     main_module.initialize_disks = lambda disk_numbers: [
         {"disk_number": number, "passed": True, "message": "硬盘初始化完成", "disk": {"disk_number": number, "partition_style": "GPT", "is_boot": False, "is_system": False, "is_offline": False, "is_read_only": False}}
         for number in disk_numbers
@@ -854,6 +877,7 @@ def test_main_flow_stops_when_ghost_fails() -> None:
         raise AssertionError("Ghost 失败时主流程应中止")
     finally:
         main_module.scan_disk_summaries = original_scan_disk_summaries
+        main_module.scan_used_drive_letters = original_scan_used_drive_letters
         main_module.initialize_disks = original_initialize_disks
         main_module.partition_and_format_disks = original_partition_and_format_disks
         main_module.validate_partitioned_disks = original_validate_partitioned_disks
@@ -865,10 +889,136 @@ def test_main_flow_stops_when_ghost_fails() -> None:
 
 
 
+def test_build_drive_letter_allocations_with_forbidden() -> None:
+    single = build_drive_letter_allocations([2], forbidden_letters=["E", "F"])
+    if single != {2: {"efi": "G", "windows": "H", "data1": "I", "data2": "J"}}:
+        raise AssertionError(f"跳过占用盘符后单盘分配不正确: {single}")
+
+    multi = build_drive_letter_allocations([2, 3], forbidden_letters=["E", "F", "G"])
+    if multi != {
+        2: {"efi": "H", "windows": "I", "data1": "J", "data2": "K"},
+        3: {"efi": "L", "windows": "M", "data1": "N", "data2": "O"},
+    }:
+        raise AssertionError(f"跳过占用盘符后多盘分配不正确: {multi}")
+
+    no_forbidden = build_drive_letter_allocations([2])
+    if no_forbidden != {2: {"efi": "E", "windows": "F", "data1": "G", "data2": "H"}}:
+        raise AssertionError(f"无禁用盘符时分配应与旧行为一致: {no_forbidden}")
+
+    empty_forbidden = build_drive_letter_allocations([2], forbidden_letters=[])
+    if empty_forbidden != {2: {"efi": "E", "windows": "F", "data1": "G", "data2": "H"}}:
+        raise AssertionError(f"空禁用列表时分配应与旧行为一致: {empty_forbidden}")
+
+
+
+def test_build_drive_letter_allocations_insufficient_with_forbidden() -> None:
+    try:
+        build_drive_letter_allocations([2], forbidden_letters=list("EFGHIJKLMNOPQRSTUVWXYZ"))
+    except RuntimeError as exc:
+        if "可用盘符不足" not in str(exc):
+            raise AssertionError(f"盘符不足错误信息不正确: {exc}") from exc
+    else:
+        raise AssertionError("盘符不足时应报错")
+
+
+
+def test_build_forbidden_drive_letters() -> None:
+    disk_summaries = [
+        {"disk_number": 0, "drive_letters": ["C"]},
+        {"disk_number": 1, "drive_letters": ["E", "F"]},
+        {"disk_number": 2, "drive_letters": []},
+    ]
+
+    result = build_forbidden_drive_letters(disk_summaries, [1, 2], ["C", "D", "E", "F"])
+    if result != ["C", "D"]:
+        raise AssertionError(f"应排除选中盘自身盘符 E，F，实际: {result}")
+
+    result2 = build_forbidden_drive_letters(disk_summaries, [1], ["C", "E", "F", "G"])
+    if result2 != ["C", "G"]:
+        raise AssertionError(f"选中单盘时应排除其自身 E，F，实际: {result2}")
+
+    result3 = build_forbidden_drive_letters(disk_summaries, [], ["C", "E"])
+    if result3 != ["C", "E"]:
+        raise AssertionError(f"无选中盘时不应排除任何盘符: {result3}")
+
+    result4 = build_forbidden_drive_letters(disk_summaries, [2], ["C", "E"])
+    if result4 != ["C", "E"]:
+        raise AssertionError(f"所选盘无盘符时不应排除: {result4}")
+
+
+
+def test_main_flow_pre_scans_used_letters() -> None:
+    original_scan_disk_summaries = main_module.scan_disk_summaries
+    original_scan_used_drive_letters = main_module.scan_used_drive_letters
+    original_partition_and_format_disks = main_module.partition_and_format_disks
+    original_initialize_disks = main_module.initialize_disks
+    original_validate_partitioned_disks = main_module.validate_partitioned_disks
+    original_write_ghost_image = main_module.write_ghost_image
+    original_copy_directory = main_module.copy_directory
+    original_create_boot_record = main_module.create_boot_record
+    main_module.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
+    main_module.scan_used_drive_letters = lambda: ["E", "F"]
+    main_module.initialize_disks = lambda disk_numbers: [
+        {"disk_number": number, "passed": True, "message": "硬盘初始化完成", "disk": {"disk_number": number, "partition_style": "GPT", "is_boot": False, "is_system": False, "is_offline": False, "is_read_only": False}}
+        for number in disk_numbers
+    ]
+    received_drive_letters: list[dict | None] = []
+    main_module.partition_and_format_disks = lambda disk_numbers, partition_info, drive_letters=None: (
+        received_drive_letters.append(drive_letters)
+        or [{"disk_number": number, "passed": True, "message": "硬盘分区和格式化完成", "partitions": {"c_drive_letter": "G", "d1_drive_letter": "H", "efi_drive_letter": "F", "d2_drive_letter": "I"}} for number in disk_numbers]
+    )
+    main_module.validate_partitioned_disks = lambda disk_numbers, partition_info, disk_scanner=None, drive_letters=None: [
+        {"disk_number": number, "passed": True, "message": "分区和格式化结果验证通过"}
+        for number in disk_numbers
+    ]
+    main_module.write_ghost_image = lambda gho_exe, win_gho, disk_number, windows_drive_letter: {
+        "disk_number": disk_number, "passed": True, "message": "Ghost 镜像写入成功"
+    }
+    main_module.copy_directory = lambda source_dir, data1_drive_letter, disk_number: {
+        "disk_number": disk_number, "passed": True, "message": "目录拷贝成功"
+    }
+    main_module.create_boot_record = lambda bcd_exe, windows_drive_letter, efi_drive_letter, disk_number: {
+        "disk_number": disk_number, "passed": True, "message": "引导记录创建成功"
+    }
+
+    captured = io.StringIO()
+    try:
+        with redirect_stdout(captured):
+            run_minimal_main_flow(
+                input_func=lambda prompt: "1",
+                preflight_runner=build_successful_preflight_report,
+            )
+    finally:
+        main_module.scan_disk_summaries = original_scan_disk_summaries
+        main_module.scan_used_drive_letters = original_scan_used_drive_letters
+        main_module.partition_and_format_disks = original_partition_and_format_disks
+        main_module.initialize_disks = original_initialize_disks
+        main_module.validate_partitioned_disks = original_validate_partitioned_disks
+        main_module.write_ghost_image = original_write_ghost_image
+        main_module.copy_directory = original_copy_directory
+        main_module.create_boot_record = original_create_boot_record
+
+    if not received_drive_letters:
+        raise AssertionError("未接收到分区盘符")
+
+    actual = received_drive_letters[0]
+    if not actual:
+        raise AssertionError("分区模块未收到盘符分配")
+
+    if actual.get("efi") != "G" or actual.get("windows") != "H" or actual.get("data1") != "I" or actual.get("data2") != "J":
+        raise AssertionError(
+            f"预扫发现 E/F 被占用时盘符应跳过到 G/H/I/J，实际: {actual}"
+        )
+
+
+
 def main() -> int:
     try:
         test_build_drive_letter_allocations()
         test_build_drive_letter_allocations_overflow()
+        test_build_drive_letter_allocations_with_forbidden()
+        test_build_drive_letter_allocations_insufficient_with_forbidden()
+        test_build_forbidden_drive_letters()
         test_parse_worker_drive_letters()
         test_parse_command_line_args()
         test_successful_main_flow()
@@ -885,6 +1035,7 @@ def main() -> int:
         test_main_flow_stops_when_partition_validation_fails()
         test_main_flow_stops_when_ghost_fails()
         test_failed_preflight_main_flow()
+        test_main_flow_pre_scans_used_letters()
         return 0
     except Exception as exc:
         print(f"测试失败: {exc}", file=sys.stderr)

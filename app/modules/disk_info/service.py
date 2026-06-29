@@ -76,6 +76,13 @@ foreach ($disk in $disks) {
 $result | ConvertTo-Json -Depth 6
 """.strip()
 
+USED_DRIVE_LETTERS_SCRIPT = r"""
+$letters = @()
+$letters += Get-Volume | Where-Object { $_.DriveLetter } | ForEach-Object { $_.DriveLetter.ToString().ToUpper() }
+$letters += Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Name -match '^[A-Z]$' } | ForEach-Object { $_.Name.ToUpper() }
+$letters | Select-Object -Unique | Sort-Object
+""".strip()
+
 INVALID_SIZE_DISPLAY = "大小异常"
 UNKNOWN_SIZE_DISPLAY = "未知"
 
@@ -170,3 +177,24 @@ def scan_disks() -> list[dict[str, Any]]:
 
 def scan_disk_summaries() -> list[dict[str, Any]]:
     return [summarize_disk(disk) for disk in scan_disks()]
+
+
+
+def scan_used_drive_letters() -> list[str]:
+    completed = run_powershell(USED_DRIVE_LETTERS_SCRIPT)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "扫描已用盘符失败\n"
+            f"退出码: {completed.returncode}\n"
+            f"标准输出:\n{completed.stdout}\n"
+            f"标准错误:\n{completed.stderr}"
+        )
+    stdout = (completed.stdout or "").strip()
+    if not stdout:
+        return []
+    letters: list[str] = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if line and line not in letters:
+            letters.append(line.upper())
+    return letters
