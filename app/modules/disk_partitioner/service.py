@@ -80,7 +80,10 @@ def build_partition_disk_script(disk_numbers: list[int], efi_size_mb: int | floa
             lines.extend(
                 [
                     f"$assignedLetters = @({', '.join(repr(l) for l in assigned)})",
+                    "# 清理可能的幽灵盘符（EFI盘符在Clear-Disk后注册表残留）",
                     "foreach ($letter in $assignedLetters) {",
+                    "    $mountPoint = \"$letter`:\\\"",
+                    "    mountvol $mountPoint /d *>$null",
                     "    $existingVolume = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue",
                     "    if ($existingVolume) {",
                     f"        throw \"盘符 $letter 已被占用，无法继续分区: {disk_number}\"",
