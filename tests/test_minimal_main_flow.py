@@ -8,10 +8,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import app.main as main_module
-from app.main import parse_command_line_args, run_minimal_main_flow, build_drive_letter_allocations, parse_worker_drive_letters, build_forbidden_drive_letters
+from app.main import parse_command_line_args, run_minimal_main_flow, build_drive_letter_allocations, parse_worker_drive_letters, build_forbidden_drive_letters, validate_required_paths
 from app.modules.common.service import (
     IdentityMismatchError, InitializationError, ValidationError,
-    PartitionError, PreflightError, GhostError
+    PartitionError, PreflightError, GhostError, ConfigError
 )
 
 SAMPLE_DISK_SUMMARIES = [
@@ -77,9 +77,9 @@ def build_successful_preflight_report(config_path: str | Path | None = None) -> 
         "config_payload": {
             "config_path": resolved_path,
             "partition_info": {"efi_size_mb": 100, "c_size_gb": 1536},
-            "image_info": {"image_path": "D:\\sisp2\\img\\111.GHO"},
-            "software_paths": {"ghost64_path": "D:\\sisp2\\sw\\ghost64.exe", "bcdboot_path": "D:\\sisp2\\sw\\bcdboot.exe"},
-            "copy_info": {"source_dir": "D:\\常用软件"},
+            "image_info": {"image_path": str(PROJECT_ROOT / "README.md")},
+            "software_paths": {"ghost64_path": str(PROJECT_ROOT / "sw" / "ghost64.exe"), "bcdboot_path": str(PROJECT_ROOT / "sw" / "bcdboot.exe")},
+            "copy_info": {"source_dir": str(PROJECT_ROOT)},
             "excluded_disk_names": [],
         },
     }
@@ -199,6 +199,19 @@ def test_parse_command_line_args() -> None:
         raise AssertionError(f"worker 盘符参数解析结果不正确: {worker_args.worker_drive_letters}")
     if worker_args.config_path != "D:\\temp\\demo.json":
         raise AssertionError(f"worker 模式 -j 参数解析结果不正确: {worker_args.config_path}")
+
+
+
+def test_validate_required_paths_rejects_missing_file() -> None:
+    payload = build_successful_preflight_report()["config_payload"]
+    payload["image_info"] = {"image_path": "D:\\missing\\missing.gho"}
+    try:
+        validate_required_paths(payload)
+    except ConfigError as exc:
+        if "不存在" not in str(exc):
+            raise AssertionError(f"路径缺失错误信息不正确: {exc}") from exc
+    else:
+        raise AssertionError("关键路径不存在时应拒绝继续执行")
 
 
 
@@ -1021,6 +1034,7 @@ def main() -> int:
         test_build_forbidden_drive_letters()
         test_parse_worker_drive_letters()
         test_parse_command_line_args()
+        test_validate_required_paths_rejects_missing_file()
         test_successful_main_flow()
         test_successful_main_flow_with_custom_json_path()
         test_multi_disk_main_flow_launches_worker_windows()

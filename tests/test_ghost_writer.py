@@ -78,6 +78,18 @@ def test_write_ghost_image_success() -> None:
 
 
 
+def test_write_ghost_image_rejects_system_drive() -> None:
+    def fake_runner(command: list[str]) -> CompletedProcess[str]:
+        raise AssertionError("系统盘防护失败时不应执行 Ghost")
+
+    result = write_ghost_image("D:\\sw\\ghost64.exe", "D:\\img\\111.GHO", 2, "C", ghost_runner=fake_runner)
+    if result.get("passed"):
+        raise AssertionError(f"系统盘写入不应通过: {result}")
+    if "系统盘" not in result.get("message", ""):
+        raise AssertionError(f"系统盘错误消息不正确: {result}")
+
+
+
 def test_write_ghost_image_failure() -> None:
     def fake_runner(command: list[str]) -> CompletedProcess[str]:
         return CompletedProcess(args=command, returncode=1, stdout="", stderr="Ghost error")
@@ -147,6 +159,7 @@ def main() -> int:
         test_build_ghost_command()
         test_build_ghost_command_rejects_invalid_inputs()
         test_write_ghost_image_success()
+        test_write_ghost_image_rejects_system_drive()
         test_write_ghost_image_failure()
         test_write_ghost_image_verification_failure()
         test_write_ghost_image_file_not_found()

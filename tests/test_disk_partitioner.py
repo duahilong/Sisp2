@@ -27,8 +27,10 @@ def test_build_partition_disk_script() -> None:
     assert_contains(script, "Remove-Partition")
     assert_contains(script, "$efiSize = [UInt64]")
     assert_contains(script, "New-Partition -DiskNumber 2 -Size $efiSize")
+    assert_contains(script, "if (-not $efiPartition) { throw 'EFI 分区创建失败' }")
     assert_contains(script, "Format-Volume -FileSystem FAT32")
     assert_contains(script, "New-Partition -DiskNumber 2 -Size $cSize -AssignDriveLetter")
+    assert_contains(script, "if (-not $cPartition) { throw 'Windows 分区创建失败' }")
     assert_contains(script, "Format-Volume -FileSystem NTFS")
     assert_contains(script, "IsBoot")
     assert_contains(script, "IsSystem")
@@ -38,8 +40,10 @@ def test_build_partition_disk_script() -> None:
     assert_contains(script, "$freeSpace = $disk.LargestFreeExtent")
     assert_contains(script, "$halfSize = [UInt64]([Math]::Floor($freeSpace / 2))")
     assert_contains(script, "New-Partition -DiskNumber 2 -Size $halfSize -AssignDriveLetter")
+    assert_contains(script, "if (-not $d1Partition) { throw 'Data1 分区创建失败' }")
     assert_contains(script, "NewFileSystemLabel 'Data1'")
     assert_contains(script, "New-Partition -DiskNumber 2 -UseMaximumSize -AssignDriveLetter")
+    assert_contains(script, "if (-not $d2Partition) { throw 'Data2 分区创建失败' }")
     assert_contains(script, "NewFileSystemLabel 'Data2'")
 
 
@@ -48,6 +52,7 @@ def test_build_partition_disk_script_with_drive_letters() -> None:
     script = build_partition_disk_script([2], 100, 6, drive_letters={"efi": "E", "windows": "F", "data1": "G", "data2": "H"})
 
     assert_contains(script, "$assignedLetters = @('E', 'F', 'G', 'H')")
+    assert_contains(script, "mountvol $mountPoint /d")
     assert_contains(script, "Get-Volume -DriveLetter $letter")
     assert_contains(script, "-DriveLetter 'E'")
     assert_contains(script, "-DriveLetter 'F'")

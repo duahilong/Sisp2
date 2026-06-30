@@ -75,6 +75,16 @@ def test_validate_partitioned_disks_success() -> None:
 
 
 
+def test_validate_partitioned_disks_accepts_efi_guid_without_braces() -> None:
+    disk = build_partitioned_disk()
+    disk["partitions"][1]["type"] = "Basic"
+    disk["partitions"][1]["gpt_type"] = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+    results = validate_partitioned_disks([2], PARTITION_INFO, disk_scanner=lambda: [disk])
+    if results != [{"disk_number": 2, "passed": True, "message": "分区和格式化结果验证通过"}]:
+        raise AssertionError(f"无花括号 EFI GUID 应通过验证: {results}")
+
+
+
 def test_validate_partitioned_disks_missing_disk() -> None:
     results = validate_partitioned_disks([2], PARTITION_INFO, disk_scanner=lambda: [])
     assert_failed(results[0], "未找到目标硬盘")
@@ -216,6 +226,7 @@ def test_validate_partitioned_disks_rejects_empty_numbers() -> None:
 def main() -> int:
     try:
         test_validate_partitioned_disks_success()
+        test_validate_partitioned_disks_accepts_efi_guid_without_braces()
         test_validate_partitioned_disks_missing_disk()
         test_validate_partitioned_disks_rejects_non_gpt()
         test_validate_partitioned_disks_rejects_boot_or_system_disk()

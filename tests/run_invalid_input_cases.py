@@ -54,9 +54,9 @@ def build_successful_preflight_report(config_path: str | Path | None = None) -> 
         "config_payload": {
             "config_path": resolved_path,
             "partition_info": {"efi_size_mb": 100, "c_size_gb": 1536},
-            "image_info": {"image_path": "D:\\sisp2\\img\\111.GHO"},
-            "software_paths": {"ghost64_path": "D:\\sisp2\\sw\\ghost64.exe", "bcdboot_path": "D:\\sisp2\\sw\\bcdboot.exe"},
-            "copy_info": {"source_dir": "D:\\常用软件"},
+            "image_info": {"image_path": str(PROJECT_ROOT / "README.md")},
+            "software_paths": {"ghost64_path": str(PROJECT_ROOT / "sw" / "ghost64.exe"), "bcdboot_path": str(PROJECT_ROOT / "sw" / "bcdboot.exe")},
+            "copy_info": {"source_dir": str(PROJECT_ROOT)},
             "excluded_disk_names": [],
         },
     }

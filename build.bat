@@ -10,7 +10,7 @@ if exist build rmdir /s /q build
 if exist Sisp.spec del Sisp.spec
 
 echo 开始打包...
-pyinstaller --onefile --name Sisp --console ^
+py -m PyInstaller --onedir --name Sisp --console ^
   --icon=app.ico ^
   --add-data "json;json" ^
   --hidden-import app.modules.common ^
@@ -46,23 +46,23 @@ if %errorlevel% neq 0 (
 )
 
 echo 打包完成！
-echo 输出文件: dist\Sisp.exe
+echo 输出文件: dist\Sisp\Sisp.exe
 
 echo.
 echo 创建发布目录...
-if not exist dist\json mkdir dist\json
-if not exist dist\Sw mkdir dist\Sw
+if not exist dist\Sisp\json mkdir dist\Sisp\json
+if not exist dist\Sisp\Sw mkdir dist\Sisp\Sw
 
 echo 复制配置文件...
-copy json\win11.json dist\json\
+copy json\win11.json dist\Sisp\json\
 
 echo.
 echo ========================================
 echo 打包完成！
 echo 请将以下文件复制到发布目录：
-echo   - dist\Sisp.exe
-echo   - dist\json\win11.json
-echo   - Sw\ghost64.exe (需要手动复制)
-echo   - Sw\bcdboot.exe (需要手动复制)
+echo   - dist\Sisp\Sisp.exe
+echo   - dist\Sisp\json\win11.json
+echo   - dist\Sisp\Sw\ghost64.exe (需要手动复制)
+echo   - dist\Sisp\Sw\bcdboot.exe (需要手动复制)
 echo ========================================
 pause

@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
@@ -6,6 +7,10 @@ from typing import Any, Callable
 Ghostrunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 GhostVerifier = Callable[[str], tuple[bool, str]]
 GHOST_TIMEOUT_SECONDS = 1800
+
+
+def get_system_drive_letter() -> str:
+    return os.environ.get("SystemDrive", "C:")[0].upper()
 
 
 
@@ -60,6 +65,13 @@ def write_ghost_image(
     ghost_runner: Ghostrunner | None = None,
     ghost_verifier: GhostVerifier | None = None,
 ) -> dict[str, Any]:
+    if windows_drive_letter and windows_drive_letter.upper() == get_system_drive_letter():
+        return {
+            "disk_number": disk_number,
+            "passed": False,
+            "message": f"拒绝向系统盘 {windows_drive_letter.upper()}: 写入 Ghost 镜像",
+        }
+
     command = build_ghost_command(gho_exe, win_gho, disk_number)
     runner = ghost_runner or run_ghost
 

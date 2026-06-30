@@ -4,7 +4,8 @@ from app.modules.disk_info.service import scan_disks
 
 
 DiskScanner = Callable[[], list[dict[str, Any]]]
-SIZE_TOLERANCE_BYTES = 64 * 1024 * 1024
+SIZE_TOLERANCE_BYTES = 4 * 1024 * 1024
+EFI_PARTITION_GUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 
 
 
@@ -25,7 +26,8 @@ def find_disk(disks: list[dict[str, Any]], disk_number: int) -> dict[str, Any] |
 
 def find_efi_partition(partitions: list[dict[str, Any]]) -> dict[str, Any] | None:
     for partition in partitions:
-        if partition.get("type") == "System" or str(partition.get("gpt_type") or "").lower() == "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}":
+        gpt_type = str(partition.get("gpt_type") or "").strip("{}").lower()
+        if partition.get("type") == "System" or gpt_type == EFI_PARTITION_GUID:
             return partition
     return None
 

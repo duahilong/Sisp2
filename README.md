@@ -91,7 +91,7 @@ py -m pip install -r requirements.txt
 
 ## PyInstaller 打包支持
 
-项目已兼容 PyInstaller 打包，可编译为单独的 exe 文件。
+项目已兼容 PyInstaller 打包。默认使用 onedir 模式输出发布目录，避免单文件自解压 exe 被 Windows 智能应用控制误判拦截。
 
 **打包方式：**
 ```powershell
@@ -99,12 +99,12 @@ py -m pip install -r requirements.txt
 .\build.bat
 
 # 或手动执行打包命令
-pyinstaller --onefile --name Sisp --console --add-data "json;json" app\main.py
+py -m PyInstaller --onedir --name Sisp --console --add-data "json;json" app\main.py
 ```
 
 **打包后目录结构：**
 ```
-发布目录/
+dist/Sisp/
 ├── Sisp.exe                  # PyInstaller 打包后的 exe
 ├── json/
 │   └── win11.json            # 配置文件（外部可修改）
@@ -156,7 +156,7 @@ py .\app\main.py --worker-disk 2 -j .\json\win11.json
 - 每个 worker 会重新执行运行前检查、重新读取配置、重新扫描硬盘并重新应用磁盘保护。
 - 主程序自动启动 worker 时，会同时传入目标硬盘的 `UniqueId`、`SerialNumber`、型号和容量。
 - worker 重新扫描硬盘后，会对传入的硬盘身份信息进行二次确认；若硬盘编号对应的设备与主窗口选中的设备不一致，则中止执行。
-- 主窗口启动多个 worker 时，会在相邻 worker 之间等待 3 秒，降低多个 USB 硬盘同时初始化和分区时的存储服务抖动。
+- 主窗口启动多个 worker 时，会在相邻 worker 之间等待 6 秒，降低多个 USB 硬盘同时初始化和分区时的存储服务抖动。
 - worker 窗口执行完成后默认保持打开，方便查看结果。
 
 ## 配置说明
@@ -197,7 +197,7 @@ py .\app\main.py --worker-disk 2 -j .\json\win11.json
 ## 代码结构
 ```text
 Sisp2/
-├── Docs/                   # 项目文档
+├── docs/                   # 项目文档
 ├── Sw/                     # 外部软件目录
 ├── app/                    # 源代码目录
 │   ├── modules/
@@ -272,6 +272,6 @@ py .\tests\test_disk_info_raw.py
 - 初始化和分区步骤必须在 PowerShell 层再次校验目标硬盘不是系统盘、启动盘、离线盘或只读盘
 
 ## 相关文档
-- `Docs/项目整体.md`
-- `Docs/功能及模块设计架构.md`
-- `Docs/引用外部软件信息.md`
+- `docs/项目整体.md`
+- `docs/功能及模块设计架构.md`
+- `docs/引用外部软件信息.md`

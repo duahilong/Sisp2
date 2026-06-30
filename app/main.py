@@ -217,6 +217,21 @@ def build_target_disk_text(disk: dict[str, Any]) -> str:
 
 
 
+def validate_required_paths(config_payload: dict[str, Any]) -> None:
+    required_paths = {
+        "Ghost 可执行文件路径 (gho_exe)": (config_payload.get("software_paths") or {}).get("ghost64_path"),
+        "Ghost 镜像文件路径 (win_gho)": (config_payload.get("image_info") or {}).get("image_path"),
+        "目录拷贝源路径 (software_file)": (config_payload.get("copy_info") or {}).get("source_dir"),
+        "bcdboot 可执行文件路径 (bcd_exe)": (config_payload.get("software_paths") or {}).get("bcdboot_path"),
+    }
+    for name, value in required_paths.items():
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(f"配置中缺少 {name}")
+        if not Path(value).exists():
+            raise ConfigError(f"{name} 不存在: {value}")
+
+
+
 def quote_powershell_argument(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -237,6 +252,7 @@ def run_single_disk_flow(
         reasons = "，".join(disk.get("protection_reasons") or [])
         raise DiskProtectedError(f"目标硬盘不可操作: {disk_number}，原因: {reasons or '受保护'}")
     validate_worker_disk_identity(disk, expected_identity)
+    validate_required_paths(config_payload)
 
     print(build_target_disk_text(disk))
     print(f"开始处理硬盘 {disk_number}: {disk.get('model') or '未知'}")
@@ -335,8 +351,6 @@ def launch_worker_windows(
             command_parts.extend(["--worker-drive-letters", f"{dl['efi']},{dl['windows']},{dl['data1']},{dl['data2']}"])
 
         env = os.environ.copy()
-        if getattr(sys, 'frozen', False):
-            env['PYINSTALLER_RESET_ENVIRONMENT'] = '1'
 
         quoted_command = (
             "$env:PYTHONUTF8 = '1'; "

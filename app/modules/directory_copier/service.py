@@ -94,15 +94,8 @@ def copy_directory(
             "message": f"源路径不是目录: {source_dir}",
         }
 
-    # 验证源路径是否为绝对路径且解析后的路径与原始路径一致
     try:
         resolved_source = source_path.resolve()
-        if str(resolved_source) != str(source_path.resolve()):
-            return {
-                "disk_number": disk_number,
-                "passed": False,
-                "message": f"源路径解析异常，可能存在路径遍历攻击: {source_dir}",
-            }
     except (OSError, ValueError) as exc:
         return {
             "disk_number": disk_number,
@@ -131,7 +124,8 @@ def copy_directory(
     # 路径遍历防护：检查目标路径是否在预期的根目录下
     try:
         resolved_target = target_dir.resolve()
-        if not str(resolved_target).startswith(str(target_root.resolve())):
+        resolved_root = target_root.resolve()
+        if resolved_root not in resolved_target.parents and resolved_target != resolved_root:
             return {
                 "disk_number": disk_number,
                 "passed": False,

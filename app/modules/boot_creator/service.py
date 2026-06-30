@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
@@ -6,6 +7,10 @@ from typing import Any, Callable
 BcdbootRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 BootVerifier = Callable[[str], tuple[bool, str]]
 BCDBOOT_TIMEOUT_SECONDS = 300
+
+
+def get_system_drive_letter() -> str:
+    return os.environ.get("SystemDrive", "C:")[0].upper()
 
 
 
@@ -78,6 +83,14 @@ def create_boot_record(
             "disk_number": disk_number,
             "passed": False,
             "message": "EFI 分区盘符为空",
+        }
+
+    system_drive = get_system_drive_letter()
+    if windows_drive_letter.upper() == system_drive or efi_drive_letter.upper() == system_drive:
+        return {
+            "disk_number": disk_number,
+            "passed": False,
+            "message": f"拒绝在系统盘 {system_drive}: 创建引导记录",
         }
 
     command = build_bcdboot_command(bcd_exe, windows_drive_letter, efi_drive_letter)

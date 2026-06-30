@@ -2,6 +2,7 @@ import sys
 import tempfile
 from pathlib import Path
 from subprocess import CompletedProcess
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -67,13 +68,26 @@ def test_create_boot_record_success() -> None:
         def fake_verifier(efi_letter: str) -> tuple[bool, str]:
             return True, "引导文件存在"
 
-        result = create_boot_record(
-            "D:\\sw\\bcdboot.exe", "F", drive_letter, 2, bcdboot_runner=fake_runner, boot_verifier=fake_verifier,
-        )
+        with patch("app.modules.boot_creator.service.get_system_drive_letter", return_value="Z"):
+            result = create_boot_record(
+                "D:\\sw\\bcdboot.exe", "F", drive_letter, 2, bcdboot_runner=fake_runner, boot_verifier=fake_verifier,
+            )
         if not result.get("passed"):
             raise AssertionError(f"bcdboot 成功时应通过: {result}")
         if "创建成功" not in result.get("message", ""):
             raise AssertionError(f"成功消息不正确: {result}")
+
+
+
+def test_create_boot_record_rejects_system_drive() -> None:
+    def fake_runner(command: list[str]) -> CompletedProcess[str]:
+        raise AssertionError("系统盘防护失败时不应执行 bcdboot")
+
+    result = create_boot_record("D:\\sw\\bcdboot.exe", "C", "E", 2, bcdboot_runner=fake_runner)
+    if result.get("passed"):
+        raise AssertionError(f"系统盘引导创建不应通过: {result}")
+    if "系统盘" not in result.get("message", ""):
+        raise AssertionError(f"系统盘错误消息不正确: {result}")
 
 
 
@@ -166,6 +180,7 @@ def main() -> int:
         test_build_bcdboot_command()
         test_build_bcdboot_command_rejects_invalid_inputs()
         test_create_boot_record_success()
+        test_create_boot_record_rejects_system_drive()
         test_create_boot_record_failure()
         test_create_boot_record_verification_failure()
         test_create_boot_record_empty_bcd_exe()
