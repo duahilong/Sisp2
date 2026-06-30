@@ -8,7 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.modules.directory_copier.service import copy_directory, verify_copy_result, count_files_recursive, get_system_drive_letter
+from app.modules.directory_copier.service import copy_directory, verify_copy_result, count_files_recursive
 
 
 

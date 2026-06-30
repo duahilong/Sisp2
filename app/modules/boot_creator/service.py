@@ -1,16 +1,13 @@
-import os
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
+
+from app.modules.common.service import get_system_drive_letter
 
 
 BcdbootRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 BootVerifier = Callable[[str], tuple[bool, str]]
 BCDBOOT_TIMEOUT_SECONDS = 300
-
-
-def get_system_drive_letter() -> str:
-    return os.environ.get("SystemDrive", "C:")[0].upper()
 
 
 

@@ -268,6 +268,8 @@ def run_single_disk_flow(
 
     partition_results = partition_and_format_disks([disk_number], config_payload.get("partition_info") or {}, drive_letters=drive_letters)
     print_partition_results(partition_results)
+    if not partition_results:
+        raise PartitionError("分区和格式化结果为空，无法获取 Windows 分区盘符")
     if not all(result.get("passed") for result in partition_results):
         raise PartitionError(f"硬盘分区和格式化失败: {build_failed_result_message(partition_results)}")
 
@@ -334,7 +336,7 @@ def launch_worker_windows(
         if getattr(sys, 'frozen', False):
             command_parts = [sys.executable, "--worker-disk", str(disk_number)]
         else:
-            command_parts = ["py", str(PROJECT_ROOT / "app" / "main.py"), "--worker-disk", str(disk_number)]
+            command_parts = [sys.executable, str(PROJECT_ROOT / "app" / "main.py"), "--worker-disk", str(disk_number)]
 
         if config_path:
             command_parts.extend(["-j", config_path])

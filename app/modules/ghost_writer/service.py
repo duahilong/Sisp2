@@ -1,16 +1,13 @@
-import os
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
+
+from app.modules.common.service import get_system_drive_letter
 
 
 Ghostrunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 GhostVerifier = Callable[[str], tuple[bool, str]]
 GHOST_TIMEOUT_SECONDS = 1800
-
-
-def get_system_drive_letter() -> str:
-    return os.environ.get("SystemDrive", "C:")[0].upper()
 
 
 

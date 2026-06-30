@@ -1,21 +1,15 @@
 import os
 import shutil
 import stat
-import sys
 from pathlib import Path
 from typing import Any
+
+from app.modules.common.service import get_system_drive_letter
 
 
 FILE_ATTRIBUTE_HIDDEN = 0x02
 FILE_ATTRIBUTE_SYSTEM = 0x04
 FILE_ATTRIBUTE_READONLY = 0x01
-
-
-def get_system_drive_letter() -> str:
-    """获取系统盘盘符"""
-    if sys.platform == "win32":
-        return os.environ.get("SystemDrive", "C:")[0].upper()
-    return "C"
 
 
 

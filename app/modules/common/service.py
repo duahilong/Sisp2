@@ -1,3 +1,4 @@
+import os
 import subprocess
 from typing import Any
 
@@ -119,13 +120,26 @@ def validate_string_param(name: str, value: Any, allow_empty: bool = False) -> s
 
 
 
+def get_system_drive_letter() -> str:
+    return os.environ.get("SystemDrive", "C:")[0].upper()
+
+
+
 def run_powershell(script: str, timeout: float = POWERSHELL_DEFAULT_TIMEOUT) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [*POWERSHELL_BASE_ARGS, "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; " + script],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-        timeout=timeout,
-    )
+    try:
+        return subprocess.run(
+            [*POWERSHELL_BASE_ARGS, "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; " + script],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="",
+            stderr=f"PowerShell 执行超时（{timeout} 秒）",
+        )

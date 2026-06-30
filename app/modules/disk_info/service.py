@@ -123,7 +123,13 @@ def run_powershell_json(script: str) -> list[dict[str, Any]]:
     if not stdout:
         raise RuntimeError("PowerShell 没有返回任何内容")
 
-    data = json.loads(stdout)
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "PowerShell 返回了无法解析的 JSON\n"
+            f"原始输出:\n{stdout[:500]}"
+        ) from exc
     if isinstance(data, dict):
         return [data]
     return data
