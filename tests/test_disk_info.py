@@ -6,7 +6,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.modules.disk_info.service import INVALID_SIZE_DISPLAY, UNKNOWN_SIZE_DISPLAY, format_size, summarize_disk
+import app.modules.disk_info.service as disk_info_module
+from app.modules.disk_info.service import INVALID_SIZE_DISPLAY, SUMMARY_POWERSHELL_SCRIPT, UNKNOWN_SIZE_DISPLAY, format_size, scan_disk_summaries, summarize_disk
 
 
 
@@ -40,7 +41,7 @@ def test_summarize_disk_with_invalid_size() -> None:
     summary = summarize_disk(
         {
             "disk_number": 7,
-            "friendly_name": "Demo Disk",
+            "friendly_name": " Demo Disk ",
             "serial_number": "SN-DEMO",
             "unique_id": "UID-DEMO",
             "size_bytes": -1,
@@ -87,6 +88,41 @@ def test_summarize_disk_includes_safety_flags() -> None:
 
 
 
+def test_scan_disk_summaries_uses_lightweight_script() -> None:
+    calls: list[str] = []
+    original_runner = disk_info_module.run_powershell_json
+
+    def fake_run_powershell_json(script: str) -> list[dict]:
+        calls.append(script)
+        return [
+            {
+                "disk_number": 1,
+                "friendly_name": "Target Disk",
+                "serial_number": "SN-1",
+                "unique_id": "UID-1",
+                "size_bytes": 1024,
+                "partition_style": "GPT",
+                "bus_type": "USB",
+                "partitions": [{"drive_letter": "E"}],
+            }
+        ]
+
+    disk_info_module.run_powershell_json = fake_run_powershell_json
+    try:
+        summaries = scan_disk_summaries()
+    finally:
+        disk_info_module.run_powershell_json = original_runner
+
+    if calls != [SUMMARY_POWERSHELL_SCRIPT]:
+        raise AssertionError("磁盘摘要扫描应使用轻量 PowerShell 脚本")
+    if "Get-Partition -DiskNumber" in SUMMARY_POWERSHELL_SCRIPT:
+        raise AssertionError("轻量磁盘摘要脚本不应按每块磁盘重复调用 Get-Partition")
+    if "Get-Partition -ErrorAction SilentlyContinue" not in SUMMARY_POWERSHELL_SCRIPT:
+        raise AssertionError("轻量磁盘摘要脚本应一次性获取分区信息")
+    assert_equal(summaries[0].get("drive_letters"), ["E"], "轻量扫描结果盘符摘要不正确")
+
+
+
 def print_disk_summary(disks: list[dict]) -> None:
     print("=" * 80)
     print(f"共检测到 {len(disks)} 块磁盘")
@@ -111,6 +147,7 @@ def main() -> int:
         test_format_size_invalid_values()
         test_summarize_disk_with_invalid_size()
         test_summarize_disk_includes_safety_flags()
+        test_scan_disk_summaries_uses_lightweight_script()
         print("模块1测试结果: 通过")
         return 0
     except Exception as exc:

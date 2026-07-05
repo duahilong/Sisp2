@@ -96,12 +96,14 @@ def run_preflight_checks(
     admin_checker: Callable[[], bool] | None = None,
     powershell_probe: Callable[[], subprocess.CompletedProcess[str]] | None = None,
     config_loader: ConfigLoader | None = None,
+    skip_powershell_probe: bool = False,
 ) -> dict[str, Any]:
     results = [
         check_admin_privileges(admin_checker),
-        check_powershell_available(powershell_probe),
         check_config_file_exists(config_path),
     ]
+    if not skip_powershell_probe:
+        results.insert(1, check_powershell_available(powershell_probe))
     config_check_result, config_payload = check_config_file_parseable(config_path, config_loader)
     results.append(config_check_result)
     return {

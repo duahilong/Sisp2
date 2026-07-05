@@ -76,6 +76,49 @@ foreach ($disk in $disks) {
 $result | ConvertTo-Json -Depth 6
 """.strip()
 
+SUMMARY_POWERSHELL_SCRIPT = r"""
+$disks = Get-Disk | Sort-Object Number
+$partitionsByDisk = @{}
+
+Get-Partition -ErrorAction SilentlyContinue | ForEach-Object {
+    $diskNumber = $_.DiskNumber
+    if (-not $partitionsByDisk.ContainsKey($diskNumber)) {
+        $partitionsByDisk[$diskNumber] = @()
+    }
+    $partitionsByDisk[$diskNumber] += $_
+}
+
+$result = @()
+
+foreach ($disk in $disks) {
+    $partitions = @($partitionsByDisk[$disk.Number])
+    $partitionList = @()
+
+    foreach ($partition in $partitions) {
+        $partitionList += [PSCustomObject]@{
+            drive_letter = $partition.DriveLetter
+        }
+    }
+
+    $result += [PSCustomObject]@{
+        disk_number = $disk.Number
+        friendly_name = $disk.FriendlyName
+        serial_number = $disk.SerialNumber
+        unique_id = $disk.UniqueId
+        partition_style = $disk.PartitionStyle
+        size_bytes = $disk.Size
+        bus_type = $disk.BusType
+        is_boot = $disk.IsBoot
+        is_system = $disk.IsSystem
+        is_offline = $disk.IsOffline
+        is_read_only = $disk.IsReadOnly
+        partitions = $partitionList
+    }
+}
+
+$result | ConvertTo-Json -Depth 4
+""".strip()
+
 USED_DRIVE_LETTERS_SCRIPT = r"""
 $letters = @()
 $letters += Get-Volume | Where-Object { $_.DriveLetter } | ForEach-Object { $_.DriveLetter.ToString().ToUpper() }
@@ -158,9 +201,11 @@ def collect_drive_letters(disk: dict[str, Any]) -> list[str]:
 
 
 def summarize_disk(disk: dict[str, Any]) -> dict[str, Any]:
+    friendly_name = disk.get("friendly_name")
+    model = str(friendly_name).strip() if friendly_name is not None else None
     return {
         "disk_number": disk.get("disk_number"),
-        "model": disk.get("friendly_name"),
+        "model": model or None,
         "serial_number": disk.get("serial_number"),
         "unique_id": disk.get("unique_id"),
         "size_bytes": disk.get("size_bytes"),
@@ -182,7 +227,7 @@ def scan_disks() -> list[dict[str, Any]]:
 
 
 def scan_disk_summaries() -> list[dict[str, Any]]:
-    return [summarize_disk(disk) for disk in scan_disks()]
+    return [summarize_disk(disk) for disk in run_powershell_json(SUMMARY_POWERSHELL_SCRIPT)]
 
 
 

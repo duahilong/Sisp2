@@ -87,6 +87,18 @@ def test_run_preflight_checks() -> None:
     if failed_report.get("all_passed"):
         raise AssertionError(f"运行前检查应存在失败项，实际为: {failed_report}")
 
+    probe_calls: list[bool] = []
+    skipped_report = run_preflight_checks(
+        admin_checker=lambda: True,
+        powershell_probe=lambda: probe_calls.append(True) or CompletedProcess(args=["powershell"], returncode=0, stdout="preflight-ok\n", stderr=""),
+        config_loader=lambda path: {"config_path": str(path), "config": {}},
+        skip_powershell_probe=True,
+    )
+    if not skipped_report.get("all_passed"):
+        raise AssertionError(f"跳过 PowerShell 探测时其余检查通过应整体通过，实际为: {skipped_report}")
+    if probe_calls:
+        raise AssertionError("skip_powershell_probe=True 时不应调用 PowerShell 探测")
+
 
 
 def test_print_preflight_report() -> None:

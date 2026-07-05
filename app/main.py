@@ -427,8 +427,11 @@ def run_minimal_main_flow(
     config_path: str | Path | None = None,
     worker_launcher: WorkerLauncher | None = None,
 ) -> list[int]:
-    runner = preflight_runner or run_preflight_checks
-    preflight_report = runner(config_path)
+    preflight_report = (
+        preflight_runner(config_path)
+        if preflight_runner
+        else run_preflight_checks(config_path, skip_powershell_probe=True)
+    )
     print_preflight_report(preflight_report)
     if not preflight_report.get("all_passed"):
         raise PreflightError("运行前检查失败")
@@ -438,12 +441,15 @@ def run_minimal_main_flow(
         raise ConfigError("运行前检查未返回可用的配置数据")
 
     excluded_disk_names = config_payload.get("excluded_disk_names") or []
-    disk_summaries = apply_disk_protection(scan_disk_summaries(), excluded_disk_names)
+    try:
+        disk_summaries = apply_disk_protection(scan_disk_summaries(), excluded_disk_names)
+    except Exception as exc:
+        raise PreflightError(f"硬盘信息扫描失败，请确认 PowerShell 和 Storage 模块可用: {exc}") from exc
     if not disk_summaries:
         raise DiskProtectedError("模块1未返回任何硬盘摘要信息")
 
     print("=" * 80)
-    print("Sisp")
+    print("Sisp - 磁盘选择")
     print("=" * 80)
     print(f"配置文件: {config_payload.get('config_path')}")
     print_disk_summaries(disk_summaries)

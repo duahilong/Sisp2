@@ -938,6 +938,54 @@ def test_failed_preflight_main_flow() -> None:
 
 
 
+def test_default_main_flow_skips_redundant_powershell_probe() -> None:
+    original_run_preflight_checks = main_module.run_preflight_checks
+    calls: list[dict] = []
+
+    def fake_run_preflight_checks(config_path=None, **kwargs):
+        calls.append({"config_path": config_path, **kwargs})
+        return {
+            "all_passed": False,
+            "results": [{"name": "配置文件存在性检查", "passed": False, "message": "stop"}],
+            "config_payload": None,
+        }
+
+    main_module.run_preflight_checks = fake_run_preflight_checks
+    try:
+        with redirect_stdout(io.StringIO()):
+            run_minimal_main_flow(config_path="D:\\json\\custom.json")
+    except PreflightError:
+        pass
+    else:
+        raise AssertionError("预检失败时主流程应中止")
+    finally:
+        main_module.run_preflight_checks = original_run_preflight_checks
+
+    if calls != [{"config_path": "D:\\json\\custom.json", "skip_powershell_probe": True}]:
+        raise AssertionError(f"默认主流程应跳过冗余 PowerShell 探测: {calls}")
+
+
+
+def test_main_flow_wraps_disk_scan_failure_as_preflight_error() -> None:
+    original_scan_disk_summaries = main_module.scan_disk_summaries
+    main_module.scan_disk_summaries = lambda: (_ for _ in ()).throw(RuntimeError("powershell failed"))
+
+    try:
+        with redirect_stdout(io.StringIO()):
+            run_minimal_main_flow(
+                input_func=lambda prompt: "1",
+                preflight_runner=build_successful_preflight_report,
+            )
+    except PreflightError as exc:
+        if "硬盘信息扫描失败" not in str(exc) or "powershell failed" not in str(exc):
+            raise AssertionError(f"磁盘扫描失败错误信息不正确: {exc}") from exc
+    else:
+        raise AssertionError("磁盘扫描失败时应按预检失败处理")
+    finally:
+        main_module.scan_disk_summaries = original_scan_disk_summaries
+
+
+
 def test_main_flow_stops_when_ghost_fails() -> None:
     original_scan_disk_summaries = main_module.scan_disk_summaries
     original_scan_used_drive_letters = main_module.scan_used_drive_letters
@@ -1138,6 +1186,8 @@ def main() -> int:
         test_main_flow_stops_when_partition_validation_fails()
         test_main_flow_stops_when_ghost_fails()
         test_failed_preflight_main_flow()
+        test_default_main_flow_skips_redundant_powershell_probe()
+        test_main_flow_wraps_disk_scan_failure_as_preflight_error()
         test_main_flow_pre_scans_used_letters()
         return 0
     except Exception as exc:

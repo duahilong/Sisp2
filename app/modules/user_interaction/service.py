@@ -7,7 +7,7 @@ from app.modules.disk_info.service import scan_disk_summaries
 
 
 InputFunc = Callable[[str], str]
-TABLE_HEADERS = ["编号", "硬盘型号", "容量", "连接方式", "盘符", "分区表格式", "状态"]
+TABLE_HEADERS = ["编号", "状态", "型号", "容量", "接口", "盘符", "原因"]
 COLUMN_SEPARATOR = "  "
 EXIT_SELECTION = "q"
 SELECT_ALL_SELECTION = "a"
@@ -17,21 +17,23 @@ SELECT_ALL_SELECTION = "a"
 def build_table_rows(disks: list[dict]) -> list[list[str]]:
     rows: list[list[str]] = []
     for disk in disks:
-        drive_letters = "，".join(disk.get("drive_letters") or []) or "无"
+        drive_letters = ",".join(sorted(str(letter).upper() for letter in (disk.get("drive_letters") or []))) or "-"
         protection_reasons = disk.get("protection_reasons") or []
         if disk.get("is_selectable") is False:
-            status = f"受保护：{'，'.join(protection_reasons)}" if protection_reasons else "受保护"
+            status = "受保护"
+            reason = "、".join(protection_reasons) if protection_reasons else "受保护"
         else:
             status = "可选"
+            reason = "-"
         rows.append(
             [
                 str(disk.get("disk_number")),
+                status,
                 str(disk.get("model") or "未知"),
                 str(disk.get("size_display") or "未知"),
                 str(disk.get("bus_type") or "未知"),
                 drive_letters,
-                str(disk.get("partition_style") or "未知"),
-                status,
+                reason,
             ]
         )
     return rows
@@ -70,8 +72,11 @@ def build_aligned_line(values: list[str], widths: list[int]) -> str:
 def build_disk_summary_text(disks: list[dict]) -> str:
     rows = build_table_rows(disks)
     widths = calculate_column_widths(TABLE_HEADERS, rows)
+    selectable_count = sum(1 for disk in disks if disk.get("is_selectable", True))
+    protected_count = len(disks) - selectable_count
 
-    lines = [f"共检测到 {len(disks)} 块磁盘"]
+    lines = [f"磁盘: {len(disks)} 块 | 可选: {selectable_count} 块 | 受保护: {protected_count} 块"]
+    lines.append("")
     lines.append(build_aligned_line(TABLE_HEADERS, widths))
     lines.append(build_aligned_line(["-" * width for width in widths], widths))
 
@@ -224,7 +229,7 @@ def prompt_disk_selection(disks: list[dict], input_func: InputFunc = input) -> l
     if not selectable_disk_numbers:
         raise ValueError("没有可供选择的非受保护硬盘")
 
-    prompt_text = "请输入磁盘编号（单个数字3、范围1-3、多个数字1,3,5或1 3 5、字母a表示全部磁盘，q退出）："
+    prompt_text = "\n输入: 编号=2 | 范围=1-3 | 多选=1,3 或 1 3 | 全部=a | 退出=q\n> "
     selection_text = input_func(prompt_text)
     selected_numbers = parse_selected_disk_numbers(selection_text, available_disk_numbers, selectable_disk_numbers)
     validate_selected_disks_are_selectable(selected_numbers, disks)

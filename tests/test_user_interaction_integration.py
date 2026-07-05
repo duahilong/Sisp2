@@ -41,7 +41,7 @@ def main() -> int:
             print_disk_summaries(disks)
 
         output = captured.getvalue()
-        if "共检测到" not in output:
+        if "磁盘:" not in output:
             raise AssertionError("模块9未正确输出硬盘摘要标题")
 
         target_number = 1

@@ -47,21 +47,20 @@ def assert_contains(text: str, expected: str) -> None:
 
 def test_build_disk_summary_text() -> None:
     output = build_disk_summary_text(SAMPLE_DISKS)
-    assert_contains(output, "共检测到 3 块磁盘")
+    assert_contains(output, "磁盘: 3 块 | 可选: 3 块 | 受保护: 0 块")
     assert_contains(output, "编号")
-    assert_contains(output, "硬盘型号")
-    assert_contains(output, "容量")
-    assert_contains(output, "连接方式")
-    assert_contains(output, "盘符")
-    assert_contains(output, "分区表格式")
     assert_contains(output, "状态")
+    assert_contains(output, "型号")
+    assert_contains(output, "容量")
+    assert_contains(output, "接口")
+    assert_contains(output, "盘符")
+    assert_contains(output, "原因")
     assert_contains(output, "Samsung SSD 980 PRO 1TB")
     assert_contains(output, "931.51 GB")
     assert_contains(output, "NVMe")
     assert_contains(output, "SATA")
-    assert_contains(output, "C，D")
+    assert_contains(output, "C,D")
     assert_contains(output, "WDC WD10EZEX")
-    assert_contains(output, "MBR")
     assert_contains(output, "可选")
 
     forbidden_chars = ["┌", "┬", "┐", "├", "┼", "┤", "└", "┴", "┘", "│"]
@@ -130,9 +129,12 @@ def test_parse_selected_disk_numbers_invalid() -> None:
 
 
 def test_prompt_disk_selection() -> None:
-    selected = prompt_disk_selection(SAMPLE_DISKS, input_func=lambda prompt: "1,2-3")
+    prompts: list[str] = []
+    selected = prompt_disk_selection(SAMPLE_DISKS, input_func=lambda prompt: prompts.append(prompt) or "1,2-3")
     if selected != [1, 2, 3]:
         raise AssertionError(f"prompt_disk_selection 返回结果不正确: {selected}")
+    if prompts != ["\n输入: 编号=2 | 范围=1-3 | 多选=1,3 或 1 3 | 全部=a | 退出=q\n> "]:
+        raise AssertionError(f"输入提示文案不正确: {prompts}")
 
     exited = prompt_disk_selection(SAMPLE_DISKS, input_func=lambda prompt: "q")
     if exited != []:
@@ -179,7 +181,9 @@ def test_build_disk_summary_text_with_protected_disk() -> None:
         [],
     )
     output = build_disk_summary_text(disks)
-    assert_contains(output, "受保护：系统盘")
+    assert_contains(output, "磁盘: 2 块 | 可选: 1 块 | 受保护: 1 块")
+    assert_contains(output, "受保护")
+    assert_contains(output, "系统盘")
     assert_contains(output, "可选")
 
 
@@ -228,7 +232,8 @@ def test_run_user_interaction_applies_excluded_disk_names() -> None:
         raise AssertionError(f"run_user_interaction 应只返回可选硬盘: {selected}")
 
     output = captured.getvalue()
-    assert_contains(output, "受保护：配置排除盘")
+    assert_contains(output, "受保护")
+    assert_contains(output, "配置排除盘")
     assert_contains(output, "可选")
 
 
