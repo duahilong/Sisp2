@@ -63,6 +63,7 @@ def copy_directory(
     source_dir: str,
     data1_drive_letter: str,
     disk_number: int,
+    target_root_override: str | Path | None = None,
 ) -> dict[str, Any]:
     source_path = Path(source_dir)
     
@@ -97,6 +98,14 @@ def copy_directory(
             "message": f"源路径解析失败: {exc}",
         }
 
+    source_root = Path(resolved_source.anchor).resolve()
+    if resolved_source == source_root:
+        return {
+            "disk_number": disk_number,
+            "passed": False,
+            "message": f"拒绝拷贝盘符根目录: {resolved_source}",
+        }
+
     if not data1_drive_letter:
         return {
             "disk_number": disk_number,
@@ -112,14 +121,20 @@ def copy_directory(
             "message": f"拒绝向系统盘 {system_drive}: 写入数据",
         }
 
-    target_root = Path(f"{data1_drive_letter}:\\")
-    target_dir = target_root / source_path.name
+    target_root = Path(target_root_override) if target_root_override is not None else Path(f"{data1_drive_letter}:\\")
+    target_dir = target_root / resolved_source.name
     
     # 路径遍历防护：检查目标路径是否在预期的根目录下
     try:
         resolved_target = target_dir.resolve()
         resolved_root = target_root.resolve()
-        if resolved_root not in resolved_target.parents and resolved_target != resolved_root:
+        if resolved_target == resolved_root:
+            return {
+                "disk_number": disk_number,
+                "passed": False,
+                "message": f"拒绝将目标目录设为分区根目录: {target_dir}",
+            }
+        if resolved_root not in resolved_target.parents:
             return {
                 "disk_number": disk_number,
                 "passed": False,
@@ -134,6 +149,12 @@ def copy_directory(
 
     try:
         if target_dir.exists():
+            if target_dir.resolve() == target_root.resolve():
+                return {
+                    "disk_number": disk_number,
+                    "passed": False,
+                    "message": f"拒绝删除分区根目录: {target_dir}",
+                }
             shutil.rmtree(target_dir)
 
         shutil.copytree(

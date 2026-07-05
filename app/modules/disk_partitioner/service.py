@@ -1,25 +1,48 @@
 import json
+import math
 import subprocess
 from typing import Any, Callable
 
-from app.modules.common.service import run_powershell as _run_powershell
+from app.modules.common.service import get_system_drive_letter, run_powershell as _run_powershell
 
 
 PowershellRunner = Callable[[str], subprocess.CompletedProcess[str]]
 
 
 
+def validate_drive_letters(drive_letters: dict[str, str] | None) -> None:
+    if not drive_letters:
+        return
+
+    required_keys = ["efi", "windows", "data1", "data2"]
+    letters: list[str] = []
+    for key in required_keys:
+        if key not in drive_letters:
+            raise ValueError(f"盘符配置缺少: {key}")
+        letter = str(drive_letters.get(key) or "").strip().upper()
+        if len(letter) != 1 or not letter.isalpha():
+            raise ValueError(f"{key} 盘符必须为单个字母: {drive_letters.get(key)}")
+        letters.append(letter)
+
+    duplicates = sorted({letter for letter in letters if letters.count(letter) > 1})
+    if duplicates:
+        raise ValueError(f"盘符不能重复: {', '.join(duplicates)}")
+
+    forbidden = {"A", "B", "C", get_system_drive_letter()}
+    blocked = [letter for letter in letters if letter in forbidden]
+    if blocked:
+        raise ValueError(f"盘符为保留盘符或系统盘符，禁止用于分区: {', '.join(blocked)}")
+
+
+
 def build_partition_disk_script(disk_numbers: list[int], efi_size_mb: int | float, c_size_gb: int | float, drive_letters: dict[str, str] | None = None) -> str:
     if not disk_numbers:
         raise ValueError("分区硬盘编号不能为空")
-    if not isinstance(efi_size_mb, (int, float)) or isinstance(efi_size_mb, bool) or efi_size_mb <= 0:
+    if not isinstance(efi_size_mb, (int, float)) or isinstance(efi_size_mb, bool) or not math.isfinite(efi_size_mb) or efi_size_mb <= 0:
         raise ValueError("EFI 分区大小必须为大于 0 的数字")
-    if not isinstance(c_size_gb, (int, float)) or isinstance(c_size_gb, bool) or c_size_gb <= 0:
+    if not isinstance(c_size_gb, (int, float)) or isinstance(c_size_gb, bool) or not math.isfinite(c_size_gb) or c_size_gb <= 0:
         raise ValueError("C 分区大小必须为大于 0 的数字")
-    if drive_letters:
-        for key in ["efi", "windows", "data1", "data2"]:
-            if key not in drive_letters:
-                raise ValueError(f"盘符配置缺少: {key}")
+    validate_drive_letters(drive_letters)
 
     efi_letter = (drive_letters or {}).get("efi")
     windows_letter = (drive_letters or {}).get("windows")
@@ -47,7 +70,7 @@ def build_partition_disk_script(disk_numbers: list[int], efi_size_mb: int | floa
     ]
 
     for disk_number in disk_numbers:
-        if not isinstance(disk_number, int):
+        if not isinstance(disk_number, int) or isinstance(disk_number, bool):
             raise ValueError(f"硬盘编号必须为整数: {disk_number}")
 
         lines.extend(
@@ -83,11 +106,11 @@ def build_partition_disk_script(disk_numbers: list[int], efi_size_mb: int | floa
                     "# 清理可能的幽灵盘符（EFI盘符在Clear-Disk后注册表残留）",
                     "foreach ($letter in $assignedLetters) {",
                     "    $mountPoint = \"$letter`:\\\"",
-                    "    mountvol $mountPoint /d *>$null",
                     "    $existingVolume = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue",
                     "    if ($existingVolume) {",
                     f"        throw \"盘符 $letter 已被占用，无法继续分区: {disk_number}\"",
                     "    }",
+                    "    mountvol $mountPoint /d *>$null",
                     "}",
                 ]
             )

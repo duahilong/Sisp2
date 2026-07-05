@@ -70,6 +70,8 @@ def test_build_partition_disk_script_rejects_invalid_inputs() -> None:
         ([], 100, 6, "不能为空"),
         ([2], 0, 6, "EFI"),
         ([2], 100, 0, "C 分区"),
+        ([2], float("nan"), 6, "EFI"),
+        ([2], 100, float("inf"), "C 分区"),
         (["2"], 100, 6, "整数"),
     ]
 
@@ -81,6 +83,23 @@ def test_build_partition_disk_script_rejects_invalid_inputs() -> None:
                 raise AssertionError(f"期望错误信息包含: {expected_message}，实际为: {exc}") from exc
         else:
             raise AssertionError(f"期望参数失败: {disk_numbers}, {efi_size_mb}, {c_size_gb}")
+
+    invalid_drive_letter_cases = [
+        ({"efi": "E", "windows": "E", "data1": "G", "data2": "H"}, "不能重复"),
+        ({"efi": "A", "windows": "F", "data1": "G", "data2": "H"}, "保留盘符"),
+        ({"efi": "C", "windows": "F", "data1": "G", "data2": "H"}, "保留盘符"),
+        ({"efi": "E", "windows": "FF", "data1": "G", "data2": "H"}, "单个字母"),
+        ({"efi": "E", "windows": "F", "data1": "G"}, "缺少"),
+    ]
+
+    for drive_letters, expected_message in invalid_drive_letter_cases:
+        try:
+            build_partition_disk_script([2], 100, 6, drive_letters=drive_letters)
+        except ValueError as exc:
+            if expected_message not in str(exc):
+                raise AssertionError(f"期望错误信息包含: {expected_message}，实际为: {exc}") from exc
+        else:
+            raise AssertionError(f"危险盘符配置应失败: {drive_letters}")
 
 
 

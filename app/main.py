@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import subprocess
 import sys
@@ -31,7 +32,7 @@ from app.modules.common.constants import ErrorCode
 from app.modules.common.service import (
     SispError, PreflightError, InitializationError, PartitionError,
     GhostError, CopyError, BootError, ValidationError, ConfigError,
-    DiskProtectedError, IdentityMismatchError, PathTraversalError
+    DiskProtectedError, IdentityMismatchError, get_system_drive_letter
 )
 from app.preflight import print_preflight_report, run_preflight_checks
 
@@ -42,8 +43,10 @@ Sleeper = Callable[[float], None]
 
 AVAILABLE_DRIVE_LETTERS = [
     "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
-    "A", "B",
 ]
+BYTES_PER_MB = 1024 * 1024
+BYTES_PER_GB = 1024 * 1024 * 1024
+MIN_DATA_PARTITIONS_BYTES = 2 * BYTES_PER_MB
 
 
 
@@ -162,9 +165,16 @@ def parse_worker_drive_letters(text: str) -> dict[str, str]:
     letters = [part.strip().upper() for part in text.split(",")]
     if len(letters) != 4:
         raise ValueError(f"盘符参数必须为 4 个字母（EFI,Windows,Data1,Data2），实际为: {text}")
+    seen: set[str] = set()
+    forbidden = {"A", "B", "C", get_system_drive_letter()}
     for letter in letters:
         if len(letter) != 1 or not letter.isalpha():
             raise ValueError(f"盘符必须为单个字母: {letter}")
+        if letter in seen:
+            raise ValueError(f"盘符不能重复: {letter}")
+        if letter in forbidden:
+            raise ValueError(f"盘符 {letter} 为保留盘符或系统盘符，禁止用于 worker 分区")
+        seen.add(letter)
     return {
         "efi": letters[0],
         "windows": letters[1],
@@ -232,6 +242,40 @@ def validate_required_paths(config_payload: dict[str, Any]) -> None:
 
 
 
+def validate_partition_plan_before_initialize(disk: dict[str, Any], partition_info: dict[str, Any]) -> None:
+    disk_number = disk.get("disk_number")
+    size_bytes = disk.get("size_bytes")
+    efi_size_mb = partition_info.get("efi_size_mb")
+    c_size_gb = partition_info.get("c_size_gb")
+
+    if not isinstance(size_bytes, int) or size_bytes <= 0:
+        raise ConfigError(f"无法确认目标硬盘容量，拒绝初始化硬盘: {disk_number}")
+    if (
+        not isinstance(efi_size_mb, (int, float))
+        or isinstance(efi_size_mb, bool)
+        or not math.isfinite(efi_size_mb)
+        or efi_size_mb <= 0
+    ):
+        raise ConfigError(f"EFI 分区大小无效，拒绝初始化硬盘: {efi_size_mb}")
+    if (
+        not isinstance(c_size_gb, (int, float))
+        or isinstance(c_size_gb, bool)
+        or not math.isfinite(c_size_gb)
+        or c_size_gb <= 0
+    ):
+        raise ConfigError(f"C 分区大小无效，拒绝初始化硬盘: {c_size_gb}")
+
+    required_bytes = int(efi_size_mb * BYTES_PER_MB) + int(c_size_gb * BYTES_PER_GB) + MIN_DATA_PARTITIONS_BYTES
+    if size_bytes < required_bytes:
+        required_gb = required_bytes / BYTES_PER_GB
+        actual_gb = size_bytes / BYTES_PER_GB
+        raise ConfigError(
+            f"目标硬盘容量不足，拒绝初始化硬盘 {disk_number}: "
+            f"至少需要 {required_gb:.2f} GB，实际 {actual_gb:.2f} GB"
+        )
+
+
+
 def quote_powershell_argument(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -253,6 +297,7 @@ def run_single_disk_flow(
         raise DiskProtectedError(f"目标硬盘不可操作: {disk_number}，原因: {reasons or '受保护'}")
     validate_worker_disk_identity(disk, expected_identity)
     validate_required_paths(config_payload)
+    validate_partition_plan_before_initialize(disk, config_payload.get("partition_info") or {})
 
     print(build_target_disk_text(disk))
     print(f"开始处理硬盘 {disk_number}: {disk.get('model') or '未知'}")
@@ -424,7 +469,14 @@ def run_minimal_main_flow(
 
     if selected_disk_numbers:
         allocations = build_drive_letter_allocations(selected_disk_numbers, forbidden_letters=forbidden)
-        run_single_disk_flow(selected_disk_numbers[0], config_payload, drive_letters=allocations.get(selected_disk_numbers[0]))
+        disk = find_disk_summary(disk_summaries, selected_disk_numbers[0])
+        expected_identity = build_worker_disk_identity(disk) if disk else None
+        run_single_disk_flow(
+            selected_disk_numbers[0],
+            config_payload,
+            expected_identity=expected_identity,
+            drive_letters=allocations.get(selected_disk_numbers[0]),
+        )
 
     return selected_disk_numbers
 

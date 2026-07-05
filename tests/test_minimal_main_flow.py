@@ -76,7 +76,7 @@ def build_successful_preflight_report(config_path: str | Path | None = None) -> 
         ],
         "config_payload": {
             "config_path": resolved_path,
-            "partition_info": {"efi_size_mb": 100, "c_size_gb": 1536},
+            "partition_info": {"efi_size_mb": 100, "c_size_gb": 300},
             "image_info": {"image_path": str(PROJECT_ROOT / "README.md")},
             "software_paths": {"ghost64_path": str(PROJECT_ROOT / "sw" / "ghost64.exe"), "bcdboot_path": str(PROJECT_ROOT / "sw" / "bcdboot.exe")},
             "copy_info": {"source_dir": str(PROJECT_ROOT)},
@@ -157,6 +157,19 @@ def test_parse_worker_drive_letters() -> None:
             raise AssertionError(f"盘符格式错误信息不正确: {exc}") from exc
     else:
         raise AssertionError("非字母盘符时应报错")
+
+    for text, expected_message in [
+        ("E,E,G,H", "不能重复"),
+        ("A,F,G,H", "保留盘符"),
+        ("C,F,G,H", "保留盘符"),
+    ]:
+        try:
+            parse_worker_drive_letters(text)
+        except ValueError as exc:
+            if expected_message not in str(exc):
+                raise AssertionError(f"盘符错误信息不正确: {exc}") from exc
+        else:
+            raise AssertionError(f"危险盘符参数应报错: {text}")
 
 
 
@@ -495,6 +508,80 @@ def test_validate_worker_disk_identity() -> None:
             raise AssertionError(f"硬盘容量不一致错误信息不正确: {exc}") from exc
     else:
         raise AssertionError("硬盘容量不一致时应拒绝执行")
+
+
+
+def test_main_flow_rejects_insufficient_disk_capacity_before_initialize() -> None:
+    original_scan_disk_summaries = main_module.scan_disk_summaries
+    original_scan_used_drive_letters = main_module.scan_used_drive_letters
+    original_initialize_disks = main_module.initialize_disks
+    initialized: list[list[int]] = []
+
+    def oversized_preflight_report(config_path: str | Path | None = None) -> dict:
+        report = build_successful_preflight_report(config_path)
+        report["config_payload"]["partition_info"] = {"efi_size_mb": 100, "c_size_gb": 2048}
+        return report
+
+    main_module.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
+    main_module.scan_used_drive_letters = lambda: []
+    main_module.initialize_disks = lambda disk_numbers: initialized.append(disk_numbers) or []
+
+    try:
+        with redirect_stdout(io.StringIO()):
+            run_minimal_main_flow(
+                input_func=lambda prompt: "1",
+                preflight_runner=oversized_preflight_report,
+            )
+    except ConfigError as exc:
+        if "容量不足" not in str(exc):
+            raise AssertionError(f"容量不足错误信息不正确: {exc}") from exc
+    else:
+        raise AssertionError("目标盘容量不足时应在初始化前中止")
+    finally:
+        main_module.scan_disk_summaries = original_scan_disk_summaries
+        main_module.scan_used_drive_letters = original_scan_used_drive_letters
+        main_module.initialize_disks = original_initialize_disks
+
+    if initialized:
+        raise AssertionError(f"容量不足时不应执行初始化: {initialized}")
+
+
+
+def test_single_disk_main_flow_passes_expected_identity() -> None:
+    original_scan_disk_summaries = main_module.scan_disk_summaries
+    original_scan_used_drive_letters = main_module.scan_used_drive_letters
+    original_run_single_disk_flow = main_module.run_single_disk_flow
+    received: list[tuple[int, dict | None, dict | None]] = []
+
+    def fake_run_single_disk_flow(disk_number, config_payload, expected_identity=None, drive_letters=None):
+        received.append((disk_number, expected_identity, drive_letters))
+
+    main_module.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
+    main_module.scan_used_drive_letters = lambda: []
+    main_module.run_single_disk_flow = fake_run_single_disk_flow
+
+    try:
+        with redirect_stdout(io.StringIO()):
+            selected = run_minimal_main_flow(
+                input_func=lambda prompt: "1",
+                preflight_runner=build_successful_preflight_report,
+            )
+    finally:
+        main_module.scan_disk_summaries = original_scan_disk_summaries
+        main_module.scan_used_drive_letters = original_scan_used_drive_letters
+        main_module.run_single_disk_flow = original_run_single_disk_flow
+
+    if selected != [1]:
+        raise AssertionError(f"单盘选择结果不正确: {selected}")
+    expected_identity = {
+        "disk_number": 1,
+        "unique_id": "UID-TARGET-1",
+        "serial_number": "SN-TARGET-1",
+        "model": "Target Disk",
+        "size_bytes": 512040894464,
+    }
+    if received != [(1, expected_identity, {"efi": "E", "windows": "F", "data1": "G", "data2": "H"})]:
+        raise AssertionError(f"单盘流程未传入身份校验数据: {received}")
 
 
 
@@ -1040,6 +1127,8 @@ def main() -> int:
         test_multi_disk_main_flow_launches_worker_windows()
         test_worker_flow_runs_single_disk_flow()
         test_validate_worker_disk_identity()
+        test_main_flow_rejects_insufficient_disk_capacity_before_initialize()
+        test_single_disk_main_flow_passes_expected_identity()
         test_launch_worker_windows_uses_powershell()
         test_main_uses_json_argument()
         test_main_uses_worker_disk_argument()

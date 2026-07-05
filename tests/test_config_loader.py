@@ -160,6 +160,20 @@ def run_negative_tests() -> None:
         {
             "description": "Windows 11 配置",
             "win_gho": "D:/img/system.gho",
+            "efi_size": float("nan"),
+            "c_size": 1536,
+            "software_file": "D:/软件",
+            "gho_exe": "D:/sw/ghost64.exe",
+            "bcd_exe": "D:/sw/bcdboot.exe",
+            "excluded_disk_names": ["Disk A"],
+        },
+        "配置字段 efi_size 必须为有限数字",
+    )
+
+    expect_load_config_failure(
+        {
+            "description": "Windows 11 配置",
+            "win_gho": "D:/img/system.gho",
             "efi_size": 100,
             "c_size": 1536,
             "software_file": "D:/软件",

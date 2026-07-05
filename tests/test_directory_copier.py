@@ -22,15 +22,16 @@ def test_copy_directory_success() -> None:
         sub_dir.mkdir()
         (sub_dir / "file3.txt").write_text("content3", encoding="utf-8")
 
-        drive_letter = str(Path(tmp_dir))[0]
+        target_root = Path(tmp_dir) / "target-root"
+        target_root.mkdir()
 
         with patch('app.modules.directory_copier.service.get_system_drive_letter', return_value='Z'):
-            result = copy_directory(str(source_dir), drive_letter, 2)
+            result = copy_directory(str(source_dir), "G", 2, target_root_override=target_root)
 
         if not result.get("passed"):
             raise AssertionError(f"拷贝成功时应通过: {result}")
 
-        expected_target = Path(f"{drive_letter}:\\") / "常用软件"
+        expected_target = target_root / "常用软件"
         if not expected_target.exists():
             raise AssertionError(f"目标目录不存在: {expected_target}")
 
@@ -40,9 +41,6 @@ def test_copy_directory_success() -> None:
             raise AssertionError("file2.txt 未拷贝")
         if not (expected_target / "subdir" / "file3.txt").exists():
             raise AssertionError("file3.txt 未拷贝")
-
-        import shutil
-        shutil.rmtree(expected_target, ignore_errors=True)
 
 
 
@@ -82,6 +80,47 @@ def test_copy_directory_not_a_directory() -> None:
             raise AssertionError(f"源路径不是目录时不应通过: {result}")
         if "不是目录" not in result.get("message", ""):
             raise AssertionError(f"错误消息不正确: {result}")
+
+
+
+def test_copy_directory_rejects_source_root_directory() -> None:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        source_root = Path(tmp_dir).anchor
+        target_root = Path(tmp_dir) / "target-root"
+        target_root.mkdir()
+
+        with patch('app.modules.directory_copier.service.get_system_drive_letter', return_value='Z'):
+            result = copy_directory(source_root, "G", 2, target_root_override=target_root)
+
+        if result.get("passed"):
+            raise AssertionError(f"源路径为根目录时不应通过: {result}")
+        if "根目录" not in result.get("message", ""):
+            raise AssertionError(f"错误消息不正确: {result}")
+
+
+
+def test_copy_directory_allows_current_directory() -> None:
+    original_cwd = Path.cwd()
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        root = Path(tmp_dir)
+        source_dir = root / "source"
+        source_dir.mkdir()
+        (source_dir / "file1.txt").write_text("content", encoding="utf-8")
+        target_root = root / "target-root"
+        target_root.mkdir()
+
+        try:
+            os.chdir(source_dir)
+            with patch('app.modules.directory_copier.service.get_system_drive_letter', return_value='Z'):
+                result = copy_directory(".", "G", 2, target_root_override=target_root)
+        finally:
+            os.chdir(original_cwd)
+
+        if not result.get("passed"):
+            raise AssertionError(f"当前目录不是根目录时应允许拷贝: {result}")
+        expected_target = target_root / "source"
+        if not (expected_target / "file1.txt").exists():
+            raise AssertionError("当前目录拷贝后目标文件不存在")
 
 
 
@@ -164,6 +203,8 @@ def main() -> int:
         test_copy_directory_source_not_exists()
         test_copy_directory_empty_drive_letter()
         test_copy_directory_not_a_directory()
+        test_copy_directory_rejects_source_root_directory()
+        test_copy_directory_allows_current_directory()
         test_verify_copy_result_success()
         test_verify_copy_result_target_not_exists()
         test_verify_copy_result_file_count_mismatch()

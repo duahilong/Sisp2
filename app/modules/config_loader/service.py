@@ -1,4 +1,5 @@
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,8 @@ def validate_positive_number(config: dict[str, Any], key: str) -> None:
     value = config.get(key)
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         raise ValueError(f"配置字段 {key} 必须为数字")
+    if not math.isfinite(value):
+        raise ValueError(f"配置字段 {key} 必须为有限数字")
     if value <= 0:
         raise ValueError(f"配置字段 {key} 必须大于 0")
 
