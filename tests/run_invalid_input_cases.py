@@ -11,7 +11,7 @@ from app.main import run_minimal_main_flow
 import app.main as main_module
 
 
-OUTPUT_PATH = PROJECT_ROOT / "tests" / "invalid_input_results.txt"
+OUTPUT_PATH = PROJECT_ROOT / "tests" / ".output" / "invalid_input_results.txt"
 TEST_CASES = [
     ("空输入", ""),
     ("非法字符 abc", "abc"),
@@ -116,6 +116,7 @@ def main() -> int:
             sections.append(run_case(case_name, user_input))
 
         content = "\n\n".join(sections) + "\n"
+        OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
         OUTPUT_PATH.write_text(content, encoding="utf-8")
         print(f"异常输入测试已完成，结果已写入: {OUTPUT_PATH}")
         return 0

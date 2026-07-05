@@ -25,6 +25,7 @@ Thumbs.db
 
 # Log files
 *.log
+tests/.output/
 
 # Build artifacts
 dist/
