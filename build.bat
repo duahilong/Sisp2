@@ -1,16 +1,45 @@
 @echo off
 chcp 65001 >nul
 echo ========================================
-echo Sisp 打包脚本
+echo Sisp build script
 echo ========================================
 
-echo 清理旧的构建文件...
+set "PYTHON_CMD="
+
+if not "%SISP_PYTHON%"=="" (
+    set "PYTHON_CMD=%SISP_PYTHON%"
+) else (
+    where py >nul 2>&1
+    if not errorlevel 1 set "PYTHON_CMD=py"
+)
+
+if "%PYTHON_CMD%"=="" (
+    where python >nul 2>&1
+    if not errorlevel 1 set "PYTHON_CMD=python"
+)
+
+if "%PYTHON_CMD%"=="" (
+    echo Build failed: no Python command was found.
+    echo Install Python, or set SISP_PYTHON to the full path of python.exe, then run again.
+    pause
+    exit /b 1
+)
+
+"%PYTHON_CMD%" -m PyInstaller --version >nul 2>&1
+if errorlevel 1 (
+    echo Build failed: PyInstaller is not available for %PYTHON_CMD%.
+    echo Run: "%PYTHON_CMD%" -m pip install pyinstaller
+    pause
+    exit /b 1
+)
+
+echo Cleaning previous build files...
 if exist dist rmdir /s /q dist
 if exist build rmdir /s /q build
 if exist Sisp.spec del Sisp.spec
 
-echo 开始打包...
-py -m PyInstaller --onedir --name Sisp --console ^
+echo Building with %PYTHON_CMD%...
+"%PYTHON_CMD%" -m PyInstaller --onedir --name Sisp --console ^
   --icon=app.ico ^
   --add-data "json;json" ^
   --hidden-import app.modules.common ^
@@ -40,29 +69,44 @@ py -m PyInstaller --onedir --name Sisp --console ^
   app\main.py
 
 if %errorlevel% neq 0 (
-    echo 打包失败！
+    echo Build failed!
     pause
     exit /b 1
 )
 
-echo 打包完成！
-echo 输出文件: dist\Sisp\Sisp.exe
+echo Build completed!
+echo Output file: dist\Sisp\Sisp.exe
 
 echo.
-echo 创建发布目录...
+echo Creating release directories...
 if not exist dist\Sisp\json mkdir dist\Sisp\json
 if not exist dist\Sisp\Sw mkdir dist\Sisp\Sw
 
-echo 复制配置文件...
+echo Copying config file...
 copy json\win11.json dist\Sisp\json\
+
+echo Copying external tools...
+if exist Sw\ghost64.exe (
+    copy Sw\ghost64.exe dist\Sisp\Sw\
+) else (
+    echo Warning: Sw\ghost64.exe was not found. Add it before release.
+)
+
+if exist Sw\bcdboot.exe (
+    copy Sw\bcdboot.exe dist\Sisp\Sw\
+) else (
+    echo Warning: Sw\bcdboot.exe was not found. Add it before release.
+)
 
 echo.
 echo ========================================
-echo 打包完成！
-echo 请将以下文件复制到发布目录：
+echo Build completed!
+echo Release directory: dist\Sisp
+echo Confirm these files exist:
 echo   - dist\Sisp\Sisp.exe
+echo   - dist\Sisp\_internal
 echo   - dist\Sisp\json\win11.json
-echo   - dist\Sisp\Sw\ghost64.exe (需要手动复制)
-echo   - dist\Sisp\Sw\bcdboot.exe (需要手动复制)
+echo   - dist\Sisp\Sw\ghost64.exe
+echo   - dist\Sisp\Sw\bcdboot.exe
 echo ========================================
 pause

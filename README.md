@@ -95,6 +95,9 @@ py -m pip install -r requirements.txt
 
 **打包方式：**
 ```powershell
+# 安装打包工具
+py -m pip install pyinstaller
+
 # 使用打包脚本
 .\build.bat
 
@@ -102,16 +105,28 @@ py -m pip install -r requirements.txt
 py -m PyInstaller --onedir --name Sisp --console --add-data "json;json" app\main.py
 ```
 
+`build.bat` 会优先使用环境变量 `SISP_PYTHON` 指定的 Python；未指定时依次查找 `py` 和 `python`。如果当前机器没有 `py` 命令，可先设置：
+
+```powershell
+$env:SISP_PYTHON = "C:\Path\To\python.exe"
+.\build.bat
+```
+
 **打包后目录结构：**
 ```
 dist/Sisp/
-├── Sisp.exe                  # PyInstaller 打包后的 exe
+├── Sisp.exe                  # 程序入口
+├── _internal/                # PyInstaller onedir 运行依赖目录，必须保留
 ├── json/
 │   └── win11.json            # 配置文件（外部可修改）
 └── Sw/
-    ├── ghost64.exe           # 外部工具
-    └── bcdboot.exe           # 外部工具
+    ├── ghost64.exe           # 外部工具（存在时由 build.bat 自动复制）
+    └── bcdboot.exe           # 外部工具（存在时由 build.bat 自动复制）
 ```
+
+`_internal/` 是 PyInstaller onedir 模式生成的运行依赖目录，必须随 `Sisp.exe` 一起发布，不能只复制 `Sisp.exe` 单独运行。
+
+`build.bat` 会自动复制 `json/win11.json` 到发布目录；若本地 `Sw/ghost64.exe` 和 `Sw/bcdboot.exe` 存在，也会自动复制到 `dist/Sisp/Sw/`。若外部工具不存在，需要在发布前手动补齐。
 
 **打包后使用方式：**
 ```powershell
@@ -173,16 +188,18 @@ py .\app\main.py --worker-disk 2 -j .\json\win11.json
 
 配置字段说明：
 
-| 字段 | 类型 | 单位 | 必填 | 当前是否校验路径存在 | 说明 |
+| 字段 | 类型 | 单位 | 必填 | 路径存在性校验时机 | 说明 |
 | --- | --- | --- | --- | --- | --- |
 | `description` | string | - | 是 | 否 | 配置描述 |
-| `win_gho` | string | - | 是 | 否 | Windows Ghost 镜像路径 |
+| `win_gho` | string | - | 是 | 执行前校验 | Windows Ghost 镜像路径 |
 | `efi_size` | number | MB | 是 | 否 | EFI 分区大小 |
 | `c_size` | number | GB | 是 | 否 | C 分区大小 |
-| `software_file` | string | - | 是 | 否 | 待拷贝的软件目录路径 |
-| `gho_exe` | string | - | 是 | 否 | `ghost64.exe` 路径 |
-| `bcd_exe` | string | - | 是 | 否 | `bcdboot.exe` 路径 |
+| `software_file` | string | - | 是 | 执行前校验 | 待拷贝的软件目录路径 |
+| `gho_exe` | string | - | 是 | 执行前校验 | `ghost64.exe` 路径 |
+| `bcd_exe` | string | - | 是 | 执行前校验 | `bcdboot.exe` 路径 |
 | `excluded_disk_names` | string[] | - | 是 | 否 | 排除/保护的硬盘型号列表 |
+
+配置解析阶段只校验必要字段和基础类型。程序在开始执行真实磁盘处理前，会校验 `win_gho`、`software_file`、`gho_exe`、`bcd_exe` 指向的路径是否存在，避免清盘后才发现资源路径错误。
 
 配置加载后会整理为结构化数据，包含：
 - 配置文件路径
