@@ -1,10 +1,11 @@
+import ctypes
 import os
 import shutil
 import stat
 from pathlib import Path
 from typing import Any
 
-from app.modules.common.service import get_system_drive_letter
+from app.modules.common.service import get_system_drive_letter, print_step_results
 
 
 FILE_ATTRIBUTE_HIDDEN = 0x02
@@ -29,7 +30,6 @@ def copy_file_with_attributes(src: str, dst: str) -> None:
                     new_attrs |= FILE_ATTRIBUTE_SYSTEM
                 if attrs & FILE_ATTRIBUTE_READONLY:
                     new_attrs |= FILE_ATTRIBUTE_READONLY
-                import ctypes
                 ctypes.windll.kernel32.SetFileAttributesW(dst, new_attrs)
     except (OSError, AttributeError):
         pass
@@ -186,6 +186,4 @@ def copy_directory(
 
 
 def print_copy_results(results: list[dict[str, Any]]) -> None:
-    for result in results:
-        status = "通过" if result.get("passed") else "失败"
-        print(f"硬盘 {result.get('disk_number')} 目录拷贝{status}: {result.get('message')}")
+    print_step_results("目录拷贝", results)

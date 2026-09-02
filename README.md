@@ -254,7 +254,13 @@ Sisp2/
 - 引导记录创建
 - 多硬盘 worker 主流程
 
-默认安全测试入口：
+测试基于 pytest 组织（`pytest.ini` 已配置，根目录 `conftest.py` 负责导入路径），可直接运行：
+
+```powershell
+py -m pytest
+```
+
+默认安全测试入口（等价于 pytest 全量运行，并额外生成无效输入场景报告 `tests/.output/invalid_input_results.txt`）：
 
 ```powershell
 py .\tests\run_all.py

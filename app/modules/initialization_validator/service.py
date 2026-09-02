@@ -1,5 +1,7 @@
 from typing import Any
 
+from app.modules.common.service import print_step_results
+
 
 
 def validate_initialized_disk_result(initialized_result: dict[str, Any]) -> dict[str, Any]:
@@ -73,6 +75,4 @@ def validate_initialized_disks(initialized_results: list[dict[str, Any]]) -> lis
 
 
 def print_initialization_validation_results(results: list[dict[str, Any]]) -> None:
-    for result in results:
-        status = "通过" if result.get("passed") else "失败"
-        print(f"硬盘 {result.get('disk_number')} 初始化验证{status}: {result.get('message')}")
+    print_step_results("初始化验证", results)

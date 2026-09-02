@@ -1,5 +1,6 @@
 from typing import Any, Callable
 
+from app.modules.common.service import print_step_results
 from app.modules.disk_info.service import scan_disks
 
 
@@ -169,6 +170,4 @@ def validate_partitioned_disks(
 
 
 def print_partition_validation_results(results: list[dict[str, Any]]) -> None:
-    for result in results:
-        status = "通过" if result.get("passed") else "失败"
-        print(f"硬盘 {result.get('disk_number')} 分区格式化验证{status}: {result.get('message')}")
+    print_step_results("分区格式化验证", results)

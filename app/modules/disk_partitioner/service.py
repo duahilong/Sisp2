@@ -3,7 +3,7 @@ import math
 import subprocess
 from typing import Any, Callable
 
-from app.modules.common.service import get_system_drive_letter, run_powershell as _run_powershell
+from app.modules.common.service import get_system_drive_letter, print_step_results, run_powershell as _run_powershell
 
 
 PowershellRunner = Callable[[str], subprocess.CompletedProcess[str]]
@@ -260,6 +260,4 @@ def partition_and_format_disks(
 
 
 def print_partition_results(results: list[dict[str, Any]]) -> None:
-    for result in results:
-        status = "通过" if result.get("passed") else "失败"
-        print(f"硬盘 {result.get('disk_number')} 分区格式化{status}: {result.get('message')}")
+    print_step_results("分区格式化", results)

@@ -18,8 +18,8 @@ POWERSHELL_DEFAULT_TIMEOUT = 600
 
 class SispError(Exception):
     """Sisp 项目自定义异常基类"""
-    
-    def __init__(self, message: str, error_code: int = ErrorCode.SUCCESS):
+
+    def __init__(self, message: str, error_code: int):
         super().__init__(message)
         self.error_code = error_code
 
@@ -122,6 +122,13 @@ def validate_string_param(name: str, value: Any, allow_empty: bool = False) -> s
 
 def get_system_drive_letter() -> str:
     return os.environ.get("SystemDrive", "C:")[0].upper()
+
+
+def print_step_results(step_name: str, results: list[dict[str, Any]]) -> None:
+    """统一输出各步骤结果：硬盘 N <步骤><通过/失败>: 消息"""
+    for result in results:
+        status = "通过" if result.get("passed") else "失败"
+        print(f"硬盘 {result.get('disk_number')} {step_name}{status}: {result.get('message')}")
 
 
 

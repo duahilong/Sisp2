@@ -2,7 +2,7 @@ import json
 import subprocess
 from typing import Any, Callable
 
-from app.modules.common.service import run_powershell as _run_powershell
+from app.modules.common.service import print_step_results, run_powershell as _run_powershell
 
 
 PowershellRunner = Callable[[str], subprocess.CompletedProcess[str]]
@@ -142,6 +142,4 @@ def initialize_disks(
 
 
 def print_initialize_results(results: list[dict[str, Any]]) -> None:
-    for result in results:
-        status = "通过" if result.get("passed") else "失败"
-        print(f"硬盘 {result.get('disk_number')} 初始化{status}: {result.get('message')}")
+    print_step_results("初始化", results)

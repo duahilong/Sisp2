@@ -31,32 +31,29 @@ SAMPLE_DISK_SUMMARIES = [
 ]
 
 
+def test_print_disk_summaries_output() -> None:
+    disks = apply_disk_protection(SAMPLE_DISK_SUMMARIES, [])
 
-def main() -> int:
-    try:
-        disks = apply_disk_protection(SAMPLE_DISK_SUMMARIES, [])
+    captured = io.StringIO()
+    with redirect_stdout(captured):
+        print_disk_summaries(disks)
 
-        captured = io.StringIO()
-        with redirect_stdout(captured):
-            print_disk_summaries(disks)
+    output = captured.getvalue()
+    assert "磁盘:" in output, "模块9未正确输出硬盘摘要标题"
+    assert "受保护" in output, "模块9未正确输出受保护状态"
+    assert "可选" in output, "模块9未正确输出可选状态"
 
-        output = captured.getvalue()
-        if "磁盘:" not in output:
-            raise AssertionError("模块9未正确输出硬盘摘要标题")
 
-        target_number = 1
+def test_prompt_disk_selection() -> None:
+    disks = apply_disk_protection(SAMPLE_DISK_SUMMARIES, [])
+    target_number = 1
 
-        selected = prompt_disk_selection(disks, input_func=lambda prompt: str(target_number))
-        if selected != [target_number]:
-            raise AssertionError(f"模块9选择结果不正确: {selected}")
-
-        print(output)
-        print(f"模块9集成测试结果: 通过，已选择硬盘编号 {selected}")
-        return 0
-    except Exception as exc:
-        print(f"测试失败: {exc}", file=sys.stderr)
-        return 1
+    selected = prompt_disk_selection(disks, input_func=lambda prompt: str(target_number))
+    assert selected == [target_number], f"模块9选择结果不正确: {selected}"
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    test_print_disk_summaries_output()
+    test_prompt_disk_selection()
+    print("模块9集成测试结果: 通过")
+    raise SystemExit(0)

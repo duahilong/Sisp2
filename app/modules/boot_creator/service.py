@@ -2,7 +2,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from app.modules.common.service import get_system_drive_letter
+from app.modules.common.service import get_system_drive_letter, print_step_results
 
 
 BcdbootRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
@@ -136,6 +136,4 @@ def create_boot_record(
 
 
 def print_boot_results(results: list[dict[str, Any]]) -> None:
-    for result in results:
-        status = "通过" if result.get("passed") else "失败"
-        print(f"硬盘 {result.get('disk_number')} 引导创建{status}: {result.get('message')}")
+    print_step_results("引导创建", results)
