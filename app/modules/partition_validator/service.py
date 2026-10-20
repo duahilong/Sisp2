@@ -1,8 +1,8 @@
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from app.modules.common.service import print_step_results
 from app.modules.disk_info.service import scan_disks
-
 
 DiskScanner = Callable[[], list[dict[str, Any]]]
 SIZE_TOLERANCE_BYTES = 4 * 1024 * 1024

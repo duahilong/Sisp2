@@ -7,7 +7,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.modules.partition_validator.service import validate_partitioned_disks
 
-
 PARTITION_INFO = {"efi_size_mb": 100, "c_size_gb": 6}
 
 

@@ -8,7 +8,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import app.modules.user_interaction.service as user_interaction_service
-from app.modules.user_interaction.service import apply_disk_protection, build_disk_summary_text, get_display_width, parse_selected_disk_numbers, prompt_disk_selection, run_user_interaction
+from app.modules.user_interaction.service import (
+    apply_disk_protection,
+    build_disk_summary_text,
+    get_display_width,
+    parse_selected_disk_numbers,
+    prompt_disk_selection,
+    run_user_interaction,
+)
 
 SAMPLE_DISKS = [
     {

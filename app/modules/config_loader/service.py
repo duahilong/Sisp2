@@ -6,9 +6,15 @@ from typing import Any
 
 
 def get_default_config_path() -> Path:
-    """获取默认配置文件路径，兼容 PyInstaller 打包"""
-    if getattr(sys, 'frozen', False):
-        return Path(sys.executable).parent / "json" / "win11.json"
+    """获取默认配置文件路径，兼容 PyInstaller 打包。"""
+    if getattr(sys, "frozen", False):
+        base = Path(sys.executable).parent
+        # build.bat 会把 json 复制到 exe 同级；PyInstaller spec 的 datas
+        # 在 onedir 模式下默认位于 _internal，二者都兼容。
+        for candidate in (base / "json" / "win11.json", base / "_internal" / "json" / "win11.json"):
+            if candidate.exists():
+                return candidate
+        return base / "json" / "win11.json"
     return Path(__file__).resolve().parents[3] / "json" / "win11.json"
 
 
@@ -109,8 +115,19 @@ def validate_config(config: dict[str, Any], check_paths: bool = False) -> dict[s
 
 
 
+def resolve_config_path(value: Any, base_dir: Path) -> Any:
+    """将配置中的相对路径解析为相对配置文件所在目录的绝对路径。"""
+    if not isinstance(value, str) or not value.strip():
+        return value
+    path = Path(value)
+    if path.is_absolute():
+        return str(path)
+    return str((base_dir / path).resolve())
+
+
 def build_config_payload(config: dict[str, Any], config_path: str | Path | None = None) -> dict[str, Any]:
     path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
+    base_dir = path.parent
 
     return {
         "config_path": str(path),
@@ -121,14 +138,14 @@ def build_config_payload(config: dict[str, Any], config_path: str | Path | None 
         },
         "feature_flags": {},
         "image_info": {
-            "image_path": config.get("win_gho"),
+            "image_path": resolve_config_path(config.get("win_gho"), base_dir),
         },
         "software_paths": {
-            "ghost64_path": config.get("gho_exe"),
-            "bcdboot_path": config.get("bcd_exe"),
+            "ghost64_path": resolve_config_path(config.get("gho_exe"), base_dir),
+            "bcdboot_path": resolve_config_path(config.get("bcd_exe"), base_dir),
         },
         "copy_info": {
-            "source_dir": config.get("software_file"),
+            "source_dir": resolve_config_path(config.get("software_file"), base_dir),
         },
         "excluded_disk_names": config.get("excluded_disk_names"),
     }

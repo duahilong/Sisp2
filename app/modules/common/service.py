@@ -1,9 +1,10 @@
 import os
 import subprocess
+import time
 from typing import Any
 
+from app.logging_setup import log_powershell
 from app.modules.common.constants import ErrorCode
-
 
 POWERSHELL_BASE_ARGS = [
     "powershell",
@@ -14,6 +15,10 @@ POWERSHELL_BASE_ARGS = [
 ]
 
 POWERSHELL_DEFAULT_TIMEOUT = 600
+POWERSHELL_SCAN_TIMEOUT = 300
+POWERSHELL_STORAGE_TIMEOUT = 1800
+POWERSHELL_FORMAT_TIMEOUT = 1800
+POWERSHELL_PROBE_TIMEOUT = 60
 
 
 class SispError(Exception):
@@ -101,6 +106,20 @@ class PathTraversalError(SispError):
         super().__init__(message, ErrorCode.PATH_TRAVERSAL)
 
 
+class UnexpectedError(SispError):
+    """未预期的运行时异常"""
+
+    def __init__(self, message: str):
+        super().__init__(message, ErrorCode.UNEXPECTED_ERROR)
+
+
+class OperationCancelled(SispError):
+    """用户取消或中断操作"""
+
+    def __init__(self, message: str = "操作已取消"):
+        super().__init__(message, ErrorCode.CANCELLED)
+
+
 
 def validate_integer_param(name: str, value: Any) -> int:
     """验证参数为整数，防止 PowerShell 脚本注入"""
@@ -133,8 +152,9 @@ def print_step_results(step_name: str, results: list[dict[str, Any]]) -> None:
 
 
 def run_powershell(script: str, timeout: float = POWERSHELL_DEFAULT_TIMEOUT) -> subprocess.CompletedProcess[str]:
+    started = time.perf_counter()
     try:
-        return subprocess.run(
+        completed = subprocess.run(
             [*POWERSHELL_BASE_ARGS, "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; " + script],
             capture_output=True,
             text=True,
@@ -144,9 +164,18 @@ def run_powershell(script: str, timeout: float = POWERSHELL_DEFAULT_TIMEOUT) -> 
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(
+        completed = subprocess.CompletedProcess(
             args=[],
             returncode=1,
             stdout="",
             stderr=f"PowerShell 执行超时（{timeout} 秒）",
         )
+    except OSError as exc:
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="",
+            stderr=f"PowerShell 调用失败: {exc}",
+        )
+    log_powershell(script, completed, time.perf_counter() - started)
+    return completed

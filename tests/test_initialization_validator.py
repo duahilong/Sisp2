@@ -8,7 +8,6 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.modules.initialization_validator.service import validate_initialized_disks
 
 
-
 def build_success_result(overrides: dict | None = None) -> dict:
     disk = {
         "disk_number": 2,

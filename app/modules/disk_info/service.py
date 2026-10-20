@@ -2,8 +2,7 @@ import json
 import math
 from typing import Any
 
-from app.modules.common.service import run_powershell
-
+from app.modules.common.service import POWERSHELL_SCAN_TIMEOUT, run_powershell
 
 POWERSHELL_SCRIPT = r"""
 $disks = Get-Disk | Sort-Object Number
@@ -152,7 +151,7 @@ def format_size(size_bytes: Any) -> str:
 
 
 def run_powershell_json(script: str) -> list[dict[str, Any]]:
-    completed = run_powershell(script)
+    completed = run_powershell(script, timeout=POWERSHELL_SCAN_TIMEOUT)
 
     if completed.returncode != 0:
         raise RuntimeError(
@@ -232,7 +231,7 @@ def scan_disk_summaries() -> list[dict[str, Any]]:
 
 
 def scan_used_drive_letters() -> list[str]:
-    completed = run_powershell(USED_DRIVE_LETTERS_SCRIPT)
+    completed = run_powershell(USED_DRIVE_LETTERS_SCRIPT, timeout=POWERSHELL_SCAN_TIMEOUT)
     if completed.returncode != 0:
         raise RuntimeError(
             "扫描已用盘符失败\n"

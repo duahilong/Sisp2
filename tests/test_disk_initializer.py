@@ -7,8 +7,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.modules.common.service import IdentityMismatchError
 from app.modules.disk_initializer.service import build_initialize_disk_script, initialize_disks, parse_initialized_disks
-
 
 
 def assert_contains(text: str, expected: str) -> None:
@@ -33,6 +33,61 @@ def test_build_initialize_disk_script() -> None:
     assert_contains(script, "IsOffline")
     assert_contains(script, "ConvertTo-Json")
 
+
+
+def test_build_initialize_disk_script_asserts_identity_before_clear() -> None:
+    identity = {
+        "disk_number": 2,
+        "unique_id": "UID-2",
+        "serial_number": "SN-2",
+        "model": "Disk 2",
+        "size_bytes": 1000,
+    }
+    script = build_initialize_disk_script([2], expected_identities=[identity])
+
+    assert_contains(script, "function Assert-DiskIdentity")
+    assert_contains(script, "$expectedUniqueId")
+    assert_contains(script, "$expectedSerialNumber")
+    assert_contains(script, "$disk = Assert-DiskIdentity -DiskNumber 2")
+    assert_contains(script, '"unique_id":"UID-2"')
+    assert script.index("Assert-DiskIdentity -DiskNumber 2") < script.index("Clear-Disk -Number 2")
+
+
+def test_build_initialize_disk_script_rejects_weak_identity() -> None:
+    weak_identity = {"disk_number": 2, "model": "Disk 2", "size_bytes": 1000}
+    try:
+        build_initialize_disk_script([2], expected_identities=[weak_identity])
+    except IdentityMismatchError as exc:
+        if "UniqueId 和 SerialNumber" not in str(exc):
+            raise AssertionError(f"弱身份错误信息不正确: {exc}") from exc
+    else:
+        raise AssertionError("缺少 UniqueId 和 SerialNumber 时应拒绝写盘")
+
+
+def test_initialize_disks_passes_identity_assertion_to_runner() -> None:
+    captured_scripts: list[str] = []
+    identity = {
+        "disk_number": 2,
+        "unique_id": "UID-2",
+        "serial_number": "SN-2",
+        "model": "Disk 2",
+        "size_bytes": 1000,
+    }
+
+    def fake_runner(script: str) -> CompletedProcess[str]:
+        captured_scripts.append(script)
+        return CompletedProcess(
+            args=["powershell"],
+            returncode=0,
+            stdout=json.dumps({"disk_number": 2, "partition_style": "GPT"}),
+            stderr="",
+        )
+
+    initialize_disks([2], powershell_runner=fake_runner, expected_identities=[identity])
+    if not captured_scripts:
+        raise AssertionError("initialize_disks 未执行注入的 PowerShell runner")
+    if "Assert-DiskIdentity -DiskNumber 2" not in captured_scripts[0]:
+        raise AssertionError("初始化脚本缺少写盘前的身份断言")
 
 
 def test_build_initialize_disk_script_rejects_empty_numbers() -> None:
@@ -111,6 +166,9 @@ def test_initialize_disks_parse_failure() -> None:
 def main() -> int:
     try:
         test_build_initialize_disk_script()
+        test_build_initialize_disk_script_asserts_identity_before_clear()
+        test_build_initialize_disk_script_rejects_weak_identity()
+        test_initialize_disks_passes_identity_assertion_to_runner()
         test_build_initialize_disk_script_rejects_empty_numbers()
         test_parse_initialized_disks()
         test_initialize_disks_success()

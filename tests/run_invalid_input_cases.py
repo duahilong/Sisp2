@@ -7,9 +7,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.main import run_minimal_main_flow
-import app.main as main_module
-
+import app.orchestrator as orchestrator
+from app.orchestrator import run_minimal_main_flow
 
 OUTPUT_PATH = PROJECT_ROOT / "tests" / ".output" / "invalid_input_results.txt"
 TEST_CASES = [
@@ -67,12 +66,12 @@ def run_case(case_name: str, user_input: str) -> str:
     captured = io.StringIO()
     status = "通过"
     exception_text = "无"
-    original_scan_disk_summaries = main_module.scan_disk_summaries
-    original_scan_used_drive_letters = main_module.scan_used_drive_letters
+    original_scan_disk_summaries = orchestrator.scan_disk_summaries
+    original_scan_used_drive_letters = orchestrator.scan_used_drive_letters
 
     try:
-        main_module.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
-        main_module.scan_used_drive_letters = lambda: []
+        orchestrator.scan_disk_summaries = lambda: SAMPLE_DISK_SUMMARIES
+        orchestrator.scan_used_drive_letters = lambda: []
         with redirect_stdout(captured):
             run_minimal_main_flow(
                 input_func=lambda prompt: user_input,
@@ -82,8 +81,8 @@ def run_case(case_name: str, user_input: str) -> str:
         status = "出现异常"
         exception_text = f"{type(exc).__name__}: {exc}"
     finally:
-        main_module.scan_disk_summaries = original_scan_disk_summaries
-        main_module.scan_used_drive_letters = original_scan_used_drive_letters
+        orchestrator.scan_disk_summaries = original_scan_disk_summaries
+        orchestrator.scan_used_drive_letters = original_scan_used_drive_letters
 
     output = captured.getvalue().rstrip()
     input_display = user_input if user_input else "<空输入>"

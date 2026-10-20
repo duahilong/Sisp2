@@ -1,9 +1,9 @@
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from app.modules.common.service import get_system_drive_letter, print_step_results
-
 
 Ghostrunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 GhostVerifier = Callable[[str], tuple[bool, str]]
@@ -79,6 +79,12 @@ def write_ghost_image(
             "disk_number": disk_number,
             "passed": False,
             "message": f"Ghost 可执行文件不存在: {gho_exe}",
+        }
+    except OSError as exc:
+        return {
+            "disk_number": disk_number,
+            "passed": False,
+            "message": f"Ghost 可执行文件无法启动: {exc}",
         }
     except subprocess.TimeoutExpired:
         return {

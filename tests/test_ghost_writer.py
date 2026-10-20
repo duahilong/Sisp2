@@ -8,8 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.modules.ghost_writer.service import build_ghost_command, write_ghost_image, GhostVerifier
-
+from app.modules.ghost_writer.service import build_ghost_command, write_ghost_image
 
 
 def assert_contains(text: str, expected: str) -> None:
@@ -153,6 +152,19 @@ def test_write_ghost_image_timeout() -> None:
         raise AssertionError(f"disk_number 不正确: {result}")
 
 
+def test_write_ghost_image_os_error() -> None:
+    def fake_runner(command: list[str]) -> CompletedProcess[str]:
+        raise PermissionError("access denied")
+
+    result = write_ghost_image(
+        "D:\\sw\\ghost64.exe", "D:\\img\\111.GHO", 2, "F", ghost_runner=fake_runner,
+    )
+    if result.get("passed"):
+        raise AssertionError(f"OSError 时不应通过: {result}")
+    if "无法启动" not in result.get("message", ""):
+        raise AssertionError(f"OSError 错误消息不正确: {result}")
+
+
 
 def main() -> int:
     try:
@@ -164,6 +176,7 @@ def main() -> int:
         test_write_ghost_image_verification_failure()
         test_write_ghost_image_file_not_found()
         test_write_ghost_image_timeout()
+        test_write_ghost_image_os_error()
         print("模块6镜像写入测试结果: 通过")
         return 0
     except Exception as exc:

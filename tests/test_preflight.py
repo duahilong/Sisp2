@@ -8,8 +8,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.preflight import check_admin_privileges, check_config_file_exists, check_config_file_parseable, check_powershell_available, print_preflight_report, run_preflight_checks
-
+from app.preflight import (
+    check_admin_privileges,
+    check_config_file_exists,
+    check_config_file_parseable,
+    check_powershell_available,
+    print_preflight_report,
+    run_preflight_checks,
+)
 
 
 def assert_contains(text: str, expected: str) -> None:

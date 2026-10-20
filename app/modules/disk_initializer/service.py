@@ -1,30 +1,45 @@
 import json
 import subprocess
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
-from app.modules.common.service import print_step_results, run_powershell as _run_powershell
-
+from app.disk_safety import (
+    build_identity_assertion_call,
+    build_identity_assertion_function_lines,
+    normalize_expected_identities,
+)
+from app.modules.common.service import POWERSHELL_STORAGE_TIMEOUT, print_step_results
+from app.modules.common.service import run_powershell as _run_powershell
 
 PowershellRunner = Callable[[str], subprocess.CompletedProcess[str]]
 
 
 
-def build_initialize_disk_script(disk_numbers: list[int]) -> str:
+def build_initialize_disk_script(
+    disk_numbers: list[int],
+    expected_identities: dict[int, dict[str, Any]] | dict[str, Any] | list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+) -> str:
     if not disk_numbers:
         raise ValueError("初始化硬盘编号不能为空")
 
+    expected_map = normalize_expected_identities(disk_numbers, expected_identities)
     lines = [
         '$ErrorActionPreference = "Stop"',
         "$results = @()",
     ]
+    if expected_map:
+        lines.extend(build_identity_assertion_function_lines())
 
     for disk_number in disk_numbers:
         if not isinstance(disk_number, int):
             raise ValueError(f"硬盘编号必须为整数: {disk_number}")
 
+        identity = expected_map.get(disk_number)
         lines.extend(
             [
-                f"$disk = Get-Disk -Number {disk_number}",
+                build_identity_assertion_call(disk_number, identity)
+                if identity
+                else f"$disk = Get-Disk -Number {disk_number}",
                 "if ($disk.IsBoot -or $disk.IsSystem) {",
                 f'    throw "拒绝初始化系统盘或启动盘: {disk_number}"',
                 "}",
@@ -35,14 +50,32 @@ def build_initialize_disk_script(disk_numbers: list[int]) -> str:
                 f'    throw "拒绝初始化离线硬盘: {disk_number}"',
                 "}",
                 "if ($disk.PartitionStyle -eq 'RAW') {",
+            ]
+        )
+        if identity:
+            lines.append(build_identity_assertion_call(disk_number, identity))
+        lines.extend(
+            [
                 f"    Initialize-Disk -Number {disk_number} -PartitionStyle GPT",
                 "} else {",
+            ]
+        )
+        if identity:
+            lines.append("    " + build_identity_assertion_call(disk_number, identity))
+        lines.extend(
+            [
                 f"    Clear-Disk -Number {disk_number} -RemoveData -RemoveOEM -Confirm:$false",
                 "    Start-Sleep -Seconds 2",
                 f"    Update-Disk -Number {disk_number} -ErrorAction SilentlyContinue",
                 "    Start-Sleep -Seconds 1",
                 f"    $diskAfterClear = Get-Disk -Number {disk_number}",
                 "    if ($diskAfterClear.PartitionStyle -eq 'RAW') {",
+            ]
+        )
+        if identity:
+            lines.append("        " + build_identity_assertion_call(disk_number, identity))
+        lines.extend(
+            [
                 f"        Initialize-Disk -Number {disk_number} -PartitionStyle GPT",
                 "    } elseif ($diskAfterClear.PartitionStyle -ne 'GPT') {",
                 f"        throw \"清盘后硬盘分区表格式异常，无法初始化为 GPT: {disk_number}，当前格式: $($diskAfterClear.PartitionStyle)\"",
@@ -107,9 +140,10 @@ def build_success_results(initialized_disks: list[dict[str, Any]]) -> list[dict[
 def initialize_disks(
     disk_numbers: list[int],
     powershell_runner: PowershellRunner | None = None,
+    expected_identities: dict[int, dict[str, Any]] | dict[str, Any] | list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
 ) -> list[dict[str, Any]]:
-    script = build_initialize_disk_script(disk_numbers)
-    runner = powershell_runner or _run_powershell
+    script = build_initialize_disk_script(disk_numbers, expected_identities=expected_identities)
+    runner = powershell_runner or (lambda script: _run_powershell(script, timeout=POWERSHELL_STORAGE_TIMEOUT))
     completed = runner(script)
 
     if completed.returncode != 0:

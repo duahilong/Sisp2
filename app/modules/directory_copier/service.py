@@ -7,7 +7,6 @@ from typing import Any
 
 from app.modules.common.service import get_system_drive_letter, print_step_results
 
-
 FILE_ATTRIBUTE_HIDDEN = 0x02
 FILE_ATTRIBUTE_SYSTEM = 0x04
 FILE_ATTRIBUTE_READONLY = 0x01

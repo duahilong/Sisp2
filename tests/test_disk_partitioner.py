@@ -7,8 +7,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.modules.disk_partitioner.service import build_partition_disk_script, parse_partitioned_disks, partition_and_format_disks
-
+from app.modules.common.service import IdentityMismatchError
+from app.modules.disk_partitioner.service import (
+    build_partition_disk_script,
+    parse_partitioned_disks,
+    partition_and_format_disks,
+)
 
 
 def assert_contains(text: str, expected: str) -> None:
@@ -52,8 +56,14 @@ def test_build_partition_disk_script_with_drive_letters() -> None:
     script = build_partition_disk_script([2], 100, 6, drive_letters={"efi": "E", "windows": "F", "data1": "G", "data2": "H"})
 
     assert_contains(script, "$assignedLetters = @('E', 'F', 'G', 'H')")
-    assert_contains(script, "mountvol $mountPoint /d")
-    assert_contains(script, "Get-Volume -DriveLetter $letter")
+    assert_contains(script, "Get-Partition -DriveLetter $letter")
+    assert_contains(script, "$existingPartition.DiskNumber")
+    assert_contains(script, "Assert-DriveLetterFree -Letter 'E' -DiskNumber 2")
+    assert_contains(script, "Assert-DriveLetterFree -Letter 'F' -DiskNumber 2")
+    assert_contains(script, "Assert-DriveLetterFree -Letter 'G' -DiskNumber 2")
+    assert_contains(script, "Assert-DriveLetterFree -Letter 'H' -DiskNumber 2")
+    if "mountvol" in script:
+        raise AssertionError("分区脚本不应再调用全局 mountvol /d")
     assert_contains(script, "-DriveLetter 'E'")
     assert_contains(script, "-DriveLetter 'F'")
     assert_contains(script, "-DriveLetter 'G'")
@@ -63,6 +73,77 @@ def test_build_partition_disk_script_with_drive_letters() -> None:
     assert_contains(script, "New-Partition -DiskNumber 2 -Size $halfSize")
     assert_contains(script, "New-Partition -DiskNumber 2 -UseMaximumSize")
 
+
+
+def test_build_partition_disk_script_asserts_identity_before_new_partition() -> None:
+    identity = {
+        "disk_number": 2,
+        "unique_id": "UID-2",
+        "serial_number": "SN-2",
+        "model": "Disk 2",
+        "size_bytes": 1000,
+    }
+    script = build_partition_disk_script([2], 100, 6, expected_identities=[identity])
+
+    assert_contains(script, "function Assert-DiskIdentity")
+    assert_contains(script, "$expectedUniqueId")
+    assert_contains(script, "$expectedSerialNumber")
+    assert_contains(script, "$disk = Assert-DiskIdentity -DiskNumber 2")
+    assert_contains(script, '"unique_id":"UID-2"')
+    assert script.index("Assert-DiskIdentity -DiskNumber 2") < script.index("New-Partition -DiskNumber 2")
+
+
+def test_build_partition_disk_script_rejects_weak_identity() -> None:
+    weak_identity = {"disk_number": 2, "model": "Disk 2", "size_bytes": 1000}
+    try:
+        build_partition_disk_script([2], 100, 6, expected_identities=[weak_identity])
+    except IdentityMismatchError as exc:
+        if "UniqueId 和 SerialNumber" not in str(exc):
+            raise AssertionError(f"弱身份错误信息不正确: {exc}") from exc
+    else:
+        raise AssertionError("缺少 UniqueId 和 SerialNumber 时应拒绝分区")
+
+
+def test_partition_and_format_disks_passes_identity_assertion_to_runner() -> None:
+    captured_scripts: list[str] = []
+    identity = {
+        "disk_number": 2,
+        "unique_id": "UID-2",
+        "serial_number": "SN-2",
+        "model": "Disk 2",
+        "size_bytes": 1000,
+    }
+
+    def fake_runner(script: str) -> CompletedProcess[str]:
+        captured_scripts.append(script)
+        return CompletedProcess(
+            args=["powershell"],
+            returncode=0,
+            stdout=json.dumps({
+                "disk_number": 2,
+                "efi_file_system": "FAT32",
+                "efi_drive_letter": "E",
+                "c_drive_letter": "F",
+                "c_file_system": "NTFS",
+                "d1_drive_letter": "G",
+                "d1_file_system": "NTFS",
+                "d2_drive_letter": "H",
+                "d2_file_system": "NTFS",
+            }),
+            stderr="",
+        )
+
+    partition_and_format_disks(
+        [2],
+        {"efi_size_mb": 100, "c_size_gb": 6},
+        powershell_runner=fake_runner,
+        drive_letters={"efi": "E", "windows": "F", "data1": "G", "data2": "H"},
+        expected_identities=[identity],
+    )
+    if not captured_scripts:
+        raise AssertionError("partition_and_format_disks 未执行注入的 PowerShell runner")
+    if "Assert-DiskIdentity -DiskNumber 2" not in captured_scripts[0]:
+        raise AssertionError("分区脚本缺少写盘前的身份断言")
 
 
 def test_build_partition_disk_script_rejects_invalid_inputs() -> None:
@@ -270,6 +351,9 @@ def main() -> int:
     try:
         test_build_partition_disk_script()
         test_build_partition_disk_script_with_drive_letters()
+        test_build_partition_disk_script_asserts_identity_before_new_partition()
+        test_build_partition_disk_script_rejects_weak_identity()
+        test_partition_and_format_disks_passes_identity_assertion_to_runner()
         test_build_partition_disk_script_rejects_invalid_inputs()
         test_parse_partitioned_disks()
         test_partition_and_format_disks_success()

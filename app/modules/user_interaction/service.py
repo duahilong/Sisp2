@@ -1,10 +1,9 @@
 import re
-from typing import Callable
+from collections.abc import Callable
 
 from wcwidth import wcswidth
 
 from app.modules.disk_info.service import scan_disk_summaries
-
 
 InputFunc = Callable[[str], str]
 TABLE_HEADERS = ["编号", "状态", "型号", "容量", "接口", "盘符", "原因"]

@@ -11,7 +11,6 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.modules.boot_creator.service import build_bcdboot_command, create_boot_record, verify_boot_result
 
 
-
 def assert_contains(text: str, expected: str) -> None:
     if expected not in text:
         raise AssertionError(f"期望包含: {expected}\n实际内容:\n{text}")
@@ -115,6 +114,17 @@ def test_create_boot_record_verification_failure() -> None:
 
 
 
+def test_create_boot_record_os_error() -> None:
+    def fake_runner(command: list[str]) -> CompletedProcess[str]:
+        raise PermissionError("access denied")
+
+    result = create_boot_record("D:\\sw\\bcdboot.exe", "F", "E", 2, bcdboot_runner=fake_runner)
+    if result.get("passed"):
+        raise AssertionError(f"OSError 时不应通过: {result}")
+    if "无法启动" not in result.get("message", ""):
+        raise AssertionError(f"OSError 错误消息不正确: {result}")
+
+
 def test_create_boot_record_empty_bcd_exe() -> None:
     result = create_boot_record("", "F", "E", 2)
     if result.get("passed"):
@@ -146,7 +156,7 @@ def test_verify_boot_result_success() -> None:
     passed, message = verify_boot_result("C")
     if not passed:
         if "引导文件不存在" in message:
-            print(f"跳过验证成功测试: C 盘引导文件不存在，需要在有 Windows 系统的机器上运行")
+            print("跳过验证成功测试: C 盘引导文件不存在，需要在有 Windows 系统的机器上运行")
             return
         raise AssertionError(f"验证应通过: {message}")
 
@@ -183,6 +193,7 @@ def main() -> int:
         test_create_boot_record_rejects_system_drive()
         test_create_boot_record_failure()
         test_create_boot_record_verification_failure()
+        test_create_boot_record_os_error()
         test_create_boot_record_empty_bcd_exe()
         test_create_boot_record_empty_windows_letter()
         test_create_boot_record_empty_efi_letter()

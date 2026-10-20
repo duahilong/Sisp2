@@ -1,10 +1,11 @@
 import ctypes
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
+from app.modules.common.service import POWERSHELL_PROBE_TIMEOUT
 from app.modules.config_loader.service import DEFAULT_CONFIG_PATH, load_config
-
 
 CheckResult = dict[str, Any]
 CheckRunner = Callable[..., CheckResult]
@@ -44,6 +45,7 @@ def run_powershell_probe() -> subprocess.CompletedProcess[str]:
         encoding="utf-8",
         errors="replace",
         check=False,
+        timeout=POWERSHELL_PROBE_TIMEOUT,
     )
 
 

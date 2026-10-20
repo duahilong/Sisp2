@@ -7,8 +7,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import app.modules.disk_info.service as disk_info_module
-from app.modules.disk_info.service import INVALID_SIZE_DISPLAY, SUMMARY_POWERSHELL_SCRIPT, UNKNOWN_SIZE_DISPLAY, format_size, scan_disk_summaries, summarize_disk
-
+from app.modules.disk_info.service import (
+    INVALID_SIZE_DISPLAY,
+    SUMMARY_POWERSHELL_SCRIPT,
+    UNKNOWN_SIZE_DISPLAY,
+    format_size,
+    scan_disk_summaries,
+    summarize_disk,
+)
 
 
 def assert_equal(actual, expected, message: str) -> None:

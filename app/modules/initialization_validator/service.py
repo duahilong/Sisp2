@@ -3,7 +3,6 @@ from typing import Any
 from app.modules.common.service import print_step_results
 
 
-
 def validate_initialized_disk_result(initialized_result: dict[str, Any]) -> dict[str, Any]:
     disk_number = initialized_result.get("disk_number")
 

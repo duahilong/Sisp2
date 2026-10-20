@@ -9,7 +9,6 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.modules.disk_info.service import scan_disks
 
 
-
 def print_raw_disks(disks: list[dict]) -> None:
     print("=" * 80)
     print(f"scan_disks() 原始返回，共 {len(disks)} 块磁盘")
