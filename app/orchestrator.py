@@ -233,6 +233,18 @@ def _print_step(index: int, name: str, reporter: Reporter | None = None) -> None
     (reporter or ConsoleReporter()).step_started(index, STEP_TOTAL, name)
 
 
+def _notify_step_finished(
+    reporter: Reporter,
+    index: int,
+    name: str,
+    passed: bool,
+    message: str,
+) -> None:
+    callback = getattr(reporter, "step_finished", None)
+    if callable(callback):
+        callback(index, STEP_TOTAL, name, passed, message)
+
+
 def _record_step(context: RunContext, name: str, passed: bool, message: str) -> None:
     record = context.record_step(name, passed, message)
     log_step(context.disk_number, name, passed, message, record.duration_seconds)
@@ -312,12 +324,16 @@ def run_single_disk_flow(
     run_context: RunContext | None = None,
     dry_run: bool = False,
     reporter: Reporter | None = None,
+    cancel_token: Any | None = None,
 ) -> None:
     context = run_context or RunContext(disk_number=disk_number)
     context.disk_number = disk_number
     context.dry_run = dry_run
+    if cancel_token is not None:
+        context.cancel_token = cancel_token
     active_reporter = reporter or context.reporter or ConsoleReporter()
     line = active_reporter.line
+    context.raise_if_cancelled()
     logger = get_logger("flow")
     logger.info("开始处理硬盘 %s（dry_run=%s）", disk_number, dry_run)
 
@@ -349,6 +365,7 @@ def run_single_disk_flow(
     line(f"开始处理硬盘 {disk_number}: {disk.get('model') or '未知'}")
 
     if dry_run:
+        context.raise_if_cancelled()
         has_strong_identity = bool(
             str(effective_identity.get("unique_id") or "").strip()
             or str(effective_identity.get("serial_number") or "").strip()
@@ -362,9 +379,11 @@ def run_single_disk_flow(
             reporter=active_reporter,
         )
         _record_step(context, "dry-run", True, "已生成执行计划，未执行磁盘操作")
+        context.raise_if_cancelled()
         line(f"硬盘 {disk_number} dry-run 完成，未执行任何磁盘操作")
         return
 
+    context.raise_if_cancelled()
     _print_step(1, "初始化硬盘", active_reporter)
     context.start_step("初始化")
     initialize_results = initialize_disks([disk_number], expected_identities=[effective_identity])
@@ -372,9 +391,12 @@ def run_single_disk_flow(
     if not all(result.get("passed") for result in initialize_results):
         message = build_failed_result_message(initialize_results)
         _record_step(context, "初始化", False, message)
+        _notify_step_finished(active_reporter, 1, "初始化硬盘", False, message)
         raise InitializationError(f"硬盘初始化失败: {message}")
     _record_step(context, "初始化", True, "初始化完成")
+    _notify_step_finished(active_reporter, 1, "初始化硬盘", True, "初始化完成")
 
+    context.raise_if_cancelled()
     _print_step(2, "验证初始化结果", active_reporter)
     context.start_step("初始化验证")
     validation_results = validate_initialized_disks(initialize_results)
@@ -382,9 +404,12 @@ def run_single_disk_flow(
     if not all(result.get("passed") for result in validation_results):
         message = build_failed_result_message(validation_results)
         _record_step(context, "初始化验证", False, message)
+        _notify_step_finished(active_reporter, 2, "验证初始化结果", False, message)
         raise ValidationError(f"初始化结果验证失败: {message}")
     _record_step(context, "初始化验证", True, "初始化结果验证通过")
+    _notify_step_finished(active_reporter, 2, "验证初始化结果", True, "初始化结果验证通过")
 
+    context.raise_if_cancelled()
     _print_step(3, "分区并格式化", active_reporter)
     context.start_step("分区格式化")
     partition_results = partition_and_format_disks(
@@ -395,14 +420,19 @@ def run_single_disk_flow(
     )
     print_partition_results(partition_results, line=line)
     if not partition_results:
-        _record_step(context, "分区格式化", False, "分区和格式化结果为空")
+        message = "分区和格式化结果为空"
+        _record_step(context, "分区格式化", False, message)
+        _notify_step_finished(active_reporter, 3, "分区并格式化", False, message)
         raise PartitionError("分区和格式化结果为空，无法获取 Windows 分区盘符")
     if not all(result.get("passed") for result in partition_results):
         message = build_failed_result_message(partition_results)
         _record_step(context, "分区格式化", False, message)
+        _notify_step_finished(active_reporter, 3, "分区并格式化", False, message)
         raise PartitionError(f"硬盘分区和格式化失败: {message}")
     _record_step(context, "分区格式化", True, "分区和格式化完成")
+    _notify_step_finished(active_reporter, 3, "分区并格式化", True, "分区和格式化完成")
 
+    context.raise_if_cancelled()
     _print_step(4, "验证分区结果", active_reporter)
     context.start_step("分区验证")
     partition_validation_results = validate_partitioned_disks(
@@ -414,23 +444,32 @@ def run_single_disk_flow(
     if not all(result.get("passed") for result in partition_validation_results):
         message = build_failed_result_message(partition_validation_results)
         _record_step(context, "分区验证", False, message)
+        _notify_step_finished(active_reporter, 4, "验证分区结果", False, message)
         raise ValidationError(f"分区和格式化结果验证失败: {message}")
     _record_step(context, "分区验证", True, "分区和格式化结果验证通过")
+    _notify_step_finished(active_reporter, 4, "验证分区结果", True, "分区和格式化结果验证通过")
 
     gho_exe = (config_payload.get("software_paths") or {}).get("ghost64_path")
     win_gho = (config_payload.get("image_info") or {}).get("image_path")
     if not gho_exe:
-        _record_step(context, "Ghost 镜像写入", False, "配置中缺少 Ghost 可执行文件路径")
+        message = "配置中缺少 Ghost 可执行文件路径"
+        _record_step(context, "Ghost 镜像写入", False, message)
+        _notify_step_finished(active_reporter, 5, "写入 Ghost 镜像", False, message)
         raise ConfigError("配置中缺少 Ghost 可执行文件路径 (gho_exe)")
     if not win_gho:
-        _record_step(context, "Ghost 镜像写入", False, "配置中缺少 Ghost 镜像文件路径")
+        message = "配置中缺少 Ghost 镜像文件路径"
+        _record_step(context, "Ghost 镜像写入", False, message)
+        _notify_step_finished(active_reporter, 5, "写入 Ghost 镜像", False, message)
         raise ConfigError("配置中缺少 Ghost 镜像文件路径 (win_gho)")
 
     windows_drive_letter = (drive_letters or {}).get("windows") or (partition_results[0].get("partitions") or {}).get("c_drive_letter")
     if not windows_drive_letter:
-        _record_step(context, "Ghost 镜像写入", False, "无法确定 Windows 分区盘符")
+        message = "无法确定 Windows 分区盘符"
+        _record_step(context, "Ghost 镜像写入", False, message)
+        _notify_step_finished(active_reporter, 5, "写入 Ghost 镜像", False, message)
         raise PartitionError("无法确定 Windows 分区盘符，Ghost 镜像写入中止")
 
+    context.raise_if_cancelled()
     _print_step(5, "写入 Ghost 镜像", active_reporter)
     context.start_step("Ghost 镜像写入")
     try:
@@ -445,17 +484,22 @@ def run_single_disk_flow(
         )
     except SispError as exc:
         _record_step(context, "Ghost 镜像写入", False, str(exc))
+        _notify_step_finished(active_reporter, 5, "写入 Ghost 镜像", False, str(exc))
         raise
+    context.raise_if_cancelled()
     ghost_results = [write_ghost_image(str(gho_exe), str(win_gho), disk_number, windows_drive_letter)]
     print_ghost_results(ghost_results, line=line)
     if not all(result.get("passed") for result in ghost_results):
         message = build_failed_result_message(ghost_results)
         _record_step(context, "Ghost 镜像写入", False, message)
+        _notify_step_finished(active_reporter, 5, "写入 Ghost 镜像", False, message)
         raise GhostError(f"Ghost 镜像写入失败: {message}")
     _record_step(context, "Ghost 镜像写入", True, "Ghost 镜像写入完成")
+    _notify_step_finished(active_reporter, 5, "写入 Ghost 镜像", True, "Ghost 镜像写入完成")
 
     source_dir = (config_payload.get("copy_info") or {}).get("source_dir")
     data1_drive_letter = (drive_letters or {}).get("data1") or (partition_results[0].get("partitions") or {}).get("d1_drive_letter")
+    context.raise_if_cancelled()
     _print_step(6, "拷贝目录", active_reporter)
     context.start_step("目录拷贝")
     try:
@@ -463,17 +507,22 @@ def run_single_disk_flow(
         validate_drive_letter_ownership(disk_number, [data1_drive_letter])
     except SispError as exc:
         _record_step(context, "目录拷贝", False, str(exc))
+        _notify_step_finished(active_reporter, 6, "拷贝目录", False, str(exc))
         raise
+    context.raise_if_cancelled()
     copy_results = [copy_directory(str(source_dir), data1_drive_letter, disk_number)]
     print_copy_results(copy_results, line=line)
     if not all(result.get("passed") for result in copy_results):
         message = build_failed_result_message(copy_results)
         _record_step(context, "目录拷贝", False, message)
+        _notify_step_finished(active_reporter, 6, "拷贝目录", False, message)
         raise CopyError(f"目录拷贝失败: {message}")
     _record_step(context, "目录拷贝", True, "目录拷贝完成")
+    _notify_step_finished(active_reporter, 6, "拷贝目录", True, "目录拷贝完成")
 
     bcd_exe = (config_payload.get("software_paths") or {}).get("bcdboot_path")
     efi_drive_letter = (drive_letters or {}).get("efi") or (partition_results[0].get("partitions") or {}).get("efi_drive_letter")
+    context.raise_if_cancelled()
     _print_step(7, "创建引导记录", active_reporter)
     context.start_step("引导创建")
     try:
@@ -484,15 +533,20 @@ def run_single_disk_flow(
         )
     except SispError as exc:
         _record_step(context, "引导创建", False, str(exc))
+        _notify_step_finished(active_reporter, 7, "创建引导记录", False, str(exc))
         raise
+    context.raise_if_cancelled()
     boot_results = [create_boot_record(str(bcd_exe), windows_drive_letter, efi_drive_letter, disk_number)]
     print_boot_results(boot_results, line=line)
     if not all(result.get("passed") for result in boot_results):
         message = build_failed_result_message(boot_results)
         _record_step(context, "引导创建", False, message)
+        _notify_step_finished(active_reporter, 7, "创建引导记录", False, message)
         raise BootError(f"引导记录创建失败: {message}")
     _record_step(context, "引导创建", True, "引导记录创建完成")
+    _notify_step_finished(active_reporter, 7, "创建引导记录", True, "引导记录创建完成")
 
+    context.raise_if_cancelled()
     line(f"硬盘 {disk_number} 当前阶段处理完成")
     logger.info("硬盘 %s 全部步骤完成，总耗时 %.3fs", disk_number, sum(step.duration_seconds for step in context.steps))
 

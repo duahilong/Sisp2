@@ -41,7 +41,14 @@ class RunContext:
     dry_run: bool = False
     steps: list[StepRecord] = field(default_factory=list)
     reporter: Any | None = None
+    cancel_token: Any | None = None
     _step_started: dict[str, float] = field(default_factory=dict, repr=False)
+
+    def raise_if_cancelled(self) -> None:
+        """在破坏性步骤边界检查取消信号。"""
+        token = self.cancel_token
+        if token is not None:
+            token.raise_if_cancelled()
 
     def start_step(self, name: str) -> None:
         self._step_started[name] = time.perf_counter()
