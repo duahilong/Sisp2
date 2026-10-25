@@ -339,8 +339,12 @@ def resolve_path_disk_number(
     )
     completed = runner(build_path_disk_script(existing))
     if completed.returncode != 0:
-        stderr = (completed.stderr or "").strip() or "未知错误"
-        raise ConfigError(f"无法确认路径所在磁盘: {path_text}；{stderr}")
+        stderr = (completed.stderr or "").strip()
+        stdout = (completed.stdout or "").strip()
+        detail = stderr or stdout or "未知错误"
+        raise ConfigError(
+            f"无法确认路径所在磁盘: {path_text}（返回码 {completed.returncode}）；{detail}"
+        )
 
     stdout = (completed.stdout or "").strip()
     if not stdout:

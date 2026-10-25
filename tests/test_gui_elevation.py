@@ -140,7 +140,40 @@ def reset_fakes(monkeypatch):
     monkeypatch.setattr(gui_app, "QApplication", FakeApplication)
     monkeypatch.setattr(gui_app, "QMessageBox", FakeMessageBox)
     monkeypatch.setattr(gui_app, "MainWindow", FakeWindow)
+    monkeypatch.setattr(gui_app, "configure_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(gui_app, "reset_logging", lambda: None)
     monkeypatch.delenv("SISP_NO_ELEVATE", raising=False)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        (["SispGUI.exe"], None),
+        (["SispGUI.exe", "--log-dir", r"D:\logs"], r"D:\logs"),
+        (["SispGUI.exe", r"--log-dir=D:\logs"], r"D:\logs"),
+        (["SispGUI.exe", "--log-dir", "   "], None),
+        (["SispGUI.exe", "--log-dir"], None),
+    ],
+)
+def test_log_dir_from_arguments(arguments, expected) -> None:
+    assert gui_app._log_dir_from_arguments(arguments) == expected
+
+
+def test_main_configures_file_logging_with_requested_dir(monkeypatch) -> None:
+    monkeypatch.setattr(gui_app, "is_admin", lambda: True)
+    calls: list[object] = []
+    resets: list[bool] = []
+    monkeypatch.setattr(
+        gui_app,
+        "configure_logging",
+        lambda value=None: calls.append(value) or Path("Sisp.log"),
+    )
+    monkeypatch.setattr(gui_app, "reset_logging", lambda: resets.append(True))
+
+    assert gui_app.main(["SispGUI.exe", "--log-dir", r"D:\logs"]) == 0
+
+    assert calls == [r"D:\logs"]
+    assert resets == [True]
 
 
 def test_main_runs_window_when_admin(monkeypatch) -> None:

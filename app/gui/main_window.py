@@ -783,6 +783,8 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ 计划页
     def _render_plan_tabs(self) -> None:
         self.plan_tabs.clear()
+        # 每次生成新计划都必须重新确认，避免上一轮（例如 dry-run）的勾选被带过来。
+        self.plan_confirm_check.setChecked(False)
         dry_run = any(item.plan.dry_run for item in self._prepared)
         for item in self._prepared:
             view = QTextBrowser()

@@ -113,7 +113,16 @@ def test_resolve_path_disk_number_fails_closed() -> None:
     def fake_runner(script: str) -> CompletedProcess[str]:
         return CompletedProcess(args=[], returncode=1, stdout="", stderr="access denied")
 
-    with pytest.raises(ConfigError, match="无法确认路径所在磁盘"):
+    with pytest.raises(ConfigError, match="无法确认路径所在磁盘") as excinfo:
+        resolve_path_disk_number("README.md", powershell_runner=fake_runner)
+    assert "access denied" in str(excinfo.value)
+
+
+def test_resolve_path_disk_number_reports_returncode_without_stderr() -> None:
+    def fake_runner(script: str) -> CompletedProcess[str]:
+        return CompletedProcess(args=[], returncode=-1073741510, stdout="", stderr="")
+
+    with pytest.raises(ConfigError, match="返回码 -1073741510"):
         resolve_path_disk_number("README.md", powershell_runner=fake_runner)
 
 

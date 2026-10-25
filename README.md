@@ -208,6 +208,7 @@ Sisp.exe -j D:\Sisp\json\win11.json
 
 # GUI：双击启动，或从命令行启动（manifest 会触发 UAC 提权）
 SispGUI.exe
+SispGUI.exe --log-dir D:\Sisp\logs
 ```
 
 **兼容性说明：**
@@ -319,7 +320,7 @@ py .\app\main.py --log-dir D:\Sisp\logs --worker-interval 10
 - 文件日志默认位置：`%LOCALAPPDATA%\Sisp\logs\sisp_<时间戳>_<进程号>.log`
 - 单个日志文件最大 5 MB，保留 5 个备份。
 - 日志包含 PowerShell 脚本、退出码、stdout/stderr、每个步骤的通过/失败和耗时。
-- 可用 `--log-dir` 指定目录，或用 `--no-log` 关闭文件日志。
+- 可用 `--log-dir` 指定目录，或用 `--no-log` 关闭文件日志；CLI 与 GUI 使用同一套日志配置（GUI 结果页会显示日志路径并支持“打开选中日志”）。
 - 多盘模式下，worker 结果文件默认位于临时目录 `Sisp\results\<时间戳>_<pid>\disk_<n>.json`，也可用 `--result-dir` 指定。
 - 主窗口会在所有 worker 结果返回后打印汇总，例如：
 
@@ -409,7 +410,7 @@ Sisp2/
 ```
 
 ## 测试
-当前共 251 个测试，主要覆盖：
+当前共 259 个测试，主要覆盖：
 
 - 配置读取、相对路径解析、文件/目录类型校验
 - 运行前检查

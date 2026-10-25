@@ -261,6 +261,25 @@ def test_plan_page_switches_to_dry_run_wording() -> None:
         close_window(window)
 
 
+def test_render_plan_tabs_resets_confirmation_checkbox() -> None:
+    """上一轮 dry-run 的勾选不能延续到新的（含真实写盘的）计划上。"""
+    window = MainWindow()
+    try:
+        window._prepared = [make_prepared(dry_run=True)]
+        window._render_plan_tabs()
+        window.plan_confirm_check.setChecked(True)
+        assert window.plan_confirm_button.isEnabled() is True
+
+        window._prepared = [make_prepared()]
+        window._render_plan_tabs()
+
+        assert window.plan_confirm_check.isChecked() is False
+        assert window.plan_confirm_button.isEnabled() is False
+        assert window.plan_confirm_button.text() == "确认并执行"
+    finally:
+        close_window(window)
+
+
 def test_plan_html_contains_identity_steps_and_warnings() -> None:
     window = MainWindow()
     try:
