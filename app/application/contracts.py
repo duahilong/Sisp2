@@ -106,13 +106,22 @@ class ConfigCheckResult:
 
 @dataclass(frozen=True)
 class CheckItem:
-    """单项检查结果，预留给后续计划确认界面使用。"""
+    """单项检查结果，供计划确认界面展示。"""
 
     key: str
     label: str
     passed: bool
     message: str
     details: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "label": self.label,
+            "passed": self.passed,
+            "message": self.message,
+            "details": dict(self.details),
+        }
 
 
 @dataclass(frozen=True)

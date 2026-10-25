@@ -5,7 +5,7 @@
 Sisp 使用 Python、PowerShell 和外部工具，围绕硬盘信息获取、磁盘初始化、分区格式化、系统镜像写入、目录拷贝与引导创建等流程进行阶段化开发。
 
 ## 当前状态
-当前已完成**第一阶段基础能力**，并已进入真实磁盘初始化、分区格式化与镜像写入阶段。当前已实现范围为：
+当前已完成**第一阶段基础能力**，并已进入真实磁盘初始化、分区格式化与镜像写入阶段；GUI 所需的应用服务层、任务事件、协作取消、计划确认门禁和工作流适配层已就绪，PySide6 图形界面与双入口打包也已落地。当前已实现范围为：
 
 - 程序启动
 - 运行前检查
@@ -23,6 +23,11 @@ Sisp 使用 Python、PowerShell 和外部工具，围绕硬盘信息获取、磁
 - 拷贝结果验证
 - 调用 `bcdboot.exe` 创建引导记录
 - 引导结果验证
+- 应用服务层：配置检查、硬盘保护、写前校验与盘符计划
+- 任务层：等待确认、后台执行、实时事件、协作取消与结果汇总
+- 工作流适配层：会话启动、计划生成、阻断项和批量错峰调度
+- PySide6 图形界面：配置检查、硬盘选择、计划确认、执行监控和结果汇总
+- 双入口打包：`Sisp.exe`（CLI 控制台）与 `SispGUI.exe`（窗口模式 + UAC）
 
 
 
@@ -42,7 +47,7 @@ Sisp 使用 Python、PowerShell 和外部工具，围绕硬盘信息获取、磁
   - Ghost 写入前重新校验镜像、Ghost、bcdboot 和拷贝源路径。
 - **P2 代码质量与测试**
   - 拆分 `app/main.py`：新增 `cli.py`、`orchestrator.py`、`drive_letters.py`、`worker_launcher.py`、`logging_setup.py`、`results.py`、`models.py`、`paths.py`、`version.py`。
-  - 新增 worker 结果、日志、dry-run、CLI、相对路径、磁盘安全等测试；当前共 178 个测试。
+  - 新增 worker 结果、日志、dry-run、CLI、相对路径、磁盘安全等测试；该版本共 178 个测试。
   - 引入 `pyproject.toml`、`ruff`、`pytest-cov`、`pre-commit` 和 GitHub Actions CI。
   - `Sisp.spec` 成为打包事实来源，`build.bat` 和 CI 都直接使用该文件。
 - **P3 体验与文档**
@@ -123,8 +128,16 @@ py -m pip install -r requirements.txt
 py -m pip install -r requirements-dev.txt
 ```
 
+图形界面依赖（包含运行依赖）：
+```powershell
+py -m pip install -r requirements-gui.txt
+```
+
 当前已声明依赖：
 - `wcwidth>=0.2.13`
+
+图形界面额外依赖：
+- `PySide6>=6.7`
 
 当前已声明开发依赖：
 - `pytest`、`pytest-cov`
@@ -138,48 +151,70 @@ py -m pip install -r requirements-dev.txt
 
 **打包方式：**
 ```powershell
-# 安装打包工具
-py -m pip install pyinstaller
+# 安装打包工具与 GUI 依赖
+py -m pip install -r requirements-dev.txt
+py -m pip install -r requirements-gui.txt
 
-# 使用打包脚本
+# 默认只打包 CLI
 .\build.bat
 
-# 或手动执行打包命令（Sisp.spec 是打包配置的事实来源）
+# 只打包 GUI（窗口模式 + UAC 管理员清单）
+.\build.bat --gui
+
+# 同时打包 CLI 和 GUI
+.\build.bat --all
+
+# 或手动执行打包命令（spec 是打包配置的事实来源）
 py -m PyInstaller --clean --noconfirm Sisp.spec
+py -m PyInstaller --clean --noconfirm SispGUI.spec
 ```
 
 `build.bat` 会优先使用环境变量 `SISP_PYTHON` 指定的 Python；未指定时依次查找 `py` 和 `python`。如果当前机器没有 `py` 命令，可先设置：
 
 ```powershell
 $env:SISP_PYTHON = "C:\Path\To\python.exe"
-.\build.bat
+.\build.bat --all
 ```
 
 **打包后目录结构：**
 ```
-dist/Sisp/
-├── Sisp.exe                  # 程序入口
+dist/Sisp/                    # CLI（Sisp.spec）
+├── Sisp.exe                  # 命令行入口
 ├── _internal/                # PyInstaller onedir 运行依赖目录，必须保留
 ├── json/
 │   └── win11.json            # 配置文件（外部可修改）
 └── Sw/
     ├── ghost64.exe           # 外部工具（存在时由 build.bat 自动复制）
     └── bcdboot.exe           # 外部工具（存在时由 build.bat 自动复制）
+
+dist/SispGUI/                 # GUI（SispGUI.spec）
+├── SispGUI.exe               # 图形界面入口，清单声明 requireAdministrator
+├── _internal/                # 含 PySide6 运行依赖与 Qt 插件
+├── json/
+│   └── win11.json
+└── Sw/
+    ├── ghost64.exe
+    └── bcdboot.exe
 ```
 
-`_internal/` 是 PyInstaller onedir 模式生成的运行依赖目录，必须随 `Sisp.exe` 一起发布，不能只复制 `Sisp.exe` 单独运行。
+`_internal/` 是 PyInstaller onedir 模式生成的运行依赖目录，必须随 exe 一起发布，不能只复制 exe 单独运行。
 
-`build.bat` 会自动复制 `json/win11.json` 到发布目录；若本地 `Sw/ghost64.exe` 和 `Sw/bcdboot.exe` 存在，也会自动复制到 `dist/Sisp/Sw/`。若外部工具不存在，需要在发布前手动补齐。
+`build.bat` 会自动复制 `json/win11.json` 到对应发布目录；若本地 `Sw/ghost64.exe` 和 `Sw/bcdboot.exe` 存在，也会自动复制到 `Sw/`。若外部工具不存在，需要在发布前手动补齐。
 
 **打包后使用方式：**
 ```powershell
+# CLI
 Sisp.exe -j D:\Sisp\json\win11.json
+
+# GUI：双击启动，或从命令行启动（manifest 会触发 UAC 提权）
+SispGUI.exe
 ```
 
 **兼容性说明：**
 - 代码通过 `sys.frozen` 检测打包环境
 - 打包后使用 `sys.executable` 启动 worker 进程
 - 配置文件和外部工具路径使用绝对路径
+- `SispGUI.spec` 使用 `uac_admin=True` 生成管理员清单；源码运行时由程序自身调用 `ShellExecuteW("runas", ...)` 提权
 
 ## 运行方式
 默认读取 `json/win11.json`：
@@ -218,6 +253,30 @@ py .\app\main.py --worker-disk 2 -j .\json\win11.json
 - worker 将结果写入 `--worker-result-file` 指定的 JSON 文件；主窗口等待结果并输出汇总。
 - worker 会继承主窗口的 `--log-dir` / `--no-log` 日志配置。
 - worker 窗口执行完成后默认保持打开，方便查看结果；主窗口可通过 `--worker-result-timeout` 设置等待上限。
+
+## 图形界面（GUI）
+
+源码运行（需要先安装 `requirements-gui.txt`）：
+
+```powershell
+py -m app.gui
+```
+
+界面采用五步流程：
+
+1. 运行环境与配置检查（管理员权限、PowerShell、配置文件、扫描硬盘）；
+2. 勾选目标硬盘，系统盘/启动盘/离线盘/只读盘/配置排除盘不可选；
+3. 计划确认，逐盘展示硬盘编号、型号、容量、UniqueId、SerialNumber、盘符、7 个执行步骤、检查项与破坏性警告；存在阻断项时确认按钮保持禁用；
+4. 执行监控，实时显示步骤、日志和状态；取消为协作式，当前步骤完成后停止；
+5. 结果汇总，查看每块盘的结果、错误码、步骤明细和日志路径。
+
+GUI 相关行为：
+
+- GUI 只负责展示和用户操作，业务判断复用 `SispService`、`ExecutionPlan`、`JobManager` 和 `WorkflowController`。
+- GUI 使用进程内 `JobManager` 线程执行任务；CLI 多盘仍使用独立 worker 进程，二者互不影响。
+- 非管理员启动时会通过 UAC 自动提权；调试时可设置 `SISP_NO_ELEVATE=1` 跳过提权（此时破坏性操作仍会被阻断项拦截）。
+- 关闭窗口时若任务未结束，只请求取消并等待当前步骤完成，不会强制结束进程。
+- 未安装 PySide6 时 CLI 不受影响；GUI 冒烟测试会自动跳过。
 
 ## 命令行参数
 
@@ -332,20 +391,25 @@ Sisp2/
 │   ├── paths.py            # 应用根目录
 │   ├── version.py          # 版本号
 │   ├── main.py             # 轻量入口与兼容性 re-export
+│   ├── gui_main.py         # PyInstaller GUI 入口
 │   ├── preflight.py        # 运行前检查
+│   ├── application/        # GUI/CLI 共用应用层、任务层与工作流适配
+│   ├── gui/                # PySide6 界面、任务事件桥、UAC 提权
 │   └── modules/            # 各功能模块（配置、磁盘、Ghost、引导等）
 ├── json/                   # JSON 配置目录
 ├── tests/                  # 测试目录
-├── Sisp.spec               # PyInstaller 打包配置（事实来源）
-├── build.bat               # 本地打包脚本
+├── Sisp.spec               # CLI 打包配置（事实来源）
+├── SispGUI.spec            # GUI 打包配置（窗口模式 + UAC）
+├── build.bat               # 本地打包脚本（支持 --gui / --all）
 ├── pyproject.toml          # 项目元数据、ruff/coverage 配置
 ├── requirements.txt        # 运行依赖
 ├── requirements-dev.txt    # 开发/测试依赖
+├── requirements-gui.txt    # GUI 依赖（PySide6）
 └── README.md               # 项目说明
 ```
 
 ## 测试
-当前共 178 个测试，主要覆盖：
+当前共 251 个测试，主要覆盖：
 
 - 配置读取、相对路径解析、文件/目录类型校验
 - 运行前检查
@@ -365,6 +429,9 @@ Sisp2/
 - 文件日志、PowerShell 超时/异常日志
 - dry-run、`--check-config`、`--list-disks`、`--version`
 - CLI 参数传递和 worker 直接 Python 启动
+- 应用服务层、任务事件、协作取消与计划确认门禁
+- 工作流适配层、计划阻断项与批量错峰调度
+- GUI 控件装配、硬盘/计划/监控/结果页刷新、UAC 提权分支
 
 测试基于 pytest 组织（`pytest.ini` 已配置，根目录 `conftest.py` 负责导入路径），可直接运行：
 

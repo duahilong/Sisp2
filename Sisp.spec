@@ -13,6 +13,7 @@ hiddenimports = [
     "app.application.planning",
     "app.application.reporting",
     "app.application.service",
+    "app.application.workflow",
     "app.cli",
     "app.disk_safety",
     "app.drive_letters",

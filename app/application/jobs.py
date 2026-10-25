@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -21,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from app.application.cancellation import CancellationToken, JobCancelled
+from app.application.contracts import CheckItem
 from app.application.events import EventLog, JobEvent, JobEventType, now_iso
 from app.logging_setup import get_log_path, get_logger
 from app.models import RunContext, StepRecord, WorkerResult
@@ -74,7 +76,12 @@ class JobSpec:
 
 @dataclass(frozen=True)
 class ExecutionPlan:
-    """供确认界面展示的执行计划快照。"""
+    """供确认界面展示的执行计划快照。
+
+    ``checks`` 是逐项检查结果，``blockers`` 是阻止执行的阻断项。只要
+    ``blockers`` 非空，``JobManager.confirm`` 就会拒绝启动任务，确认按钮也
+    应该保持禁用。
+    """
 
     disk_number: int
     steps: tuple[str, ...] = DEFAULT_PLAN_STEPS
@@ -85,6 +92,12 @@ class ExecutionPlan:
     config_path: str | None = None
     dry_run: bool = False
     warnings: tuple[str, ...] = ()
+    checks: tuple[CheckItem, ...] = ()
+    blockers: tuple[str, ...] = ()
+
+    @property
+    def can_execute(self) -> bool:
+        return not self.blockers
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -97,10 +110,19 @@ class ExecutionPlan:
             "config_path": self.config_path,
             "dry_run": self.dry_run,
             "warnings": list(self.warnings),
+            "checks": [check.to_dict() for check in self.checks],
+            "blockers": list(self.blockers),
+            "can_execute": self.can_execute,
         }
 
     @classmethod
-    def from_spec(cls, spec: JobSpec) -> ExecutionPlan:
+    def from_spec(
+        cls,
+        spec: JobSpec,
+        *,
+        checks: Sequence[CheckItem] | None = None,
+        blockers: Sequence[str] | None = None,
+    ) -> ExecutionPlan:
         identity = dict(spec.expected_identity or {})
         drive_letters = dict(spec.drive_letters or {})
         config_path = spec.config_payload.get("config_path")
@@ -111,6 +133,8 @@ class ExecutionPlan:
             model=str(identity.get("model") or ""),
             config_path=str(config_path) if config_path else None,
             dry_run=spec.dry_run,
+            checks=tuple(checks or ()),
+            blockers=tuple(blockers or ()),
         )
 
     @classmethod
@@ -123,6 +147,8 @@ class ExecutionPlan:
         expected_identity: dict[str, Any] | None = None,
         dry_run: bool = False,
         warnings: Sequence[str] | None = None,
+        checks: Sequence[CheckItem] | None = None,
+        blockers: Sequence[str] | None = None,
     ) -> ExecutionPlan:
         identity = dict(expected_identity or {})
         if not identity:
@@ -143,6 +169,8 @@ class ExecutionPlan:
             config_path=str(config_path) if config_path else None,
             dry_run=dry_run,
             warnings=tuple(warnings or ()),
+            checks=tuple(checks or ()),
+            blockers=tuple(blockers or ()),
         )
 
 
@@ -243,14 +271,20 @@ class JobManager:
         *,
         event_dir: str | Path | None = None,
         clock: Callable[[], str] = now_iso,
+        sleeper: Callable[[float], None] = time.sleep,
+        poll_interval: float = 0.05,
     ) -> None:
         self._runner = runner or _default_runner
         self._event_dir = Path(event_dir) if event_dir else None
         self._clock = clock
+        self._sleeper = sleeper
+        self._poll_interval = max(float(poll_interval), 0.0)
         self._lock = threading.RLock()
+        self._condition = threading.Condition(self._lock)
         self._jobs: dict[str, Job] = {}
         self._logs: dict[str, EventLog] = {}
         self._subscribers: list[EventSubscriber] = []
+        self._batch_threads: list[threading.Thread] = []
         self._counter = 0
         self._logger = get_logger("jobs")
 
@@ -310,13 +344,14 @@ class JobManager:
         return job
 
     def confirm(self, job_id: str) -> Job:
-        """用户确认计划后启动任务。"""
+        """用户确认计划后启动任务。存在阻断项时拒绝执行。"""
         with self._lock:
             job = self._require(job_id)
             if job.status == JobStatus.RUNNING:
                 return job
             if job.status != JobStatus.WAITING_CONFIRMATION:
                 raise ValueError(f"任务状态不允许确认: {job.status.value}")
+            self._raise_if_blocked(job)
 
             job.status = JobStatus.RUNNING
             job.started_at = self._clock()
@@ -332,6 +367,88 @@ class JobManager:
         self._emit(job_id, JobEventType.STARTED, {"started_at": job.started_at})
         thread.start()
         return job
+
+    def confirm_batch(
+        self,
+        job_ids: Sequence[str],
+        *,
+        interval: float = 0.0,
+        max_parallel: int = 1,
+    ) -> list[Job]:
+        """确认一批任务，按启动间隔和并发上限执行。
+
+        ``max_parallel`` 大于等于任务数时全部立即启动；否则由后台调度线程
+        逐个确认，前一个任务结束后再按 ``interval`` 秒启动下一个。
+        """
+        if max_parallel < 1:
+            raise ValueError("max_parallel 必须大于等于 1")
+        if interval < 0:
+            raise ValueError("interval 不能为负数")
+
+        ids = list(dict.fromkeys(str(job_id) for job_id in job_ids))
+        jobs: list[Job] = []
+        with self._lock:
+            for job_id in ids:
+                job = self._require(job_id)
+                if job.status.is_terminal:
+                    raise ValueError(f"任务状态不允许确认: {job.status.value}")
+                self._raise_if_blocked(job)
+                jobs.append(job)
+
+        if not jobs:
+            return []
+
+        if len(jobs) <= max_parallel:
+            for job in jobs:
+                self.confirm(job.id)
+            return jobs
+
+        thread = threading.Thread(
+            target=self._run_batch,
+            args=(ids, float(interval), int(max_parallel)),
+            name="sisp-batch",
+            daemon=True,
+        )
+        self._batch_threads.append(thread)
+        thread.start()
+        return jobs
+
+    def start_batch(
+        self,
+        specs: Sequence[JobSpec],
+        plans: Sequence[ExecutionPlan] | None = None,
+        *,
+        interval: float = 0.0,
+        max_parallel: int = 1,
+    ) -> list[Job]:
+        """创建并启动一批任务，适合 GUI 多盘错峰执行。"""
+        spec_list = list(specs)
+        if plans is None:
+            plan_list: list[ExecutionPlan | None] = [None] * len(spec_list)
+        else:
+            plan_list = list(plans)
+            if len(plan_list) != len(spec_list):
+                raise ValueError("specs 与 plans 数量不一致")
+
+        # 先整体检查阻断项，避免提交一半任务后才失败。
+        for spec, plan in zip(spec_list, plan_list, strict=True):
+            execution_plan = plan or ExecutionPlan.from_spec(spec)
+            if execution_plan.blockers:
+                raise ValueError(
+                    f"硬盘 {spec.disk_number} 的计划存在阻断项，拒绝执行: "
+                    + "；".join(execution_plan.blockers)
+                )
+
+        jobs = [
+            self.submit(spec, plan)
+            for spec, plan in zip(spec_list, plan_list, strict=True)
+        ]
+        self.confirm_batch(
+            [job.id for job in jobs],
+            interval=interval,
+            max_parallel=max_parallel,
+        )
+        return jobs
 
     def cancel(self, job_id: str, reason: str = "用户取消") -> bool:
         """请求取消任务。等待确认的任务立即取消，运行中的任务协作取消。"""
@@ -366,12 +483,71 @@ class JobManager:
         return job
 
     def wait_all(self, timeout: float | None = None) -> list[Job]:
+        """等待调度线程和全部任务结束。"""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        for batch_thread in list(self._batch_threads):
+            if batch_thread is threading.current_thread():
+                continue
+            remaining = None if deadline is None else max(deadline - time.monotonic(), 0.0)
+            batch_thread.join(remaining)
+
         jobs = self.jobs()
         for job in jobs:
-            self.wait(job.id, timeout=timeout)
+            remaining = None if deadline is None else max(deadline - time.monotonic(), 0.0)
+            self.wait(job.id, timeout=remaining)
         return jobs
 
     # ------------------------------------------------------------------ 执行
+    def _run_batch(self, job_ids: list[str], interval: float, max_parallel: int) -> None:
+        """后台调度一批任务：限制并发数，并在启动之间保持间隔。"""
+        pending = list(job_ids)
+        running: set[str] = set()
+        launched_any = False
+
+        while True:
+            with self._condition:
+                running = {
+                    job_id
+                    for job_id in running
+                    if job_id in self._jobs and not self._jobs[job_id].is_terminal
+                }
+                candidate: str | None = None
+                while pending and len(running) < max_parallel:
+                    job_id = pending.pop(0)
+                    job = self._jobs.get(job_id)
+                    if job is None or job.status.is_terminal:
+                        continue
+                    candidate = job_id
+                    break
+                finished = candidate is None and not pending and not running
+
+            if finished:
+                return
+
+            if candidate is None:
+                with self._condition:
+                    if pending or running:
+                        self._condition.wait(self._poll_interval)
+                continue
+
+            if launched_any and interval > 0:
+                self._sleeper(interval)
+            launched_any = True
+            try:
+                self.confirm(candidate)
+            except Exception:
+                self._logger.exception("批量调度启动任务失败: %s", candidate)
+                continue
+            with self._condition:
+                running.add(candidate)
+
+    @staticmethod
+    def _raise_if_blocked(job: Job) -> None:
+        if job.plan.blockers:
+            raise ValueError(
+                "计划存在阻断项，拒绝执行: " + "；".join(job.plan.blockers)
+            )
+
     def _run_job(self, job: Job) -> None:
         context = RunContext(
             disk_number=job.spec.disk_number,
@@ -425,6 +601,8 @@ class JobManager:
         else:
             self._emit(job.id, JobEventType.FAILED, self._result_payload(job))
         self._emit(job.id, JobEventType.FINISHED, self._result_payload(job))
+        with self._condition:
+            self._condition.notify_all()
 
     def _finish_cancelled(self, job: Job, reason: str) -> None:
         with self._lock:
@@ -433,6 +611,8 @@ class JobManager:
             job.error = reason
         self._emit(job.id, JobEventType.CANCELLED, self._result_payload(job))
         self._emit(job.id, JobEventType.FINISHED, self._result_payload(job))
+        with self._condition:
+            self._condition.notify_all()
 
     def _build_result(
         self,
