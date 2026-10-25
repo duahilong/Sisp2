@@ -169,5 +169,8 @@ def validate_partitioned_disks(
 
 
 
-def print_partition_validation_results(results: list[dict[str, Any]]) -> None:
-    print_step_results("分区格式化验证", results)
+def print_partition_validation_results(
+    results: list[dict[str, Any]],
+    line: Callable[[str], None] | None = None,
+) -> None:
+    print_step_results("分区格式化验证", results, line=line)

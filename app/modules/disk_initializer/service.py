@@ -175,5 +175,5 @@ def initialize_disks(
 
 
 
-def print_initialize_results(results: list[dict[str, Any]]) -> None:
-    print_step_results("初始化", results)
+def print_initialize_results(results: list[dict[str, Any]], line: Callable[[str], None] | None = None) -> None:
+    print_step_results("初始化", results, line=line)

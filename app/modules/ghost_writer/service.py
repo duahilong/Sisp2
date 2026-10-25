@@ -120,5 +120,5 @@ def write_ghost_image(
 
 
 
-def print_ghost_results(results: list[dict[str, Any]]) -> None:
-    print_step_results("镜像写入", results)
+def print_ghost_results(results: list[dict[str, Any]], line: Callable[[str], None] | None = None) -> None:
+    print_step_results("镜像写入", results, line=line)

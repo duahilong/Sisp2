@@ -12,20 +12,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from app.application.planning import validate_required_paths
+from app.application.planning import validate_target_resources as _validate_target_resources
+from app.application.reporting import ConsoleReporter, Reporter
+from app.application.service import SispService
 from app.disk_safety import (
-    build_resource_paths,
     ensure_strong_identity,
     normalize_drive_letters,
     resolve_path_disk_number,
     validate_disk_identity,
     validate_drive_letter_ownership,
-    validate_resources_not_on_target_disks,
 )
-from app.drive_letters import (
-    build_drive_letter_allocations,
-    build_forbidden_drive_letters,
-    validate_drive_letters_are_free,
-)
+from app.drive_letters import validate_drive_letters_are_free
 from app.logging_setup import get_log_path, get_logger, log_step
 from app.models import RunContext, WorkerResult
 from app.modules.boot_creator.service import build_bcdboot_command, create_boot_record, print_boot_results
@@ -159,30 +157,6 @@ def build_target_disk_text(disk: dict[str, Any]) -> str:
     )
 
 
-def validate_required_paths(config_payload: dict[str, Any]) -> None:
-    """校验 Ghost、镜像、目录拷贝源和 bcdboot 路径。
-
-    对文件/目录类型也做检查，避免把目录误当成可执行文件，或把文件误当成
-    目录拷贝源。该函数会在任何写盘动作前以及 Ghost 写入前各调用一次。
-    """
-    required_paths: dict[str, tuple[Any, str]] = {
-        "Ghost 可执行文件路径 (gho_exe)": ((config_payload.get("software_paths") or {}).get("ghost64_path"), "file"),
-        "Ghost 镜像文件路径 (win_gho)": ((config_payload.get("image_info") or {}).get("image_path"), "file"),
-        "目录拷贝源路径 (software_file)": ((config_payload.get("copy_info") or {}).get("source_dir"), "dir"),
-        "bcdboot 可执行文件路径 (bcd_exe)": ((config_payload.get("software_paths") or {}).get("bcdboot_path"), "file"),
-    }
-    for name, (value, expected_kind) in required_paths.items():
-        if not isinstance(value, str) or not value.strip():
-            raise ConfigError(f"配置中缺少 {name}")
-        path = Path(value)
-        if not path.exists():
-            raise ConfigError(f"{name} 不存在: {value}")
-        if expected_kind == "file" and not path.is_file():
-            raise ConfigError(f"{name} 不是文件: {value}")
-        if expected_kind == "dir" and not path.is_dir():
-            raise ConfigError(f"{name} 不是目录: {value}")
-
-
 def validate_target_resources(
     config_payload: dict[str, Any],
     target_disk_numbers: list[int],
@@ -190,16 +164,17 @@ def validate_target_resources(
     log_dir: str | Path | None = None,
     result_dir: str | Path | None = None,
 ) -> None:
-    """拒绝把 GHO、工具、源目录、配置或日志放在目标盘上。"""
-    resources = build_resource_paths(
+    """拒绝把 GHO、工具、源目录、配置或日志放在目标盘上。
+
+    保留该包装函数，使现有调用方和测试可以继续替换模块级
+    ``resolve_path_disk_number``。
+    """
+    _validate_target_resources(
         config_payload,
+        target_disk_numbers,
         config_path=config_path,
         log_dir=log_dir,
         result_dir=result_dir,
-    )
-    validate_resources_not_on_target_disks(
-        resources,
-        target_disk_numbers,
         resolver=resolve_path_disk_number,
     )
 
@@ -254,8 +229,8 @@ def validate_partition_plan_before_initialize(disk: dict[str, Any], partition_in
         )
 
 
-def _print_step(index: int, name: str) -> None:
-    print(f"[{index}/{STEP_TOTAL}] {name}...")
+def _print_step(index: int, name: str, reporter: Reporter | None = None) -> None:
+    (reporter or ConsoleReporter()).step_started(index, STEP_TOTAL, name)
 
 
 def _record_step(context: RunContext, name: str, passed: bool, message: str) -> None:
@@ -269,7 +244,9 @@ def _print_dry_run_plan(
     drive_letters: dict[str, str] | None,
     partition_results: list[dict[str, Any]] | None = None,
     expected_identity: dict[str, Any] | None = None,
+    reporter: Reporter | None = None,
 ) -> None:
+    line = (reporter or ConsoleReporter()).line
     partition_info = config_payload.get("partition_info") or {}
     gho_exe = (config_payload.get("software_paths") or {}).get("ghost64_path") or "<未配置>"
     win_gho = (config_payload.get("image_info") or {}).get("image_path") or "<未配置>"
@@ -285,15 +262,15 @@ def _print_dry_run_plan(
         efi_letter = efi_letter or partitions.get("efi_drive_letter")
         data1_letter = data1_letter or partitions.get("d1_drive_letter")
 
-    print("=" * 80)
-    print(f"Dry-run 执行计划（硬盘 {disk_number}，不会执行任何写盘操作）")
-    print("=" * 80)
+    line("=" * 80)
+    line(f"Dry-run 执行计划（硬盘 {disk_number}，不会执行任何写盘操作）")
+    line("=" * 80)
     expected_identities = [expected_identity] if expected_identity else None
-    print("步骤 1：初始化硬盘，将执行以下 PowerShell 脚本：")
-    print(build_initialize_disk_script([disk_number], expected_identities=expected_identities))
-    print("-" * 80)
-    print("步骤 2：分区并格式化，将执行以下 PowerShell 脚本：")
-    print(
+    line("步骤 1：初始化硬盘，将执行以下 PowerShell 脚本：")
+    line(build_initialize_disk_script([disk_number], expected_identities=expected_identities))
+    line("-" * 80)
+    line("步骤 2：分区并格式化，将执行以下 PowerShell 脚本：")
+    line(
         build_partition_disk_script(
             [disk_number],
             partition_info.get("efi_size_mb", 0),
@@ -302,19 +279,19 @@ def _print_dry_run_plan(
             expected_identities=expected_identities,
         )
     )
-    print("-" * 80)
-    print("步骤 3：Ghost 镜像写入命令：")
-    print(build_ghost_command(str(gho_exe), str(win_gho), disk_number))
-    print(f"目标 Windows 分区盘符: {windows_letter or '<未知>'}")
-    print("-" * 80)
-    print(f"步骤 4：目录拷贝源: {source_dir}")
-    print(f"目标数据分区盘符: {data1_letter or '<未知>'}")
-    print("-" * 80)
-    print("步骤 5：引导记录创建命令：")
+    line("-" * 80)
+    line("步骤 3：Ghost 镜像写入命令：")
+    line(build_ghost_command(str(gho_exe), str(win_gho), disk_number))
+    line(f"目标 Windows 分区盘符: {windows_letter or '<未知>'}")
+    line("-" * 80)
+    line(f"步骤 4：目录拷贝源: {source_dir}")
+    line(f"目标数据分区盘符: {data1_letter or '<未知>'}")
+    line("-" * 80)
+    line("步骤 5：引导记录创建命令：")
     if windows_letter and efi_letter:
-        print(build_bcdboot_command(str(bcd_exe), str(windows_letter), str(efi_letter)))
+        line(build_bcdboot_command(str(bcd_exe), str(windows_letter), str(efi_letter)))
     else:
-        print(
+        line(
             [
                 str(bcd_exe),
                 "<Windows盘符>:\\Windows",
@@ -324,7 +301,7 @@ def _print_dry_run_plan(
                 "UEFI",
             ]
         )
-    print("-" * 80)
+    line("-" * 80)
 
 
 def run_single_disk_flow(
@@ -334,10 +311,13 @@ def run_single_disk_flow(
     drive_letters: dict[str, str] | None = None,
     run_context: RunContext | None = None,
     dry_run: bool = False,
+    reporter: Reporter | None = None,
 ) -> None:
     context = run_context or RunContext(disk_number=disk_number)
     context.disk_number = disk_number
     context.dry_run = dry_run
+    active_reporter = reporter or context.reporter or ConsoleReporter()
+    line = active_reporter.line
     logger = get_logger("flow")
     logger.info("开始处理硬盘 %s（dry_run=%s）", disk_number, dry_run)
 
@@ -365,8 +345,8 @@ def run_single_disk_flow(
         except ValueError as exc:
             raise PartitionError(f"盘符校验失败: {exc}") from exc
 
-    print(build_target_disk_text(disk))
-    print(f"开始处理硬盘 {disk_number}: {disk.get('model') or '未知'}")
+    line(build_target_disk_text(disk))
+    line(f"开始处理硬盘 {disk_number}: {disk.get('model') or '未知'}")
 
     if dry_run:
         has_strong_identity = bool(
@@ -374,32 +354,38 @@ def run_single_disk_flow(
             or str(effective_identity.get("serial_number") or "").strip()
         )
         plan_identity = effective_identity if has_strong_identity else None
-        _print_dry_run_plan(disk_number, config_payload, drive_letters, expected_identity=plan_identity)
+        _print_dry_run_plan(
+            disk_number,
+            config_payload,
+            drive_letters,
+            expected_identity=plan_identity,
+            reporter=active_reporter,
+        )
         _record_step(context, "dry-run", True, "已生成执行计划，未执行磁盘操作")
-        print(f"硬盘 {disk_number} dry-run 完成，未执行任何磁盘操作")
+        line(f"硬盘 {disk_number} dry-run 完成，未执行任何磁盘操作")
         return
 
-    _print_step(1, "初始化硬盘")
+    _print_step(1, "初始化硬盘", active_reporter)
     context.start_step("初始化")
     initialize_results = initialize_disks([disk_number], expected_identities=[effective_identity])
-    print_initialize_results(initialize_results)
+    print_initialize_results(initialize_results, line=line)
     if not all(result.get("passed") for result in initialize_results):
         message = build_failed_result_message(initialize_results)
         _record_step(context, "初始化", False, message)
         raise InitializationError(f"硬盘初始化失败: {message}")
     _record_step(context, "初始化", True, "初始化完成")
 
-    _print_step(2, "验证初始化结果")
+    _print_step(2, "验证初始化结果", active_reporter)
     context.start_step("初始化验证")
     validation_results = validate_initialized_disks(initialize_results)
-    print_initialization_validation_results(validation_results)
+    print_initialization_validation_results(validation_results, line=line)
     if not all(result.get("passed") for result in validation_results):
         message = build_failed_result_message(validation_results)
         _record_step(context, "初始化验证", False, message)
         raise ValidationError(f"初始化结果验证失败: {message}")
     _record_step(context, "初始化验证", True, "初始化结果验证通过")
 
-    _print_step(3, "分区并格式化")
+    _print_step(3, "分区并格式化", active_reporter)
     context.start_step("分区格式化")
     partition_results = partition_and_format_disks(
         [disk_number],
@@ -407,7 +393,7 @@ def run_single_disk_flow(
         drive_letters=drive_letters,
         expected_identities=[effective_identity],
     )
-    print_partition_results(partition_results)
+    print_partition_results(partition_results, line=line)
     if not partition_results:
         _record_step(context, "分区格式化", False, "分区和格式化结果为空")
         raise PartitionError("分区和格式化结果为空，无法获取 Windows 分区盘符")
@@ -417,14 +403,14 @@ def run_single_disk_flow(
         raise PartitionError(f"硬盘分区和格式化失败: {message}")
     _record_step(context, "分区格式化", True, "分区和格式化完成")
 
-    _print_step(4, "验证分区结果")
+    _print_step(4, "验证分区结果", active_reporter)
     context.start_step("分区验证")
     partition_validation_results = validate_partitioned_disks(
         [disk_number],
         config_payload.get("partition_info") or {},
         drive_letters=drive_letters,
     )
-    print_partition_validation_results(partition_validation_results)
+    print_partition_validation_results(partition_validation_results, line=line)
     if not all(result.get("passed") for result in partition_validation_results):
         message = build_failed_result_message(partition_validation_results)
         _record_step(context, "分区验证", False, message)
@@ -445,7 +431,7 @@ def run_single_disk_flow(
         _record_step(context, "Ghost 镜像写入", False, "无法确定 Windows 分区盘符")
         raise PartitionError("无法确定 Windows 分区盘符，Ghost 镜像写入中止")
 
-    _print_step(5, "写入 Ghost 镜像")
+    _print_step(5, "写入 Ghost 镜像", active_reporter)
     context.start_step("Ghost 镜像写入")
     try:
         # 写盘后再次确认外部资源仍然可用，避免中途被移动/删除；
@@ -461,7 +447,7 @@ def run_single_disk_flow(
         _record_step(context, "Ghost 镜像写入", False, str(exc))
         raise
     ghost_results = [write_ghost_image(str(gho_exe), str(win_gho), disk_number, windows_drive_letter)]
-    print_ghost_results(ghost_results)
+    print_ghost_results(ghost_results, line=line)
     if not all(result.get("passed") for result in ghost_results):
         message = build_failed_result_message(ghost_results)
         _record_step(context, "Ghost 镜像写入", False, message)
@@ -470,7 +456,7 @@ def run_single_disk_flow(
 
     source_dir = (config_payload.get("copy_info") or {}).get("source_dir")
     data1_drive_letter = (drive_letters or {}).get("data1") or (partition_results[0].get("partitions") or {}).get("d1_drive_letter")
-    _print_step(6, "拷贝目录")
+    _print_step(6, "拷贝目录", active_reporter)
     context.start_step("目录拷贝")
     try:
         revalidate_target_disk(disk_number, effective_identity, excluded_disk_names)
@@ -479,7 +465,7 @@ def run_single_disk_flow(
         _record_step(context, "目录拷贝", False, str(exc))
         raise
     copy_results = [copy_directory(str(source_dir), data1_drive_letter, disk_number)]
-    print_copy_results(copy_results)
+    print_copy_results(copy_results, line=line)
     if not all(result.get("passed") for result in copy_results):
         message = build_failed_result_message(copy_results)
         _record_step(context, "目录拷贝", False, message)
@@ -488,7 +474,7 @@ def run_single_disk_flow(
 
     bcd_exe = (config_payload.get("software_paths") or {}).get("bcdboot_path")
     efi_drive_letter = (drive_letters or {}).get("efi") or (partition_results[0].get("partitions") or {}).get("efi_drive_letter")
-    _print_step(7, "创建引导记录")
+    _print_step(7, "创建引导记录", active_reporter)
     context.start_step("引导创建")
     try:
         revalidate_target_disk(disk_number, effective_identity, excluded_disk_names)
@@ -500,14 +486,14 @@ def run_single_disk_flow(
         _record_step(context, "引导创建", False, str(exc))
         raise
     boot_results = [create_boot_record(str(bcd_exe), windows_drive_letter, efi_drive_letter, disk_number)]
-    print_boot_results(boot_results)
+    print_boot_results(boot_results, line=line)
     if not all(result.get("passed") for result in boot_results):
         message = build_failed_result_message(boot_results)
         _record_step(context, "引导创建", False, message)
         raise BootError(f"引导记录创建失败: {message}")
     _record_step(context, "引导创建", True, "引导记录创建完成")
 
-    print(f"硬盘 {disk_number} 当前阶段处理完成")
+    line(f"硬盘 {disk_number} 当前阶段处理完成")
     logger.info("硬盘 %s 全部步骤完成，总耗时 %.3fs", disk_number, sum(step.duration_seconds for step in context.steps))
 
 
@@ -537,8 +523,12 @@ def run_minimal_main_flow(
         raise ConfigError("运行前检查未返回可用的配置数据")
 
     excluded_disk_names = config_payload.get("excluded_disk_names") or []
+    service = SispService(
+        disk_scanner=lambda: scan_disk_summaries(),
+        used_letter_scanner=lambda: scan_used_drive_letters(),
+    )
     try:
-        disk_summaries = apply_disk_protection(scan_disk_summaries(), excluded_disk_names)
+        disk_summaries = service.protect_disks(service.scan_disks(), excluded_disk_names)
     except Exception as exc:
         raise PreflightError(f"硬盘信息扫描失败，请确认 PowerShell 和 Storage 模块可用: {exc}") from exc
     if not disk_summaries:
@@ -550,25 +540,21 @@ def run_minimal_main_flow(
     print(f"配置文件: {config_payload.get('config_path')}")
     print_disk_summaries(disk_summaries)
     selected_disk_numbers = prompt_disk_selection(disk_summaries, input_func=input_func)
-    if selected_disk_numbers:
-        # 先做全局资源检查：多盘模式下，资源可能位于另一块稍后会被清空的目标盘。
-        validate_required_paths(config_payload)
-        validate_target_resources(
-            config_payload,
-            selected_disk_numbers,
-            config_path=config_path,
-            log_dir=log_dir,
-            result_dir=result_dir,
-        )
-        used_letters = scan_used_drive_letters()
-        forbidden = build_forbidden_drive_letters(disk_summaries, selected_disk_numbers, used_letters)
-    else:
-        forbidden = []
+    # 先做全局资源检查：多盘模式下，资源可能位于另一块稍后会被清空的目标盘。
+    plan = service.build_selection_plan(
+        config_payload,
+        disk_summaries,
+        selected_disk_numbers,
+        config_path=config_path,
+        log_dir=log_dir,
+        result_dir=result_dir,
+        resource_resolver=resolve_path_disk_number,
+    )
 
     if len(selected_disk_numbers) > 1 and not dry_run:
         launcher = worker_launcher or launch_worker_windows
         print("已选择多个硬盘，将为每个硬盘启动独立执行窗口")
-        allocations = build_drive_letter_allocations(selected_disk_numbers, forbidden_letters=forbidden)
+        allocations = plan.drive_letter_allocations
         identities = build_worker_disk_identities(disk_summaries, selected_disk_numbers)
         for identity in identities:
             identity["drive_letters"] = allocations.get(identity["disk_number"])
@@ -593,7 +579,7 @@ def run_minimal_main_flow(
         return selected_disk_numbers
 
     for disk_number in selected_disk_numbers:
-        allocations = build_drive_letter_allocations(selected_disk_numbers, forbidden_letters=forbidden)
+        allocations = plan.drive_letter_allocations
         disk = find_disk_summary(disk_summaries, disk_number)
         expected_identity = build_worker_disk_identity(disk) if disk else None
         run_single_disk_flow(

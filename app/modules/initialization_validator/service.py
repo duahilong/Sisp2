@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Any
 
 from app.modules.common.service import print_step_results
@@ -73,5 +74,8 @@ def validate_initialized_disks(initialized_results: list[dict[str, Any]]) -> lis
 
 
 
-def print_initialization_validation_results(results: list[dict[str, Any]]) -> None:
-    print_step_results("初始化验证", results)
+def print_initialization_validation_results(
+    results: list[dict[str, Any]],
+    line: Callable[[str], None] | None = None,
+) -> None:
+    print_step_results("初始化验证", results, line=line)

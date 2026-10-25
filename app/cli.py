@@ -7,17 +7,17 @@ import sys
 import traceback
 from pathlib import Path
 
+from app.application.service import SispService
 from app.drive_letters import parse_worker_drive_letters
 from app.logging_setup import configure_logging, get_logger, reset_logging
 from app.modules.common.constants import ErrorCode
 from app.modules.common.service import ConfigError, SispError
 from app.modules.config_loader.service import load_config
 from app.modules.disk_info.service import scan_disk_summaries
-from app.modules.user_interaction.service import apply_disk_protection, print_disk_summaries
+from app.modules.user_interaction.service import print_disk_summaries
 from app.orchestrator import (
     run_minimal_main_flow,
     run_worker_flow,
-    validate_required_paths,
 )
 from app.results import DEFAULT_WORKER_RESULT_TIMEOUT_SECONDS
 from app.version import __version__
@@ -64,20 +64,21 @@ def wait_for_exit() -> None:
             pass
 
 
-def check_config(config_path: str | Path | None = None) -> int:
-    try:
-        payload = load_config(config_path)
-        validate_required_paths(payload)
-    except SispError as exc:
-        print(f"配置检查失败: {exc}", file=sys.stderr)
-        return exc.error_code
-    except (OSError, ValueError) as exc:
-        print(f"配置检查失败: {exc}", file=sys.stderr)
-        return ErrorCode.CONFIG_ERROR
-    except Exception as exc:
-        print(f"配置检查失败: {exc}", file=sys.stderr)
-        return ErrorCode.UNEXPECTED_ERROR
+def _build_service() -> SispService:
+    """构造 CLI 使用的服务，保留模块级 monkeypatch 的兼容性。"""
+    return SispService(
+        config_loader=lambda path: load_config(path),
+        disk_scanner=lambda: scan_disk_summaries(),
+    )
 
+
+def check_config(config_path: str | Path | None = None) -> int:
+    result = _build_service().check_config(config_path)
+    if not result.passed:
+        print(f"配置检查失败: {result.message}", file=sys.stderr)
+        return result.error_code
+
+    payload = result.payload or {}
     partition_info = payload.get("partition_info") or {}
     print("配置检查通过")
     print(f"配置文件: {payload.get('config_path')}")
@@ -91,23 +92,19 @@ def check_config(config_path: str | Path | None = None) -> int:
 
 
 def list_disks(config_path: str | Path | None = None) -> int:
-    excluded: list[str] = []
     try:
-        payload = load_config(config_path)
-        excluded = payload.get("excluded_disk_names") or []
-    except Exception as exc:
-        print(f"警告: 配置读取失败，将使用空排除列表: {exc}", file=sys.stderr)
-
-    try:
-        disks = apply_disk_protection(scan_disk_summaries(), excluded)
+        result = _build_service().list_disks(config_path, ignore_config_errors=True)
     except Exception as exc:
         print(f"硬盘信息扫描失败: {exc}", file=sys.stderr)
         return ErrorCode.PREFLIGHT_FAILED
 
+    if result.warning:
+        print(result.warning, file=sys.stderr)
+
     print("=" * 80)
     print("Sisp - 硬盘列表（只读）")
     print("=" * 80)
-    print_disk_summaries(disks)
+    print_disk_summaries([disk.to_dict() for disk in result.disks])
     return ErrorCode.SUCCESS
 
 

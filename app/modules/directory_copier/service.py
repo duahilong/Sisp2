@@ -2,6 +2,7 @@ import ctypes
 import os
 import shutil
 import stat
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -184,5 +185,5 @@ def copy_directory(
 
 
 
-def print_copy_results(results: list[dict[str, Any]]) -> None:
-    print_step_results("目录拷贝", results)
+def print_copy_results(results: list[dict[str, Any]], line: Callable[[str], None] | None = None) -> None:
+    print_step_results("目录拷贝", results, line=line)

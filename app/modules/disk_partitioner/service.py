@@ -328,5 +328,5 @@ def partition_and_format_disks(
 
 
 
-def print_partition_results(results: list[dict[str, Any]]) -> None:
-    print_step_results("分区格式化", results)
+def print_partition_results(results: list[dict[str, Any]], line: Callable[[str], None] | None = None) -> None:
+    print_step_results("分区格式化", results, line=line)

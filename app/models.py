@@ -40,6 +40,7 @@ class RunContext:
     disk_number: int | None = None
     dry_run: bool = False
     steps: list[StepRecord] = field(default_factory=list)
+    reporter: Any | None = None
     _step_started: dict[str, float] = field(default_factory=dict, repr=False)
 
     def start_step(self, name: str) -> None:

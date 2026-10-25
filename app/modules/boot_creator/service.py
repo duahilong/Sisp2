@@ -141,5 +141,5 @@ def create_boot_record(
 
 
 
-def print_boot_results(results: list[dict[str, Any]]) -> None:
-    print_step_results("引导创建", results)
+def print_boot_results(results: list[dict[str, Any]], line: Callable[[str], None] | None = None) -> None:
+    print_step_results("引导创建", results, line=line)

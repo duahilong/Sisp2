@@ -5,6 +5,11 @@ build.bat 与 CI 都直接使用本文件，新增模块时只需在这里补充
 """
 
 hiddenimports = [
+    "app.application",
+    "app.application.contracts",
+    "app.application.planning",
+    "app.application.reporting",
+    "app.application.service",
     "app.cli",
     "app.disk_safety",
     "app.drive_letters",

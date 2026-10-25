@@ -1,6 +1,7 @@
 import os
 import subprocess
 import time
+from collections.abc import Callable
 from typing import Any
 
 from app.logging_setup import log_powershell
@@ -143,11 +144,19 @@ def get_system_drive_letter() -> str:
     return os.environ.get("SystemDrive", "C:")[0].upper()
 
 
-def print_step_results(step_name: str, results: list[dict[str, Any]]) -> None:
-    """统一输出各步骤结果：硬盘 N <步骤><通过/失败>: 消息"""
+def print_step_results(
+    step_name: str,
+    results: list[dict[str, Any]],
+    line: Callable[[str], None] | None = None,
+) -> None:
+    """统一输出各步骤结果：硬盘 N <步骤><通过/失败>: 消息
+
+    ``line`` 允许调用方把输出重定向到 GUI/日志适配器；默认仍写标准输出。
+    """
+    writer = line or print
     for result in results:
         status = "通过" if result.get("passed") else "失败"
-        print(f"硬盘 {result.get('disk_number')} {step_name}{status}: {result.get('message')}")
+        writer(f"硬盘 {result.get('disk_number')} {step_name}{status}: {result.get('message')}")
 
 
 
