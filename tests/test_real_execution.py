@@ -1,0 +1,301 @@
+"""P0 回归：真实执行路径必须真的可达。
+
+覆盖三处曾经的断点：
+
+1. ``WorkflowController`` 从没把 ``dry_run`` 传给 ``SispService``（服务默认 True）；
+2. ``JobManager`` 的默认执行器会另造一个 ``SispService()``（也是 True），
+   控制器上挂的执行器因此被绕过；
+3. 真实模式要求注入 ``real_runner``，而仓库里从来没有人注入。
+
+这些测试全部用替身执行器，不碰 diskpart/dism。
+"""
+
+from __future__ import annotations
+
+import threading
+from types import SimpleNamespace
+from typing import Any
+
+from app.application.contracts import DiskInfo
+from app.application.jobs import JobManager
+from app.application.real_runner import WindowsDiskRunner, _CommandLog, build_real_runner
+from app.application.service import SispService
+from app.application.workflow import WorkflowController
+
+_GIB = 1024**3
+_PAYLOAD: dict[str, Any] = {
+    "partition_info": {"efi_size_mb": 300, "c_size_gb": 30, "data_size_gb": "auto"},
+    "image_info": {"image_path": r"D:\images\win11.wim", "image_index": 1},
+}
+
+
+def _disk(number: int = 1, *, selectable: bool = True) -> DiskInfo:
+    return DiskInfo(
+        disk_number=number,
+        model="test disk",
+        serial_number=None,
+        unique_id=f"unique-{number}",
+        size_bytes=60 * _GIB,
+        size_display="60 GB",
+        partition_style="RAW",
+        bus_type="NVMe",
+        drive_letters=(),
+        is_boot=False,
+        is_system=False,
+        is_offline=False,
+        is_read_only=False,
+        is_selectable=selectable,
+        protection_reasons=() if selectable else ("测试用：受保护",),
+    )
+
+
+class _FakeService:
+    """只实现工作流用到的几个方法；executor 被调用时记一笔。"""
+
+    def __init__(self, disks: list[DiskInfo], *, dry_run: bool = True) -> None:
+        self.disks = disks
+        self.dry_run = dry_run
+        self.allowed_disk_numbers = frozenset()
+        self.executed: list[Any] = []
+
+    def scan_protected_disks(self, excluded_names: Any = None) -> list[DiskInfo]:
+        return list(self.disks)
+
+    def build_selection_plan(self, payload, summaries, selected, **kwargs):
+        letters = {number: {"efi": "E", "windows": "F", "data": "G"} for number in selected}
+        return SimpleNamespace(drive_letter_allocations=letters)
+
+    def execute_spec(self, spec, cancel_event):
+        self.executed.append(spec)
+        return "executed"
+
+
+def _preflight(config_path=None) -> dict[str, Any]:
+    return {
+        "results": [{"name": "运行前检查", "passed": True, "message": "ok"}],
+        "config_payload": _PAYLOAD,
+    }
+
+
+# ---------------------------------------------------------------- 装配（P0-1）
+def test_real_mode_builds_service_with_runner_and_allowlist():
+    controller = WorkflowController(dry_run=False, allowed_disk_numbers=[1, 2])
+
+    assert controller.service.dry_run is False
+    assert controller.service.allowed_disk_numbers == frozenset({1, 2})
+    # 默认执行器必须是真实实现，不能再是 None（旧实现从不注入）。
+    assert isinstance(controller.service._real_runner, WindowsDiskRunner)
+
+
+def test_dry_run_mode_keeps_service_in_dry_run():
+    controller = WorkflowController(dry_run=True, allowed_disk_numbers=[1])
+
+    assert controller.service.dry_run is True
+    assert controller.service.allowed_disk_numbers == frozenset({1})
+
+
+def test_default_executor_delegates_to_session_service():
+    controller = WorkflowController(dry_run=True)
+    fake = _FakeService([])
+    controller._service = fake
+
+    spec = SimpleNamespace(dry_run=True)
+    result = controller.job_manager._executor(spec, threading.Event())
+
+    assert result == "executed"
+    assert fake.executed == [spec]
+
+
+def test_injected_service_keeps_its_dry_run_but_gets_allowlist():
+    service = SispService(disk_scanner=lambda: [], dry_run=True)
+    controller = WorkflowController(service=service, dry_run=False, allowed_disk_numbers=[3])
+
+    controller._sync_service_policy(dry_run=False)
+
+    # 外部注入的服务归调用方管，只同步白名单，不强行改 dry_run。
+    assert service.dry_run is True
+    assert service.allowed_disk_numbers == frozenset({3})
+
+
+def test_custom_job_manager_is_respected():
+    manager = JobManager()
+    controller = WorkflowController(dry_run=True, job_manager=manager)
+
+    assert controller.job_manager is manager
+
+
+# ---------------------------------------------------------------- 计划（白名单）
+def test_prepare_grants_only_selected_disks_when_no_explicit_allowlist():
+    service = _FakeService([_disk(1)])
+    controller = WorkflowController(
+        service=service,
+        dry_run=False,
+        preflight_runner=_preflight,
+    )
+    controller.start(None, dry_run=False)
+
+    prepared = controller.prepare([1])
+
+    assert service.allowed_disk_numbers == frozenset({1})
+    checks = {check.key: check for check in prepared[0].plan.checks}
+    assert checks["write_allowlist"].passed is True
+    assert "选中" in checks["write_allowlist"].message
+
+
+def test_prepare_keeps_explicit_allowlist_untouched():
+    service = _FakeService([_disk(1), _disk(2)])
+    controller = WorkflowController(
+        service=service,
+        dry_run=False,
+        allowed_disk_numbers=[1],
+        preflight_runner=_preflight,
+    )
+    controller.start(None, dry_run=False)
+
+    prepared = controller.prepare([1])
+
+    assert service.allowed_disk_numbers == frozenset({1})
+    checks = {check.key: check for check in prepared[0].plan.checks}
+    assert checks["write_allowlist"].message.startswith("白名单")
+
+
+def test_real_plan_blocks_disk_outside_allowlist():
+    service = _FakeService([_disk(1), _disk(2)])
+    controller = WorkflowController(
+        service=service,
+        dry_run=False,
+        allowed_disk_numbers=[2],
+        preflight_runner=_preflight,
+    )
+    controller.start(None, dry_run=False)
+
+    prepared = controller.prepare([1])
+
+    assert prepared[0].plan.blockers
+    assert any("白名单" in blocker for blocker in prepared[0].plan.blockers)
+
+
+# ---------------------------------------------------------------- 执行器（P0-2）
+def test_build_real_runner_returns_windows_runner():
+    assert isinstance(build_real_runner(), WindowsDiskRunner)
+
+
+def test_diskpart_script_layout():
+    runner = WindowsDiskRunner()
+    lines = runner._diskpart_script(
+        disk_number=2,
+        efi_mb=300,
+        c_gb=30,
+        data_gb=None,
+        letters={"efi": "E", "windows": "F", "data": "G"},
+        log=_CommandLog(None),
+    )
+
+    assert lines[0] == "select disk 2"
+    assert "clean" in lines
+    assert "convert gpt" in lines
+    assert "create partition efi size=300" in lines
+    assert "create partition primary size=30720" in lines  # 30 GB * 1024 MB
+    assert "create partition primary" in lines  # 数据分区吃剩余空间
+    assert lines[-1] == "exit"
+
+
+def test_diskpart_script_uses_explicit_data_size():
+    runner = WindowsDiskRunner()
+    lines = runner._diskpart_script(
+        disk_number=1,
+        efi_mb=100,
+        c_gb=10,
+        data_gb=5,
+        letters={"efi": "E", "windows": "F", "data": "G"},
+        log=_CommandLog(None),
+    )
+
+    assert "create partition primary size=5120" in lines
+
+
+def test_runner_reports_missing_image_without_touching_disks(tmp_path):
+    runner = WindowsDiskRunner(
+        diskpart=r"C:\nope\diskpart.exe",
+        dism=r"C:\nope\dism.exe",
+        bcdboot=r"C:\nope\bcdboot.exe",
+    )
+    spec = SimpleNamespace(
+        disk_number=1,
+        config_payload={
+            "partition_info": _PAYLOAD["partition_info"],
+            "image_info": {"image_path": str(tmp_path / "missing.wim"), "image_index": 1},
+        },
+        drive_letters={"efi": "E", "windows": "F", "data": "G"},
+    )
+
+    result = runner.run(spec, threading.Event())
+
+    assert result.success is False
+    assert "镜像文件不存在" in (result.error or "")
+    assert result.steps == ()
+
+
+def test_runner_fails_cleanly_when_diskpart_cannot_start(tmp_path):
+    image = tmp_path / "tiny.wim"
+    image.write_bytes(b"not a real wim")
+    runner = WindowsDiskRunner(
+        diskpart=r"C:\nope\diskpart.exe",
+        dism=r"C:\nope\dism.exe",
+        bcdboot=r"C:\nope\bcdboot.exe",
+    )
+    spec = SimpleNamespace(
+        disk_number=1,
+        config_payload={
+            "partition_info": _PAYLOAD["partition_info"],
+            "image_info": {"image_path": str(image), "image_index": 1},
+        },
+        drive_letters={"efi": "E", "windows": "F", "data": "G"},
+    )
+
+    result = runner.run(spec, threading.Event())
+
+    assert result.success is False
+    assert "无法执行 diskpart" in (result.error or "")
+    efi = next(step for step in result.steps if step.key == "efi")
+    assert efi.failed is True
+
+
+def test_runner_rejects_incomplete_letters(tmp_path):
+    image = tmp_path / "tiny.wim"
+    image.write_bytes(b"x")
+    runner = WindowsDiskRunner()
+    spec = SimpleNamespace(
+        disk_number=1,
+        config_payload={
+            "partition_info": _PAYLOAD["partition_info"],
+            "image_info": {"image_path": str(image), "image_index": 1},
+        },
+        drive_letters={"efi": "E"},
+    )
+
+    result = runner.run(spec, threading.Event())
+
+    assert result.success is False
+    assert "缺少盘符分配" in (result.error or "")
+
+
+def test_runner_honours_pre_cancelled_event(tmp_path):
+    image = tmp_path / "tiny.wim"
+    image.write_bytes(b"x")
+    runner = WindowsDiskRunner()
+    spec = SimpleNamespace(
+        disk_number=1,
+        config_payload={
+            "partition_info": _PAYLOAD["partition_info"],
+            "image_info": {"image_path": str(image), "image_index": 1},
+        },
+        drive_letters={"efi": "E", "windows": "F", "data": "G"},
+    )
+    cancel = threading.Event()
+    cancel.set()
+
+    result = runner.run(spec, cancel)
+
+    assert result.success is False
+    assert "已取消" in (result.error or "")

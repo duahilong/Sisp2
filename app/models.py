@@ -1,112 +1,176 @@
-"""项目内部使用的结构化数据模型。
+"""工作线程与任务层共用的结果模型。
 
-模块边界仍然以 dict 为主，避免一次性重构破坏现有调用；新增的
-运行上下文、步骤记录和 worker 结果使用 dataclass，方便日志与汇总。
+一次硬盘操作跑完之后，界面/CLI/日志只认一个东西：``WorkerResult``。
+它回答三个问题——这块盘整体成没成、每一步做了什么、失败时错在哪。
+
+约定：
+
+- ``success`` 只表示“这次任务整体是否成功”。单步失败时 ``steps`` 仍然完整，
+  界面据此定位是分区、格式化还是写镜像出的问题；
+- dry-run 任务同样返回 ``WorkerResult``，但 ``dry_run=True``、每个步骤的
+  ``status`` 为 ``skipped``，``details`` 里带“将要执行什么”的预览；
+- 对象只装可序列化数据，不含文件句柄、线程或 Qt 控件，``to_dict()``
+  的结果可以直接塞进 JSON 响应或日志。
 """
 
 from __future__ import annotations
 
-import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
+
+# 单步状态：任务整体成功与否看 ``WorkerResult.success``，不看这三个值。
+STEP_OK = "ok"
+STEP_FAILED = "failed"
+STEP_SKIPPED = "skipped"
+
+STEP_STATUSES = (STEP_OK, STEP_FAILED, STEP_SKIPPED)
 
 
 @dataclass(frozen=True)
-class StepRecord:
-    """单个流程步骤的执行记录。"""
+class StepResult:
+    """任务里的一步，例如“清盘并重建分区表”“应用镜像”。
 
-    name: str
-    passed: bool
-    message: str
-    duration_seconds: float = 0.0
+    ``key`` 用稳定的英文短标识（``partition`` / ``image``），便于界面按 key
+    取图标；``title`` 是给人看的中文短标题。
+    """
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> StepRecord:
-        return cls(
-            name=str(payload.get("name") or ""),
-            passed=bool(payload.get("passed")),
-            message=str(payload.get("message") or ""),
-            duration_seconds=float(payload.get("duration_seconds") or 0.0),
-        )
-
-
-@dataclass
-class RunContext:
-    """一次单盘执行的上下文，用于记录步骤、耗时和日志关联信息。"""
-
-    disk_number: int | None = None
-    dry_run: bool = False
-    steps: list[StepRecord] = field(default_factory=list)
-    reporter: Any | None = None
-    cancel_token: Any | None = None
-    _step_started: dict[str, float] = field(default_factory=dict, repr=False)
-
-    def raise_if_cancelled(self) -> None:
-        """在破坏性步骤边界检查取消信号。"""
-        token = self.cancel_token
-        if token is not None:
-            token.raise_if_cancelled()
-
-    def start_step(self, name: str) -> None:
-        self._step_started[name] = time.perf_counter()
-
-    def record_step(self, name: str, passed: bool, message: str) -> StepRecord:
-        started = self._step_started.pop(name, None)
-        duration = max(time.perf_counter() - started, 0.0) if started is not None else 0.0
-        record = StepRecord(name=name, passed=passed, message=message, duration_seconds=round(duration, 3))
-        self.steps.append(record)
-        return record
+    key: str
+    title: str
+    status: str = STEP_OK
+    message: str = ""
+    details: dict[str, Any] = field(default_factory=dict)
 
     @property
-    def passed(self) -> bool:
-        return all(step.passed for step in self.steps)
+    def ok(self) -> bool:
+        return self.status == STEP_OK
 
-    def failed_steps(self) -> list[StepRecord]:
-        return [step for step in self.steps if not step.passed]
+    @property
+    def failed(self) -> bool:
+        return self.status == STEP_FAILED
+
+    @property
+    def skipped(self) -> bool:
+        return self.status == STEP_SKIPPED
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "title": self.title,
+            "status": self.status,
+            "message": self.message,
+            "details": dict(self.details),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> StepResult:
+        details = data.get("details")
+        return cls(
+            key=str(data.get("key") or ""),
+            title=str(data.get("title") or ""),
+            status=str(data.get("status") or STEP_OK),
+            message=str(data.get("message") or ""),
+            details=dict(details) if isinstance(details, dict) else {},
+        )
 
 
 @dataclass(frozen=True)
 class WorkerResult:
-    """worker 进程的最终结果，会写入结果文件供主窗口汇总。"""
+    """一次硬盘操作的完整结果。"""
 
     disk_number: int
     success: bool
-    error_code: int
-    message: str
-    steps: tuple[StepRecord, ...] = ()
-    log_path: str | None = None
-    started_at: str = ""
-    finished_at: str = ""
+    message: str = ""
     dry_run: bool = False
+    steps: tuple[StepResult, ...] = ()
+    error: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    duration_seconds: float = 0.0
+
+    @property
+    def failed_steps(self) -> tuple[StepResult, ...]:
+        return tuple(step for step in self.steps if step.failed)
+
+    @property
+    def skipped_steps(self) -> tuple[StepResult, ...]:
+        return tuple(step for step in self.steps if step.skipped)
+
+    @classmethod
+    def dry_run_plan(
+        cls,
+        disk_number: int,
+        steps: tuple[StepResult, ...] | list[StepResult] = (),
+        message: str = "dry-run 模式：仅生成执行计划，未执行任何命令",
+        *,
+        started_at: str | None = None,
+        finished_at: str | None = None,
+        duration_seconds: float = 0.0,
+    ) -> WorkerResult:
+        """构造一份 dry-run 结果：整体成功，但所有步骤都是“未执行”。"""
+        return cls(
+            disk_number=disk_number,
+            success=True,
+            message=message,
+            dry_run=True,
+            steps=tuple(steps),
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_seconds=duration_seconds,
+        )
+
+    @classmethod
+    def failure(
+        cls,
+        disk_number: int,
+        error: str,
+        *,
+        message: str = "",
+        dry_run: bool = False,
+        steps: tuple[StepResult, ...] | list[StepResult] = (),
+    ) -> WorkerResult:
+        """构造一份失败结果；``error`` 保留原始异常文本方便排查。"""
+        return cls(
+            disk_number=disk_number,
+            success=False,
+            message=message or error,
+            dry_run=dry_run,
+            steps=tuple(steps),
+            error=error,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "disk_number": self.disk_number,
             "success": self.success,
-            "error_code": self.error_code,
             "message": self.message,
+            "dry_run": self.dry_run,
             "steps": [step.to_dict() for step in self.steps],
-            "log_path": self.log_path,
+            "error": self.error,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
-            "dry_run": self.dry_run,
+            "duration_seconds": round(float(self.duration_seconds), 3),
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> WorkerResult:
-        raw_steps = payload.get("steps") or []
-        steps = tuple(StepRecord.from_dict(item) for item in raw_steps if isinstance(item, dict))
+    def from_dict(cls, data: dict[str, Any]) -> WorkerResult:
+        raw_steps = data.get("steps")
+        steps = tuple(
+            StepResult.from_dict(item)
+            for item in (raw_steps if isinstance(raw_steps, (list, tuple)) else ())
+            if isinstance(item, dict)
+        )
+        try:
+            duration = float(data.get("duration_seconds") or 0.0)
+        except (TypeError, ValueError):
+            duration = 0.0
         return cls(
-            disk_number=int(payload.get("disk_number") or 0),
-            success=bool(payload.get("success")),
-            error_code=int(payload.get("error_code") or 0),
-            message=str(payload.get("message") or ""),
+            disk_number=int(data.get("disk_number") or 0),
+            success=bool(data.get("success")),
+            message=str(data.get("message") or ""),
+            dry_run=bool(data.get("dry_run")),
             steps=steps,
-            log_path=payload.get("log_path"),
-            started_at=str(payload.get("started_at") or ""),
-            finished_at=str(payload.get("finished_at") or ""),
-            dry_run=bool(payload.get("dry_run")),
+            error=str(data["error"]) if data.get("error") else None,
+            started_at=str(data["started_at"]) if data.get("started_at") else None,
+            finished_at=str(data["finished_at"]) if data.get("finished_at") else None,
+            duration_seconds=duration,
         )

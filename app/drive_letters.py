@@ -1,4 +1,8 @@
-"""盘符分配与 worker 盘符参数解析。"""
+"""盘符分配与 worker 盘符参数解析。
+
+P0 补丁（G14）：三分区布局（EFI + C + D）后，每块盘只需要 3 个盘符，
+角色键从 ``efi/windows/data1/data2`` 收敛为 ``efi/windows/data``。
+"""
 
 from __future__ import annotations
 
@@ -9,7 +13,9 @@ from app.modules.common.service import get_system_drive_letter
 AVAILABLE_DRIVE_LETTERS = [
     "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
 ]
-LETTERS_PER_DISK = 4
+# P0 补丁：三分区（EFI / Windows / Data）
+LETTERS_PER_DISK = 3
+DRIVE_LETTER_ROLES = ("efi", "windows", "data")
 
 
 def build_drive_letter_allocations(
@@ -28,12 +34,7 @@ def build_drive_letter_allocations(
                 f"被占用: {occupied}"
             )
         letters = pool[index:index + LETTERS_PER_DISK]
-        allocations[disk_number] = {
-            "efi": letters[0],
-            "windows": letters[1],
-            "data1": letters[2],
-            "data2": letters[3],
-        }
+        allocations[disk_number] = dict(zip(DRIVE_LETTER_ROLES, letters))
         index += LETTERS_PER_DISK
     return allocations
 
@@ -44,7 +45,7 @@ def parse_worker_drive_letters(
 ) -> dict[str, str]:
     letters = [part.strip().upper() for part in text.split(",")]
     if len(letters) != LETTERS_PER_DISK:
-        raise ValueError(f"盘符参数必须为 4 个字母（EFI,Windows,Data1,Data2），实际为: {text}")
+        raise ValueError(f"盘符参数必须为 3 个字母（EFI,Windows,Data），实际为: {text}")
     seen: set[str] = set()
     used = {str(letter).upper() for letter in (used_letters or [])}
     forbidden = {"A", "B", "C", get_system_drive_letter()} | used
@@ -58,12 +59,7 @@ def parse_worker_drive_letters(
         if letter in forbidden:
             raise ValueError(f"盘符 {letter} 为保留盘符或系统盘符，禁止用于 worker 分区")
         seen.add(letter)
-    return {
-        "efi": letters[0],
-        "windows": letters[1],
-        "data1": letters[2],
-        "data2": letters[3],
-    }
+    return dict(zip(DRIVE_LETTER_ROLES, letters))
 
 
 def validate_drive_letters_are_free(
@@ -78,7 +74,7 @@ def validate_drive_letters_are_free(
     if not drive_letters:
         return
 
-    required_keys = ("efi", "windows", "data1", "data2")
+    required_keys = DRIVE_LETTER_ROLES
     letters: list[str] = []
     for key in required_keys:
         letter = str(drive_letters.get(key) or "").strip().upper()

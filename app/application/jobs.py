@@ -1,90 +1,83 @@
-"""任务管理与实时事件。
+"""任务编排单元：``JobSpec`` / ``Job`` / ``ExecutionPlan`` / ``JobManager``。
 
-``JobManager`` 是 GUI 与执行流程之间的薄层：
+这一层只回答“什么时候、按什么顺序、以多大并发去跑”，不关心具体怎么
+分区或写镜像——真正的执行放在 ``SispService`` 里，通过可注入的
+``executor`` 调进来，所以任务管理可以脱离磁盘环境做单元测试。
 
-1. ``submit`` 创建任务并进入 ``WAITING_CONFIRMATION``，由界面展示
-   ``ExecutionPlan``；
-2. ``confirm`` 才真正启动执行线程；
-3. 执行期间通过 ``JobEvent`` 推送日志、步骤和结果事件；
-4. ``cancel`` 发出协作取消信号，流程在步骤边界停止。
+状态机（``JobStatus``）::
 
-现有 CLI 不依赖本模块，因此引入任务层不会改变命令行行为。
+    pending ──submit(默认)──> waiting_confirmation ──confirm_batch──> running
+       │                              │                                │
+       └──────cancel──────────────────┴────────────cancel───────────────┤
+                                                                        ├─> ok
+                                                                        └─> failed
+    未开始即取消: cancelled；执行器判定“无需执行”: skipped
+
+三条约定：
+
+- **默认停在等待确认**：``submit()`` 不会自动开跑，必须显式
+  ``confirm_batch()``，避免界面误触直接清盘；
+- **取消是协作式的**：``cancel()`` 只把 ``cancel_event`` 置位并立刻返回，
+  正在执行的步骤跑完后才停（与界面提示的“当前步骤完成后才会停止”一致）；
+- **事件是旁路**：``subscribe()`` 的回调在 ``jobs_lock`` 之外调用，
+  回调抛异常只记日志，不影响任务状态。
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import threading
-import time
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from enum import StrEnum
+from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from app.application.cancellation import CancellationToken, JobCancelled
-from app.application.contracts import CheckItem
-from app.application.events import EventLog, JobEvent, JobEventType, now_iso
-from app.logging_setup import get_log_path, get_logger
-from app.models import RunContext, StepRecord, WorkerResult
-from app.modules.common.constants import ErrorCode
-from app.modules.common.service import SispError
+from app.models import WorkerResult
 
-DEFAULT_PLAN_STEPS = (
-    "初始化硬盘",
-    "验证初始化结果",
-    "分区并格式化",
-    "验证分区结果",
-    "写入 Ghost 镜像",
-    "拷贝目录",
-    "创建引导记录",
-)
+_LOGGER = logging.getLogger(__name__)
+
+# 回调签名：executor(spec, cancel_event) -> WorkerResult
+Executor = Callable[["JobSpec", threading.Event], WorkerResult]
 
 
-class JobStatus(StrEnum):
-    """任务状态。"""
+def _now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
 
+
+class JobStatus(str, Enum):
+    """任务状态；值直接进 JSON，界面对字符串做比较。"""
+
+    PENDING = "pending"
     WAITING_CONFIRMATION = "waiting_confirmation"
     RUNNING = "running"
-    SUCCEEDED = "succeeded"
+    OK = "ok"
     FAILED = "failed"
+    SKIPPED = "skipped"
     CANCELLED = "cancelled"
 
     @property
-    def is_terminal(self) -> bool:
-        return self in (JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED)
+    def is_finished(self) -> bool:
+        return self in _FINISHED_STATUSES
+
+    @property
+    def is_waiting(self) -> bool:
+        return self in (JobStatus.PENDING, JobStatus.WAITING_CONFIRMATION)
 
 
-@dataclass(frozen=True)
-class JobSpec:
-    """执行任务所需的输入。"""
-
-    disk_number: int
-    config_payload: dict[str, Any]
-    expected_identity: dict[str, Any] | None = None
-    drive_letters: dict[str, str] | None = None
-    dry_run: bool = False
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "disk_number": self.disk_number,
-            "config_path": self.config_payload.get("config_path"),
-            "expected_identity": self.expected_identity,
-            "drive_letters": self.drive_letters,
-            "dry_run": self.dry_run,
-        }
+_FINISHED_STATUSES = frozenset(
+    {JobStatus.OK, JobStatus.FAILED, JobStatus.SKIPPED, JobStatus.CANCELLED}
+)
 
 
 @dataclass(frozen=True)
 class ExecutionPlan:
-    """供确认界面展示的执行计划快照。
-
-    ``checks`` 是逐项检查结果，``blockers`` 是阻止执行的阻断项。只要
-    ``blockers`` 非空，``JobManager.confirm`` 就会拒绝启动任务，确认按钮也
-    应该保持禁用。
-    """
+    """给界面看的执行计划；``blockers`` 非空时 workflow 会拒绝执行。"""
 
     disk_number: int
-    steps: tuple[str, ...] = DEFAULT_PLAN_STEPS
     model: str = ""
     size_display: str = ""
     identity: dict[str, Any] = field(default_factory=dict)
@@ -92,17 +85,16 @@ class ExecutionPlan:
     config_path: str | None = None
     dry_run: bool = False
     warnings: tuple[str, ...] = ()
-    checks: tuple[CheckItem, ...] = ()
+    checks: tuple[Any, ...] = ()
     blockers: tuple[str, ...] = ()
 
     @property
-    def can_execute(self) -> bool:
+    def executable(self) -> bool:
         return not self.blockers
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "disk_number": self.disk_number,
-            "steps": list(self.steps),
             "model": self.model,
             "size_display": self.size_display,
             "identity": dict(self.identity),
@@ -110,183 +102,126 @@ class ExecutionPlan:
             "config_path": self.config_path,
             "dry_run": self.dry_run,
             "warnings": list(self.warnings),
-            "checks": [check.to_dict() for check in self.checks],
+            "checks": [
+                check.to_dict() if hasattr(check, "to_dict") else dict(check)
+                for check in self.checks
+            ],
             "blockers": list(self.blockers),
-            "can_execute": self.can_execute,
+            "executable": self.executable,
         }
 
-    @classmethod
-    def from_spec(
-        cls,
-        spec: JobSpec,
-        *,
-        checks: Sequence[CheckItem] | None = None,
-        blockers: Sequence[str] | None = None,
-    ) -> ExecutionPlan:
-        identity = dict(spec.expected_identity or {})
-        drive_letters = dict(spec.drive_letters or {})
-        config_path = spec.config_payload.get("config_path")
-        return cls(
-            disk_number=spec.disk_number,
-            identity=identity,
-            drive_letters=drive_letters,
-            model=str(identity.get("model") or ""),
-            config_path=str(config_path) if config_path else None,
-            dry_run=spec.dry_run,
-            checks=tuple(checks or ()),
-            blockers=tuple(blockers or ()),
-        )
 
-    @classmethod
-    def from_disk(
-        cls,
-        disk: dict[str, Any],
-        *,
-        config_payload: dict[str, Any],
-        drive_letters: dict[str, str] | None = None,
-        expected_identity: dict[str, Any] | None = None,
-        dry_run: bool = False,
-        warnings: Sequence[str] | None = None,
-        checks: Sequence[CheckItem] | None = None,
-        blockers: Sequence[str] | None = None,
-    ) -> ExecutionPlan:
-        identity = dict(expected_identity or {})
-        if not identity:
-            identity = {
-                "disk_number": disk.get("disk_number"),
-                "unique_id": disk.get("unique_id"),
-                "serial_number": disk.get("serial_number"),
-                "model": disk.get("model"),
-                "size_bytes": disk.get("size_bytes"),
-            }
-        config_path = config_payload.get("config_path")
-        return cls(
-            disk_number=int(disk.get("disk_number") or 0),
-            model=str(disk.get("model") or ""),
-            size_display=str(disk.get("size_display") or ""),
-            identity=identity,
-            drive_letters=dict(drive_letters or {}),
-            config_path=str(config_path) if config_path else None,
-            dry_run=dry_run,
-            warnings=tuple(warnings or ()),
-            checks=tuple(checks or ()),
-            blockers=tuple(blockers or ()),
-        )
+@dataclass(frozen=True)
+class JobSpec:
+    """交给执行器的输入；必须可 JSON 序列化，便于落盘与重放。"""
+
+    disk_number: int
+    config_payload: dict[str, Any] = field(default_factory=dict)
+    expected_identity: dict[str, Any] = field(default_factory=dict)
+    drive_letters: dict[str, str] = field(default_factory=dict)
+    dry_run: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "disk_number": self.disk_number,
+            "config_payload": dict(self.config_payload),
+            "expected_identity": dict(self.expected_identity),
+            "drive_letters": dict(self.drive_letters),
+            "dry_run": self.dry_run,
+        }
 
 
-@dataclass
 class Job:
-    """一个硬盘任务的运行时状态。"""
+    """一个任务的运行时状态；可变对象，由 ``JobManager`` 负责加锁更新。"""
 
-    id: str
-    spec: JobSpec
-    plan: ExecutionPlan
-    status: JobStatus = JobStatus.WAITING_CONFIRMATION
-    created_at: str = field(default_factory=now_iso)
-    started_at: str | None = None
-    finished_at: str | None = None
-    steps: tuple[StepRecord, ...] = ()
-    result: WorkerResult | None = None
-    error: str | None = None
-    events: list[JobEvent] = field(default_factory=list)
-    cancel_token: CancellationToken = field(default_factory=CancellationToken, repr=False)
-    thread: threading.Thread | None = field(default=None, repr=False)
+    def __init__(self, job_id: str, spec: JobSpec, plan: ExecutionPlan) -> None:
+        self.id = job_id
+        self.spec = spec
+        self.plan = plan
+        self.status: JobStatus = JobStatus.PENDING
+        self.result: WorkerResult | None = None
+        self.error: str | None = None
+        self.created_at = _now()
+        self.updated_at = self.created_at
+        self.started_at: str | None = None
+        self.finished_at: str | None = None
+        self.cancel_reason: str | None = None
+        self.cancel_event = threading.Event()
 
     @property
-    def is_terminal(self) -> bool:
-        return self.status.is_terminal
+    def disk_number(self) -> int:
+        return self.spec.disk_number
+
+    @property
+    def finished(self) -> bool:
+        return self.status.is_finished
+
+    @property
+    def cancelled(self) -> bool:
+        return self.status == JobStatus.CANCELLED
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "disk_number": self.disk_number,
             "status": self.status.value,
+            "dry_run": bool(self.spec.dry_run),
+            "plan": self.plan.to_dict(),
+            "spec": self.spec.to_dict(),
+            "result": self.result.to_dict() if self.result is not None else None,
+            "error": self.error,
+            "cancel_reason": self.cancel_reason,
             "created_at": self.created_at,
+            "updated_at": self.updated_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
-            "spec": self.spec.to_dict(),
-            "plan": self.plan.to_dict(),
-            "error": self.error,
-            "result": self.result.to_dict() if self.result else None,
-            "steps": [step.to_dict() for step in self.steps],
         }
 
 
-JobRunner = Callable[[JobSpec, RunContext], None]
-EventSubscriber = Callable[[JobEvent], None]
+@dataclass(frozen=True)
+class JobEvent:
+    """推给界面的事件；``payload`` 只放小字段，完整任务状态走 ``jobs`` 列表。"""
 
+    type: str
+    job_id: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
+    seq: int = 0
+    timestamp: str = field(default_factory=_now)
 
-class JobReporter:
-    """把 Reporter 输出转换成任务事件。"""
-
-    def __init__(self, manager: JobManager, job_id: str) -> None:
-        self._manager = manager
-        self._job_id = job_id
-
-    def line(self, text: str = "") -> None:
-        self._manager._emit(self._job_id, JobEventType.LOG, {"text": text})
-
-    def step_started(self, index: int, total: int, name: str) -> None:
-        self._manager._emit(
-            self._job_id,
-            JobEventType.STEP_STARTED,
-            {"index": index, "total": total, "name": name},
-        )
-
-    def step_finished(self, index: int, total: int, name: str, passed: bool, message: str) -> None:
-        self._manager._emit(
-            self._job_id,
-            JobEventType.STEP_FINISHED,
-            {
-                "index": index,
-                "total": total,
-                "name": name,
-                "passed": passed,
-                "message": message,
-            },
-        )
-
-
-def _default_runner(spec: JobSpec, context: RunContext) -> None:
-    # 延迟导入，避免 application 层与 orchestrator 在模块加载时形成环。
-    from app.orchestrator import run_single_disk_flow
-
-    run_single_disk_flow(
-        spec.disk_number,
-        spec.config_payload,
-        expected_identity=spec.expected_identity,
-        drive_letters=spec.drive_letters,
-        run_context=context,
-        dry_run=spec.dry_run,
-        reporter=context.reporter,
-        cancel_token=context.cancel_token,
-    )
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": self.type,
+            "job_id": self.job_id,
+            "payload": dict(self.payload),
+            "seq": self.seq,
+            "timestamp": self.timestamp,
+        }
 
 
 class JobManager:
-    """创建、确认、执行和取消硬盘任务。"""
+    """创建任务、推进状态、按并发/间隔调度，并广播事件。
+
+    ``executor`` 不传时使用默认实现：懒加载 ``SispService().execute_spec``。
+    默认服务是 dry-run 且没有任何写盘白名单，因此**真实执行会失败**——
+    这是刻意的：真跑必须显式注入 ``SispService(dry_run=False, ...)`` 或自定义执行器。
+    """
 
     def __init__(
         self,
-        runner: JobRunner | None = None,
+        executor: Executor | None = None,
         *,
         event_dir: str | Path | None = None,
-        clock: Callable[[], str] = now_iso,
-        sleeper: Callable[[float], None] = time.sleep,
-        poll_interval: float = 0.05,
     ) -> None:
-        self._runner = runner or _default_runner
-        self._event_dir = Path(event_dir) if event_dir else None
-        self._clock = clock
-        self._sleeper = sleeper
-        self._poll_interval = max(float(poll_interval), 0.0)
-        self._lock = threading.RLock()
-        self._condition = threading.Condition(self._lock)
+        self._executor = executor
         self._jobs: dict[str, Job] = {}
-        self._logs: dict[str, EventLog] = {}
-        self._subscribers: list[EventSubscriber] = []
-        self._batch_threads: list[threading.Thread] = []
-        self._counter = 0
-        self._logger = get_logger("jobs")
+        self._lock = threading.RLock()
+        self._all_done = threading.Condition(self._lock)
+        self._subscribers: list[Callable[[JobEvent], None]] = []
+        self._seq = 0
+        self._event_dir = Path(event_dir) if event_dir else None
+        self._event_file: Path | None = None
+        if self._event_dir is not None:
+            self._event_file = self._event_dir / "jobs.jsonl"
 
     # ------------------------------------------------------------------ 查询
     def get(self, job_id: str) -> Job | None:
@@ -297,77 +232,69 @@ class JobManager:
         with self._lock:
             return list(self._jobs.values())
 
-    def events(self, job_id: str, *, since: int = 0) -> tuple[JobEvent, ...]:
-        with self._lock:
-            job = self._require(job_id)
-            return tuple(event for event in job.events if event.sequence > since)
-
-    def subscribe(self, callback: EventSubscriber) -> Callable[[], None]:
-        """订阅所有任务事件，返回取消订阅函数。"""
+    # ------------------------------------------------------------------ 事件
+    def subscribe(self, callback: Callable[[JobEvent], None]) -> Callable[[], None]:
+        """注册事件回调，返回取消订阅函数（重复调用安全）。"""
         with self._lock:
             self._subscribers.append(callback)
 
         def unsubscribe() -> None:
             with self._lock:
-                if callback in self._subscribers:
+                try:
                     self._subscribers.remove(callback)
+                except ValueError:
+                    pass
 
         return unsubscribe
 
-    # ------------------------------------------------------------------ 生命周期
+    def _emit(self, event_type: str, job: Job, **payload: Any) -> None:
+        with self._lock:
+            self._seq += 1
+            event = JobEvent(
+                type=event_type,
+                job_id=job.id,
+                payload=payload,
+                seq=self._seq,
+            )
+            subscribers = list(self._subscribers)
+
+        self._persist_event(event)
+        for callback in subscribers:
+            try:
+                callback(event)
+            except Exception:  # noqa: BLE001 - 界面回调出错不能影响执行
+                _LOGGER.exception("任务事件回调失败: %s", event_type)
+
+    def _persist_event(self, event: JobEvent) -> None:
+        if self._event_file is None:
+            return
+        try:
+            self._event_dir.mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
+            with self._event_file.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
+        except OSError:
+            _LOGGER.warning("任务事件落盘失败: %s", self._event_file, exc_info=True)
+
+    # ------------------------------------------------------------------ 创建
     def submit(
         self,
         spec: JobSpec,
-        plan: ExecutionPlan | None = None,
+        plan: ExecutionPlan,
         *,
         require_confirmation: bool = True,
     ) -> Job:
-        """创建任务；默认进入等待确认状态。"""
-        execution_plan = plan or ExecutionPlan.from_spec(spec)
-        if execution_plan.disk_number != spec.disk_number:
-            raise ValueError(
-                f"计划硬盘编号与任务不一致: {execution_plan.disk_number} != {spec.disk_number}"
-            )
-
+        """登记任务；默认停在 ``waiting_confirmation``，等 ``confirm_batch``。"""
+        job_id = f"disk{spec.disk_number}-{uuid.uuid4().hex[:8]}"
+        job = Job(job_id, spec, plan)
+        job.status = (
+            JobStatus.WAITING_CONFIRMATION if require_confirmation else JobStatus.PENDING
+        )
         with self._lock:
-            self._counter += 1
-            job_id = f"job-{self._counter:04d}"
-            job = Job(id=job_id, spec=spec, plan=execution_plan)
             self._jobs[job_id] = job
-            if self._event_dir is not None:
-                self._logs[job_id] = EventLog(self._event_dir / f"{job_id}.jsonl")
-
-        self._emit(job_id, JobEventType.CREATED, {"plan": execution_plan.to_dict()})
-        self._emit(job_id, JobEventType.AWAITING_CONFIRMATION, {"plan": execution_plan.to_dict()})
-        if not require_confirmation:
-            self.confirm(job_id)
+        self._emit("job.created", job, status=job.status.value, disk_number=spec.disk_number)
         return job
 
-    def confirm(self, job_id: str) -> Job:
-        """用户确认计划后启动任务。存在阻断项时拒绝执行。"""
-        with self._lock:
-            job = self._require(job_id)
-            if job.status == JobStatus.RUNNING:
-                return job
-            if job.status != JobStatus.WAITING_CONFIRMATION:
-                raise ValueError(f"任务状态不允许确认: {job.status.value}")
-            self._raise_if_blocked(job)
-
-            job.status = JobStatus.RUNNING
-            job.started_at = self._clock()
-            thread = threading.Thread(
-                target=self._run_job,
-                args=(job,),
-                name=f"sisp-{job.id}",
-                daemon=True,
-            )
-            job.thread = thread
-
-        self._emit(job_id, JobEventType.CONFIRMED, {})
-        self._emit(job_id, JobEventType.STARTED, {"started_at": job.started_at})
-        thread.start()
-        return job
-
+    # ------------------------------------------------------------------ 执行
     def confirm_batch(
         self,
         job_ids: Sequence[str],
@@ -375,307 +302,159 @@ class JobManager:
         interval: float = 0.0,
         max_parallel: int = 1,
     ) -> list[Job]:
-        """确认一批任务，按启动间隔和并发上限执行。
+        """确认一批任务并开始调度；立即返回，不阻塞调用方。
 
-        ``max_parallel`` 大于等于任务数时全部立即启动；否则由后台调度线程
-        逐个确认，前一个任务结束后再按 ``interval`` 秒启动下一个。
+        只接受处于 ``pending`` / ``waiting_confirmation`` 的任务；
+        有任何一个状态不对就整体拒绝（``ValueError``），避免“确认了一半”。
         """
-        if max_parallel < 1:
-            raise ValueError("max_parallel 必须大于等于 1")
-        if interval < 0:
-            raise ValueError("interval 不能为负数")
+        interval = max(float(interval), 0.0)
+        max_parallel = max(int(max_parallel), 1)
 
-        ids = list(dict.fromkeys(str(job_id) for job_id in job_ids))
-        jobs: list[Job] = []
         with self._lock:
-            for job_id in ids:
-                job = self._require(job_id)
-                if job.status.is_terminal:
-                    raise ValueError(f"任务状态不允许确认: {job.status.value}")
-                self._raise_if_blocked(job)
-                jobs.append(job)
+            selected: list[Job] = []
+            for job_id in job_ids:
+                job = self._jobs.get(job_id)
+                if job is None:
+                    raise ValueError(f"任务不存在: {job_id}")
+                if not job.status.is_waiting:
+                    raise ValueError(f"任务 {job_id} 当前状态不允许确认: {job.status.value}")
+                selected.append(job)
+            if not selected:
+                raise ValueError("没有可确认的任务")
+            schedulable = list(selected)
 
-        if not jobs:
-            return []
-
-        if len(jobs) <= max_parallel:
-            for job in jobs:
-                self.confirm(job.id)
-            return jobs
-
-        thread = threading.Thread(
-            target=self._run_batch,
-            args=(ids, float(interval), int(max_parallel)),
-            name="sisp-batch",
+        dispatcher = threading.Thread(
+            target=self._dispatch,
+            args=(schedulable, interval, max_parallel),
+            name="job-dispatcher",
             daemon=True,
         )
-        self._batch_threads.append(thread)
-        thread.start()
-        return jobs
+        dispatcher.start()
+        return selected
 
-    def start_batch(
-        self,
-        specs: Sequence[JobSpec],
-        plans: Sequence[ExecutionPlan] | None = None,
-        *,
-        interval: float = 0.0,
-        max_parallel: int = 1,
-    ) -> list[Job]:
-        """创建并启动一批任务，适合 GUI 多盘错峰执行。"""
-        spec_list = list(specs)
-        if plans is None:
-            plan_list: list[ExecutionPlan | None] = [None] * len(spec_list)
-        else:
-            plan_list = list(plans)
-            if len(plan_list) != len(spec_list):
-                raise ValueError("specs 与 plans 数量不一致")
-
-        # 先整体检查阻断项，避免提交一半任务后才失败。
-        for spec, plan in zip(spec_list, plan_list, strict=True):
-            execution_plan = plan or ExecutionPlan.from_spec(spec)
-            if execution_plan.blockers:
-                raise ValueError(
-                    f"硬盘 {spec.disk_number} 的计划存在阻断项，拒绝执行: "
-                    + "；".join(execution_plan.blockers)
-                )
-
-        jobs = [
-            self.submit(spec, plan)
-            for spec, plan in zip(spec_list, plan_list, strict=True)
-        ]
-        self.confirm_batch(
-            [job.id for job in jobs],
-            interval=interval,
-            max_parallel=max_parallel,
-        )
-        return jobs
-
-    def cancel(self, job_id: str, reason: str = "用户取消") -> bool:
-        """请求取消任务。等待确认的任务立即取消，运行中的任务协作取消。"""
-        with self._lock:
-            job = self._require(job_id)
-            if job.status.is_terminal:
-                return False
-            if job.status == JobStatus.WAITING_CONFIRMATION:
-                job.status = JobStatus.CANCELLED
-                job.finished_at = self._clock()
-                job.error = reason
-                immediate = True
-            else:
-                if job.cancel_token.cancelled:
-                    return False
-                job.cancel_token.cancel()
-                immediate = False
-
-        self._emit(job_id, JobEventType.CANCEL_REQUESTED, {"reason": reason})
-        if immediate:
-            self._finish_cancelled(job, reason)
-        return True
-
-    def wait(self, job_id: str, timeout: float | None = None) -> Job:
-        """等待任务线程结束并返回任务。"""
-        job = self.get(job_id)
-        if job is None:
-            raise KeyError(f"任务不存在: {job_id}")
-        thread = job.thread
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout)
-        return job
-
-    def wait_all(self, timeout: float | None = None) -> list[Job]:
-        """等待调度线程和全部任务结束。"""
-        deadline = None if timeout is None else time.monotonic() + timeout
-        for batch_thread in list(self._batch_threads):
-            if batch_thread is threading.current_thread():
-                continue
-            remaining = None if deadline is None else max(deadline - time.monotonic(), 0.0)
-            batch_thread.join(remaining)
-
-        jobs = self.jobs()
+    def _dispatch(self, jobs: list[Job], interval: float, max_parallel: int) -> None:
+        semaphore = threading.Semaphore(max_parallel)
+        threads: list[threading.Thread] = []
         for job in jobs:
-            remaining = None if deadline is None else max(deadline - time.monotonic(), 0.0)
-            self.wait(job.id, timeout=remaining)
-        return jobs
+            if job.cancel_event.is_set():
+                continue
+            semaphore.acquire()
+            thread = threading.Thread(
+                target=self._run_job,
+                args=(job, semaphore),
+                name=f"job-{job.id}",
+                daemon=True,
+            )
+            threads.append(thread)
+            thread.start()
+            if interval:
+                # 启动间隔只影响“开跑”，不阻塞已开跑的任务。
+                threading.Event().wait(interval)
+        for thread in threads:
+            thread.join()
 
-    # ------------------------------------------------------------------ 执行
-    def _run_batch(self, job_ids: list[str], interval: float, max_parallel: int) -> None:
-        """后台调度一批任务：限制并发数，并在启动之间保持间隔。"""
-        pending = list(job_ids)
-        running: set[str] = set()
-        launched_any = False
+    def _run_job(self, job: Job, semaphore: threading.Semaphore) -> None:
+        try:
+            if job.cancel_event.is_set():
+                self._finish(job, JobStatus.CANCELLED, error=job.cancel_reason or "任务已取消")
+                return
+            with self._lock:
+                job.status = JobStatus.RUNNING
+                job.started_at = _now()
+                job.updated_at = job.started_at
+            self._emit("job.started", job, disk_number=job.disk_number, dry_run=job.spec.dry_run)
 
-        while True:
-            with self._condition:
-                running = {
-                    job_id
-                    for job_id in running
-                    if job_id in self._jobs and not self._jobs[job_id].is_terminal
-                }
-                candidate: str | None = None
-                while pending and len(running) < max_parallel:
-                    job_id = pending.pop(0)
-                    job = self._jobs.get(job_id)
-                    if job is None or job.status.is_terminal:
-                        continue
-                    candidate = job_id
-                    break
-                finished = candidate is None and not pending and not running
-
-            if finished:
+            try:
+                result = self._execute(job)
+            except Exception as exc:  # noqa: BLE001 - 执行器异常一律落到 failed
+                _LOGGER.exception("任务执行失败: %s", job.id)
+                self._finish(job, JobStatus.FAILED, error=f"{type(exc).__name__}: {exc}")
                 return
 
-            if candidate is None:
-                with self._condition:
-                    if pending or running:
-                        self._condition.wait(self._poll_interval)
-                continue
+            if result is None:
+                self._finish(job, JobStatus.FAILED, error="执行器没有返回结果")
+                return
 
-            if launched_any and interval > 0:
-                self._sleeper(interval)
-            launched_any = True
-            try:
-                self.confirm(candidate)
-            except Exception:
-                self._logger.exception("批量调度启动任务失败: %s", candidate)
-                continue
-            with self._condition:
-                running.add(candidate)
+            status = JobStatus.OK if result.success else JobStatus.FAILED
+            if job.cancel_event.is_set() and status == JobStatus.OK:
+                # 收尾阶段被取消：结果仍然记录，但状态标为已取消。
+                status = JobStatus.CANCELLED
+            self._finish(job, status, result=result, error=result.error)
+        finally:
+            semaphore.release()
 
-    @staticmethod
-    def _raise_if_blocked(job: Job) -> None:
-        if job.plan.blockers:
-            raise ValueError(
-                "计划存在阻断项，拒绝执行: " + "；".join(job.plan.blockers)
-            )
+    def _execute(self, job: Job) -> WorkerResult:
+        executor = self._executor or self._default_executor()
+        if executor is None:
+            raise RuntimeError("No executor")
+        return executor(job.spec, job.cancel_event)
 
-    def _run_job(self, job: Job) -> None:
-        context = RunContext(
-            disk_number=job.spec.disk_number,
-            dry_run=job.spec.dry_run,
-            reporter=JobReporter(self, job.id),
-            cancel_token=job.cancel_token,
-        )
-        error_code = ErrorCode.SUCCESS
-        message = "当前阶段处理完成" if not job.spec.dry_run else "dry-run 完成"
-        success = True
+    def _default_executor(self) -> Executor | None:
+        if self._executor is None:
+            from app.application.service import SispService
 
-        try:
-            job.cancel_token.raise_if_cancelled()
-            self._runner(job.spec, context)
-            job.cancel_token.raise_if_cancelled()
-        except JobCancelled as exc:
-            success = False
-            error_code = ErrorCode.CANCELLED
-            message = str(exc)
-        except KeyboardInterrupt:
-            success = False
-            error_code = ErrorCode.CANCELLED
-            message = "操作已取消"
-        except SispError as exc:
-            success = False
-            error_code = exc.error_code
-            message = str(exc)
-            self._logger.warning("任务 %s 失败: %s", job.id, exc)
-        except Exception as exc:
-            success = False
-            error_code = ErrorCode.UNEXPECTED_ERROR
-            message = f"{type(exc).__name__}: {exc}"
-            self._logger.exception("任务 %s 未预期异常", job.id)
+            service = SispService()
+            self._executor = service.execute_spec
+        return self._executor
 
-        with self._lock:
-            job.steps = tuple(context.steps)
-            job.finished_at = self._clock()
-            job.result = self._build_result(job, success, error_code, message)
-            job.error = None if success else message
-            if success:
-                job.status = JobStatus.SUCCEEDED
-            elif error_code == ErrorCode.CANCELLED:
-                job.status = JobStatus.CANCELLED
-            else:
-                job.status = JobStatus.FAILED
-
-        if job.status == JobStatus.SUCCEEDED:
-            self._emit(job.id, JobEventType.SUCCEEDED, self._result_payload(job))
-        elif job.status == JobStatus.CANCELLED:
-            self._emit(job.id, JobEventType.CANCELLED, self._result_payload(job))
-        else:
-            self._emit(job.id, JobEventType.FAILED, self._result_payload(job))
-        self._emit(job.id, JobEventType.FINISHED, self._result_payload(job))
-        with self._condition:
-            self._condition.notify_all()
-
-    def _finish_cancelled(self, job: Job, reason: str) -> None:
-        with self._lock:
-            job.result = self._build_result(job, False, ErrorCode.CANCELLED, reason)
-            job.finished_at = job.finished_at or self._clock()
-            job.error = reason
-        self._emit(job.id, JobEventType.CANCELLED, self._result_payload(job))
-        self._emit(job.id, JobEventType.FINISHED, self._result_payload(job))
-        with self._condition:
-            self._condition.notify_all()
-
-    def _build_result(
+    def _finish(
         self,
         job: Job,
-        success: bool,
-        error_code: int,
-        message: str,
-    ) -> WorkerResult:
-        log_path = get_log_path()
-        return WorkerResult(
-            disk_number=job.spec.disk_number,
-            success=success,
-            error_code=error_code,
-            message=message,
-            steps=tuple(job.steps),
-            log_path=str(log_path) if log_path else None,
-            started_at=job.started_at or "",
-            finished_at=job.finished_at or self._clock(),
-            dry_run=job.spec.dry_run,
-        )
-
-    @staticmethod
-    def _result_payload(job: Job) -> dict[str, Any]:
-        return {
-            "status": job.status.value,
-            "result": job.result.to_dict() if job.result else None,
-            "error": job.error,
-        }
-
-    # ------------------------------------------------------------------ 事件
-    def _require(self, job_id: str) -> Job:
-        job = self._jobs.get(job_id)
-        if job is None:
-            raise KeyError(f"任务不存在: {job_id}")
-        return job
-
-    def _emit(
-        self,
-        job_id: str,
-        event_type: JobEventType,
-        payload: dict[str, Any] | None = None,
-    ) -> JobEvent:
+        status: JobStatus,
+        *,
+        result: WorkerResult | None = None,
+        error: str | None = None,
+    ) -> None:
         with self._lock:
-            job = self._require(job_id)
-            event = JobEvent(
-                job_id=job_id,
-                sequence=len(job.events) + 1,
-                type=event_type.value,
-                timestamp=self._clock(),
-                payload=payload or {},
-            )
-            job.events.append(event)
-            log = self._logs.get(job_id)
-            if log is not None:
-                try:
-                    log.append(event)
-                except OSError:
-                    self._logger.exception("写入任务事件文件失败: %s", job_id)
-            subscribers = list(self._subscribers)
+            job.status = status
+            job.result = result
+            job.error = error
+            job.finished_at = _now()
+            job.updated_at = job.finished_at
+        self._emit(
+            "job.finished",
+            job,
+            status=status.value,
+            success=bool(result.success) if result is not None else False,
+            error=error,
+        )
+        # 先广播再唤醒等待者：wait_all() 返回时 finished 事件一定已经发出。
+        with self._lock:
+            self._all_done.notify_all()
 
-        for callback in subscribers:
-            try:
-                callback(event)
-            except Exception:
-                self._logger.exception("任务事件订阅者执行失败: %s", job_id)
-        return event
+    # ------------------------------------------------------------------ 取消
+    def cancel(self, job_id: str, reason: str = "用户取消") -> bool:
+        """请求取消：等待中的直接取消，运行中的置位协作标志。"""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return False
+            if job.status.is_finished:
+                return False
+            job.cancel_reason = reason
+            job.cancel_event.set()
+            if job.status.is_waiting:
+                job.status = JobStatus.CANCELLED
+                job.error = reason
+                job.finished_at = _now()
+                job.updated_at = job.finished_at
+                immediately = True
+            else:
+                immediately = False
+        if immediately:
+            self._emit("job.cancelled", job, reason=reason)
+            with self._lock:
+                self._all_done.notify_all()
+        else:
+            self._emit("job.cancelling", job, reason=reason)
+        return True
+
+    # ------------------------------------------------------------------ 等待
+    def wait_all(self, timeout: float | None = None) -> list[Job]:
+        """等到所有任务结束或超时；返回当前任务列表（可能仍在运行）。"""
+        with self._all_done:
+            self._all_done.wait_for(
+                lambda: not self._jobs or all(job.finished for job in self._jobs.values()),
+                timeout=timeout,
+            )
+            return list(self._jobs.values())

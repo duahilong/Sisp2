@@ -1,189 +1,747 @@
-"""命令行入口与轻量诊断命令。"""
+"""Sisp2 命令行入口：``python -m app.cli``。
+
+命令行是 GUI 之外的“批量/自动化”路径，职责与 ``app.gui_web`` 一致：
+运行前检查 → 扫描硬盘 → 生成执行计划 → 安全闸门 → 演练或真正执行。
+
+五步固定流程（输出前缀 ``[1/5]`` … ``[5/5]`` 便于宿主脚本抓取）::
+
+    [1/5] 运行前检查与配置加载      WorkflowController.start()
+    [2/5] 扫描硬盘                  session.disks
+    [3/5] 选择目标盘并生成执行计划  WorkflowController.prepare()
+    [4/5] 安全闸门校验              --dry-run / --test-mode / --allow-disks
+    [5/5] 执行或演练汇总            submit(require_confirmation=False) + wait_all()
+
+安全约定（本文件强制，不依赖下游实现）
+--------------------------------------
+* 没有 ``--allow-disks`` 时，真实写盘分支一律拒绝执行（退出码 4）；
+* ``--dry-run`` 时**任何情况下**都不提交任务，因此不会执行任何写盘命令；
+* ``--test-mode`` 时目标盘必须是虚拟盘，否则拒绝（退出码 4）。
+
+退出码
+------
+* ``0``  成功（演练成功同样是 0）
+* ``1``  内部错误（后端模块缺失、未预期异常、Ctrl+C）
+* ``2``  预检失败（配置不可用、无可用硬盘、计划存在阻断项）
+* ``3``  执行失败（有任务未成功）
+* ``4``  参数或安全策略拒绝（盘号非法、缺少 ``--allow-disks``、测试模式选中物理盘）
+
+标准库 only：``pywebview`` 只在 ``requirements-web.txt`` 里，本文件绝不 import 它。
+"""
 
 from __future__ import annotations
 
 import argparse
+import inspect
+import json
+import os
 import sys
-import traceback
-from pathlib import Path
+from typing import Any, NoReturn, Sequence
 
-from app.application.service import SispService
-from app.drive_letters import parse_worker_drive_letters
-from app.logging_setup import configure_logging, get_logger, reset_logging
-from app.modules.common.constants import ErrorCode
-from app.modules.common.service import ConfigError, SispError
-from app.modules.config_loader.service import load_config
-from app.modules.disk_info.service import scan_disk_summaries
-from app.modules.user_interaction.service import print_disk_summaries
-from app.orchestrator import (
-    run_minimal_main_flow,
-    run_worker_flow,
+from app.gui.elevation import is_admin, relaunch_as_admin
+
+# ---------------------------------------------------------------- 常量
+EXIT_OK = 0
+EXIT_INTERNAL = 1
+EXIT_PREFLIGHT = 2
+EXIT_EXECUTION = 3
+EXIT_REFUSED = 4
+EXIT_INTERRUPTED = 130
+
+STEP_TOTAL = 5
+
+# 测试模式的约定环境变量（见 TESTING-ENV.md §6.1），下游断言可直接读它
+TEST_MODE_ENV = "SISP_TEST_MODE"
+
+# 虚拟盘判断：总线类型或型号里出现下列特征之一
+VIRTUAL_BUS_TYPES = frozenset({"file", "virtual", "vhd", "vhdx"})
+VIRTUAL_MODEL_HINTS = (
+    "virtual disk",
+    "virtual hd",
+    "vbox",
+    "vmware",
+    "qemu",
+    "vhd",
+    "vhdx",
+    "hyper-v",
+    "msft virtual",
 )
-from app.results import DEFAULT_WORKER_RESULT_TIMEOUT_SECONDS
-from app.version import __version__
 
 
-def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Sisp 磁盘处理工具")
-    parser.add_argument("-j", dest="config_path", help="JSON 配置文件路径")
-    parser.add_argument("--version", action="version", version=f"Sisp {__version__}")
-    parser.add_argument("--list-disks", action="store_true", help="只列出硬盘信息，不执行任何写盘操作")
-    parser.add_argument("--check-config", action="store_true", help="检查配置文件及关键路径，不执行写盘操作")
-    parser.add_argument("--dry-run", action="store_true", help="只打印将要执行的步骤/命令，不执行写盘操作")
-    parser.add_argument("--log-dir", dest="log_dir", help="日志目录（默认 %%LOCALAPPDATA%%\\Sisp\\logs）")
-    parser.add_argument("--no-log", action="store_true", help="不写文件日志")
-    parser.add_argument("--worker-interval", dest="worker_interval", type=float, default=6.0, help="多盘 worker 启动间隔秒数")
-    parser.add_argument("--result-dir", dest="result_dir", help="worker 结果文件目录")
-    parser.add_argument(
-        "--worker-result-timeout",
-        dest="worker_result_timeout",
-        type=float,
-        default=DEFAULT_WORKER_RESULT_TIMEOUT_SECONDS,
-        help="等待 worker 结果的最长秒数",
+class BackendUnavailable(RuntimeError):
+    """后端模块缺失（当前工作拷贝不完整）时抛出，提示使用者换完整仓库。"""
+
+
+# ---------------------------------------------------------------- 输出
+class Reporter:
+    """统一输出通道。
+
+    * 人读文本：默认写 stdout；``--json`` 时改写 stderr，保证 stdout 只有 JSON；
+    * 错误：始终写 stderr，方便宿主脚本与正常输出分开捕获。
+    """
+
+    def __init__(self, json_mode: bool = False) -> None:
+        self.json_mode = bool(json_mode)
+        self._stream = sys.stderr if self.json_mode else sys.stdout
+
+    def _write(self, text: str = "") -> None:
+        print(text, file=self._stream, flush=True)
+
+    def step(self, index: int, title: str) -> None:
+        """打印 ``[1/5] 标题`` 形式的步骤前缀。"""
+        self._write(f"[{index}/{STEP_TOTAL}] {title}")
+
+    def info(self, text: str) -> None:
+        self._write(f"    {text}")
+
+    def warn(self, text: str) -> None:
+        self._write(f"    提醒：{text}")
+
+    def error(self, text: str) -> None:
+        print(f"错误：{text}", file=sys.stderr, flush=True)
+
+    def emit_json(self, payload: dict[str, Any]) -> None:
+        """把结果 JSON 打到 stdout；终端编码不支持中文时退回 ASCII 转义。"""
+        if not self.json_mode:
+            return
+        text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+        try:
+            sys.stdout.write(text + "\n")
+            sys.stdout.flush()
+        except UnicodeEncodeError:
+            sys.stdout.write(json.dumps(payload, ensure_ascii=True, indent=2, default=str) + "\n")
+            sys.stdout.flush()
+
+
+# ---------------------------------------------------------------- 参数
+class _ArgumentParser(argparse.ArgumentParser):
+    """参数错误给中文提示，并使用独立退出码 4（2 留给“预检失败”）。"""
+
+    def error(self, message: str) -> NoReturn:  # type: ignore[override]
+        self.print_usage(sys.stderr)
+        print(f"参数错误：{message}", file=sys.stderr, flush=True)
+        raise SystemExit(EXIT_REFUSED)
+
+
+def parse_disk_list(text: str) -> list[int]:
+    """把 ``--allow-disks 1,2`` 解析成去重升序的 ``[1, 2]``。
+
+    允许中文逗号与空格分隔；任何非整数、负数、空列表都给清晰的中文报错。
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        raise argparse.ArgumentTypeError("盘号列表不能为空，示例：--allow-disks 1,2")
+
+    normalized = raw.replace("，", ",").replace("、", ",").replace(" ", ",")
+    numbers: list[int] = []
+    for chunk in normalized.split(","):
+        token = chunk.strip()
+        if not token:
+            continue
+        if not token.lstrip("+-").isdigit():
+            raise argparse.ArgumentTypeError(
+                f"盘号必须是整数，收到 “{token}”；正确写法：--allow-disks 1,2"
+            )
+        number = int(token)
+        if number < 0:
+            raise argparse.ArgumentTypeError(f"盘号不能为负数，收到 {number}")
+        if number not in numbers:
+            numbers.append(number)
+
+    if not numbers:
+        raise argparse.ArgumentTypeError("盘号列表里没有任何有效数字，示例：--allow-disks 1,2")
+    return sorted(numbers)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """构造命令行参数解析器（``--help`` 里的中文说明就是这里的内容）。"""
+    parser = _ArgumentParser(
+        prog="python -m app.cli",
+        description="Sisp2 命令行入口：检查环境、扫描硬盘、生成执行计划，然后演练或真正分区写盘。",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "退出码：\n"
+            "  0  成功（演练成功也是 0）\n"
+            "  1  内部错误（后端模块缺失、未预期异常）\n"
+            "  2  预检失败（配置不可用、无可用硬盘、执行计划存在阻断项）\n"
+            "  3  执行失败（有任务未成功）\n"
+            "  4  参数或安全策略拒绝（盘号非法、缺少 --allow-disks、测试模式选中物理盘）\n"
+            "  130 手动中断（Ctrl+C）\n"
+            "\n"
+            "安全说明：\n"
+            "  真实写盘必须显式提供 --allow-disks；--dry-run 任何情况下都不会写盘。\n"
+        ),
     )
-    parser.add_argument("--worker-disk", dest="worker_disk", type=int, help="worker 模式：处理指定硬盘编号，可由主程序自动启动，也可用于单盘调试")
-    parser.add_argument("--worker-unique-id", dest="worker_unique_id", help="worker 模式：目标硬盘 UniqueId，用于二次确认硬盘身份")
-    parser.add_argument("--worker-serial-number", dest="worker_serial_number", help="worker 模式：目标硬盘 SerialNumber，用于二次确认硬盘身份")
-    parser.add_argument("--worker-model", dest="worker_model", help="worker 模式：目标硬盘型号，用于二次确认硬盘身份")
-    parser.add_argument("--worker-size-bytes", dest="worker_size_bytes", type=int, help="worker 模式：目标硬盘容量字节数，用于二次确认硬盘身份")
-    parser.add_argument("--worker-drive-letters", dest="worker_drive_letters", help="worker 模式：分配的盘符列表（逗号分隔，如 E,F,G,H），分别对应 EFI、Windows、Data1、Data2")
-    parser.add_argument("--worker-result-file", dest="worker_result_file", help="worker 模式：执行结果 JSON 文件路径")
+    parser.add_argument(
+        "-j",
+        "--config",
+        metavar="<path>",
+        default=None,
+        help="业务配置文件路径；不传则沿用后端默认值（通常是 json\\win11.json）",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="演练模式：只打印执行计划，不提交任务，绝不执行任何写盘命令",
+    )
+    parser.add_argument(
+        "--test-mode",
+        action="store_true",
+        help="测试模式：只允许操作虚拟磁盘（同时设置 SISP_TEST_MODE=1 并传给下游）",
+    )
+    parser.add_argument(
+        "--allow-disks",
+        metavar="1,2",
+        default=None,
+        type=parse_disk_list,
+        help="盘号白名单，逗号分隔（例如 1,2）；真实写盘必须提供",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="把结果以 JSON 打到 stdout（人读进度改走 stderr），便于宿主脚本解析",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        dest="list_only",
+        help="只列出硬盘然后退出，不生成计划、不写盘",
+    )
+    parser.add_argument(
+        "--elevate",
+        action="store_true",
+        help="非管理员且要真实写盘时，先通过 UAC 以管理员身份重启（可选）",
+    )
     return parser
 
 
-def parse_command_line_args(argv: list[str] | None = None) -> argparse.Namespace:
-    return build_arg_parser().parse_args(argv)
+# ---------------------------------------------------------------- 后端装配
+def _workflow_module() -> Any:
+    """惰性 import 应用层；缺失时给出可读的中文提示。"""
+    try:
+        from app.application import workflow as workflow_module
+    except ModuleNotFoundError as exc:
+        missing = getattr(exc, "name", None) or str(exc)
+        raise BackendUnavailable(
+            f"后端模块缺失：{missing}。当前工作拷贝只包含本次要改的文件，"
+            "请在完整仓库里运行本命令（见 MIGRATION.md 第 2 节）。"
+        ) from exc
+    return workflow_module
 
 
-def wait_for_exit() -> None:
-    """等待用户按 Enter 键退出，仅在交互式终端中生效。"""
-    if sys.stdin.isatty():
+def _supports_keyword(function: Any, name: str) -> bool:
+    """``function`` 的签名是否接受名为 ``name`` 的关键字参数。"""
+    try:
+        parameters = inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return False
+    if any(item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()):
+        return True
+    parameter = parameters.get(name)
+    return parameter is not None and parameter.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    )
+
+
+def inject_policy_flags(
+    controller: Any,
+    *,
+    test_mode: bool,
+    allow_disks: Sequence[int] | None,
+) -> None:
+    """把 ``test_mode`` / ``allow_disks`` 传给下游（最不侵入的方式）。
+
+    1. 构造参数里已有同名关键字就用关键字传（见 :func:`create_controller`）；
+    2. 无论构造是否接受，都再以属性形式挂到 ``WorkflowController`` 和
+       ``controller.service`` 上；下游只需
+       ``getattr(self, "test_mode", False)`` / ``getattr(self, "allow_disks", None)``
+       即可读到，不需要改任何签名。
+    """
+    values: dict[str, Any] = {
+        "test_mode": bool(test_mode),
+        "allow_disks": tuple(int(item) for item in allow_disks) if allow_disks else None,
+    }
+    targets = [controller]
+    try:
+        service = getattr(controller, "service", None)
+    except Exception:  # noqa: BLE001 - 属性访问失败不影响主流程
+        service = None
+    if service is not None:
+        targets.append(service)
+
+    for target in targets:
+        for name, value in values.items():
+            try:
+                setattr(target, name, value)
+            except Exception:  # noqa: BLE001 - 下游若用 __slots__，能拿到构造参数就够了
+                pass
+
+
+def create_controller(
+    *,
+    dry_run: bool,
+    test_mode: bool,
+    allow_disks: Sequence[int] | None,
+) -> Any:
+    """构造 ``WorkflowController``，并把两个新开关尽力传下去。"""
+    workflow_module = _workflow_module()
+    controller_class = workflow_module.WorkflowController
+
+    kwargs: dict[str, Any] = {"dry_run": bool(dry_run)}
+    for name, value in (
+        ("test_mode", bool(test_mode)),
+        ("allow_disks", list(allow_disks) if allow_disks else None),
+    ):
+        if _supports_keyword(controller_class.__init__, name):
+            kwargs[name] = value
+    # P0 补丁：控制器现在自己装配服务（dry_run / 白名单 / real_runner），
+    # 白名单必须走构造参数，否则真实写盘会在安全闸门处被拒绝。
+    if allow_disks and _supports_keyword(controller_class.__init__, "allowed_disk_numbers"):
+        kwargs["allowed_disk_numbers"] = list(allow_disks)
+
+    controller = controller_class(**kwargs)
+    inject_policy_flags(controller, test_mode=test_mode, allow_disks=allow_disks)
+    return controller
+
+
+# ---------------------------------------------------------------- 小工具
+def _unique(items: Sequence[str]) -> list[str]:
+    """去重且保持原顺序。"""
+    return list(dict.fromkeys(str(item) for item in items if str(item).strip()))
+
+
+def is_virtual_disk(disk: Any) -> bool:
+    """按总线类型或型号判断是不是虚拟盘（与 TESTING-ENV.md §6.1 的规则一致）。"""
+    bus_type = str(getattr(disk, "bus_type", "") or "").strip().lower()
+    model = str(getattr(disk, "model", "") or "").strip().lower()
+    if bus_type in VIRTUAL_BUS_TYPES:
+        return True
+    return any(hint in model for hint in VIRTUAL_MODEL_HINTS)
+
+
+def resolve_targets(
+    disks: Sequence[Any],
+    allow_disks: Sequence[int] | None,
+) -> tuple[list[Any], list[str]]:
+    """确定本次要操作的硬盘；返回 ``(目标盘, 问题列表)``。
+
+    有白名单时只允许白名单内的盘，且必须存在、必须可操作（未被保护）；
+    没有白名单时退回“全部可选盘”，真实写盘随后会在安全闸门处被拒绝。
+    """
+    by_number = {int(getattr(disk, "disk_number", -1)): disk for disk in disks}
+
+    if allow_disks:
+        missing = [number for number in allow_disks if number not in by_number]
+        if missing:
+            available = "、".join(str(number) for number in sorted(by_number)) or "无"
+            return [], [
+                f"--allow-disks 里的硬盘不存在：{'、'.join(str(n) for n in missing)}"
+                f"（当前枚举到的盘号：{available}）"
+            ]
+
+        protected = [
+            number
+            for number in allow_disks
+            if not bool(getattr(by_number[number], "is_selectable", False))
+        ]
+        if protected:
+            details = "；".join(
+                f"Disk {number}（{'、'.join(getattr(by_number[number], 'protection_reasons', ()) or ()) or '受保护'}）"
+                for number in protected
+            )
+            return [], [f"--allow-disks 里的硬盘受保护，拒绝操作：{details}"]
+
+        return [by_number[number] for number in allow_disks], []
+
+    return [disk for disk in disks if bool(getattr(disk, "is_selectable", False))], []
+
+
+def job_succeeded(job: Any) -> bool:
+    """判断任务是否成功；兼容 ``Job.succeeded`` / ``WorkerResult.success`` / 状态名。"""
+    flag = getattr(job, "succeeded", None)
+    if isinstance(flag, bool):
+        return flag
+
+    result = getattr(job, "result", None)
+    if result is not None:
+        success = getattr(result, "success", None)
+        if isinstance(success, bool):
+            return success
+
+    status = getattr(job, "status", None)
+    name = str(getattr(status, "name", None) or status or "").strip().upper()
+    if name in {"SUCCEEDED", "SUCCESS", "DONE", "COMPLETED", "FINISHED"}:
+        return True
+    if isinstance(status, bool):
+        return status
+    return False
+
+
+def _job_dict(job: Any) -> dict[str, Any]:
+    """把 Job 转成可序列化字典；没有 ``to_dict`` 时退回最小字段。"""
+    to_dict = getattr(job, "to_dict", None)
+    if callable(to_dict):
         try:
-            input("按 Enter 键退出...")
-        except (EOFError, KeyboardInterrupt):
+            data = to_dict()
+            if isinstance(data, dict):
+                return data
+        except Exception:  # noqa: BLE001
+            pass
+    return {
+        "disk_number": getattr(job, "disk_number", None),
+        "status": str(getattr(job, "status", "")),
+        "succeeded": job_succeeded(job),
+    }
+
+
+def _print_disks(reporter: Reporter, disks: Sequence[Any]) -> None:
+    """逐行打印硬盘概要（不用表格，避免中文对齐问题）。"""
+    if not disks:
+        reporter.warn("未检测到任何硬盘。")
+        return
+
+    for disk in disks:
+        number = getattr(disk, "disk_number", "?")
+        model = getattr(disk, "model", None) or "未知型号"
+        size = getattr(disk, "size_display", None) or "未知容量"
+        bus_type = getattr(disk, "bus_type", None) or "未知总线"
+        style = getattr(disk, "partition_style", None) or "未知分区表"
+        letters = getattr(disk, "drive_letters", ()) or ()
+        letters_text = "、".join(str(letter) for letter in letters) or "无盘符"
+
+        if bool(getattr(disk, "is_selectable", False)):
+            state = "可操作"
+        else:
+            reasons = "、".join(str(item) for item in (getattr(disk, "protection_reasons", ()) or ()))
+            state = f"受保护（{reasons or '保护规则命中'}）"
+
+        reporter.info(
+            f"Disk {number}：{model} / {size} / 总线 {bus_type} / {style}"
+            f" / 盘符 {letters_text} / {state}"
+        )
+
+
+def _print_plans(reporter: Reporter, prepared: Sequence[Any]) -> None:
+    """打印每块盘的计划要点（盘号、盘符、提醒与阻断项）。"""
+    for item in prepared:
+        plan = getattr(item, "plan", None)
+        if plan is None:
+            continue
+        number = getattr(plan, "disk_number", "?")
+        model = getattr(plan, "model", None) or "未知型号"
+        size = getattr(plan, "size_display", None) or "未知容量"
+        config_path = getattr(plan, "config_path", None) or "（后端默认值）"
+        letters = getattr(plan, "drive_letters", None) or {}
+        letters_text = "，".join(f"{role}={letter}" for role, letter in letters.items()) or "未分配"
+
+        reporter.info(f"Disk {number} 执行计划：{model} / {size}")
+        reporter.info(f"  盘符：{letters_text}")
+        reporter.info(f"  配置：{config_path}")
+        for warning in getattr(plan, "warnings", ()) or ():
+            reporter.info(f"  提醒：{warning}")
+        for blocker in getattr(plan, "blockers", ()) or ():
+            reporter.info(f"  阻断：{blocker}")
+
+
+def _print_step_records(reporter: Reporter, result: Any) -> None:
+    """打印 ``WorkerResult.steps``（若后端提供）。"""
+    steps = getattr(result, "steps", None)
+    if not steps:
+        return
+    for index, step in enumerate(steps, start=1):
+        name = getattr(step, "name", None) or getattr(step, "title", None) or f"第 {index} 步"
+        passed = getattr(step, "passed", None)
+        if isinstance(passed, bool):
+            mark = "通过" if passed else "失败"
+        else:
+            mark = "完成"
+        message = getattr(step, "message", "") or ""
+        reporter.info(f"  步骤 {index} [{mark}] {name}" + (f"：{message}" if message else ""))
+
+
+def _print_jobs(reporter: Reporter, jobs: Sequence[Any]) -> None:
+    """打印任务结果与步骤明细。"""
+    for job in jobs:
+        disk_number = getattr(job, "disk_number", "?")
+        ok = job_succeeded(job)
+        reporter.info(f"Disk {disk_number}：{'成功' if ok else '失败'}")
+
+        result = getattr(job, "result", None)
+        if result is not None:
+            _print_step_records(reporter, result)
+            log_path = getattr(result, "log_path", None)
+            if log_path:
+                reporter.info(f"  日志：{log_path}")
+            error = getattr(result, "error", None) or getattr(result, "message", None)
+            if error and not ok:
+                reporter.info(f"  原因：{error}")
+
+
+# ---------------------------------------------------------------- 主流程
+def _run(
+    args: argparse.Namespace,
+    raw_argv: Sequence[str],
+    reporter: Reporter,
+    report: dict[str, Any],
+) -> int:
+    workflow_module = _workflow_module()
+
+    # 测试模式以环境变量形式广播（下游若实现了 _assert_test_mode 会直接生效）
+    if args.test_mode:
+        os.environ[TEST_MODE_ENV] = "1"
+
+    # --elevate：真实写盘且当前不是管理员时，先走 UAC 重启
+    if args.elevate and not args.dry_run and not is_admin():
+        if relaunch_as_admin(argv=list(raw_argv), module="app.cli"):
+            reporter.info("已请求以管理员身份重新启动（UAC），本进程退出。")
+            report["elevated"] = True
+            return EXIT_OK
+        reporter.warn("提权被取消，继续以普通权限运行；真实写盘会被安全闸门拒绝。")
+
+    # ------------------------------------------------------------ [1/5]
+    reporter.step(1, "运行前检查与配置加载")
+    controller = create_controller(
+        dry_run=bool(args.dry_run),
+        test_mode=bool(args.test_mode),
+        allow_disks=args.allow_disks,
+    )
+    try:
+        session = controller.start(args.config, dry_run=bool(args.dry_run))
+    except Exception as exc:  # noqa: BLE001
+        reporter.error(f"运行前检查失败：{exc}")
+        return EXIT_PREFLIGHT
+
+    report["config_path"] = getattr(session, "config_path", None)
+    report["dry_run"] = bool(getattr(session, "dry_run", args.dry_run))
+    report["checks"] = [check.to_dict() for check in (getattr(session, "checks", ()) or ())]
+
+    for check in getattr(session, "checks", ()) or ():
+        mark = "通过" if bool(getattr(check, "passed", False)) else "失败"
+        message = str(getattr(check, "message", "") or "无详细信息")
+        reporter.info(f"[{mark}] {getattr(check, 'label', '检查项')}：{message}")
+
+    for warning in getattr(session, "warnings", ()) or ():
+        reporter.warn(str(warning))
+
+    if getattr(session, "config_payload", None) is None:
+        for blocker in getattr(session, "blockers", ()) or ():
+            reporter.error(str(blocker))
+        reporter.error("配置不可用，无法生成执行计划。")
+        report["blockers"] = list(getattr(session, "blockers", ()) or ())
+        return EXIT_PREFLIGHT
+
+    # ------------------------------------------------------------ [2/5]
+    reporter.step(2, "扫描硬盘")
+    disks = list(getattr(session, "disks", ()) or ())
+    report["disks"] = [disk.to_dict() for disk in disks]
+    _print_disks(reporter, disks)
+
+    scan_blockers = [
+        str(blocker)
+        for blocker in (getattr(session, "blockers", ()) or ())
+        if str(blocker).startswith("硬盘扫描失败")
+    ]
+    if scan_blockers:
+        for blocker in scan_blockers:
+            reporter.error(blocker)
+        report["blockers"] = scan_blockers
+        return EXIT_PREFLIGHT
+
+    if args.list_only:
+        if not disks:
+            reporter.error("未检测到任何硬盘。")
+            return EXIT_PREFLIGHT
+        report["targets"] = [disk.disk_number for disk in disks]
+        reporter.info("列表模式：已列出硬盘并退出，未生成计划、未写盘。")
+        return EXIT_OK
+
+    # ------------------------------------------------------------ [3/5]
+    reporter.step(3, "选择目标盘并生成执行计划")
+    targets, problems = resolve_targets(disks, args.allow_disks)
+    report["targets"] = [int(disk.disk_number) for disk in targets]
+    if problems:
+        for problem in problems:
+            reporter.error(problem)
+        report["blockers"] = problems
+        return EXIT_REFUSED
+
+    if not targets:
+        reporter.error("没有可操作的硬盘：全部被保护规则命中。")
+        return EXIT_PREFLIGHT
+
+    reporter.info("目标硬盘：" + "、".join(f"Disk {disk.disk_number}" for disk in targets))
+
+    try:
+        prepared = list(
+            controller.prepare([disk.disk_number for disk in targets], dry_run=bool(args.dry_run))
+        )
+    except workflow_module.WorkflowError as exc:
+        reporter.error(str(exc))
+        return EXIT_PREFLIGHT
+    except Exception as exc:  # noqa: BLE001
+        reporter.error(f"生成执行计划失败：{exc}")
+        return EXIT_PREFLIGHT
+
+    if not prepared:
+        reporter.error("没有生成任何执行计划。")
+        return EXIT_PREFLIGHT
+
+    report["plans"] = [item.plan.to_dict() for item in prepared]
+    _print_plans(reporter, prepared)
+
+    blockers: list[str] = []
+    warnings: list[str] = []
+    for item in prepared:
+        plan = item.plan
+        blockers.extend(getattr(plan, "blockers", ()) or ())
+        warnings.extend(getattr(plan, "warnings", ()) or ())
+    blockers = _unique(blockers)
+    report["blockers"] = blockers
+    report["warnings"] = _unique(list(getattr(session, "warnings", ()) or ()) + warnings)
+
+    # ------------------------------------------------------------ [4/5]
+    reporter.step(4, "安全闸门校验")
+    if args.test_mode:
+        physical = [disk for disk in targets if not is_virtual_disk(disk)]
+        if physical:
+            for disk in physical:
+                reporter.error(
+                    f"测试模式拒绝操作物理盘：Disk {getattr(disk, 'disk_number', '?')}"
+                    f"（{getattr(disk, 'model', None) or '未知型号'}"
+                    f"，总线 {getattr(disk, 'bus_type', None) or '未知'}）"
+                )
+            reporter.error("测试模式只允许虚拟盘（VHD/VHDX/VMware/VirtualBox/QEMU）。")
+            return EXIT_REFUSED
+        reporter.info("测试模式：目标盘均为虚拟盘，允许继续。")
+    else:
+        reporter.info("测试模式：未开启（虚拟盘护栏不生效，请用 --allow-disks 限定范围）。")
+
+    if args.dry_run:
+        reporter.info("演练模式：不提交任何任务，不会执行任何写盘命令。")
+    else:
+        if not args.allow_disks:
+            reporter.error("拒绝执行真实写盘：没有提供 --allow-disks 白名单。")
+            reporter.error(
+                "请显式列出允许操作的盘号，例如：python -m app.cli --allow-disks "
+                + ",".join(str(disk.disk_number) for disk in targets)
+            )
+            return EXIT_REFUSED
+
+        if blockers:
+            for blocker in blockers:
+                reporter.error(f"计划存在阻断项：{blocker}")
+            reporter.error("存在阻断项，拒绝执行真实写盘。")
+            return EXIT_PREFLIGHT
+
+        if not is_admin():
+            reporter.error("当前进程不是管理员，真实写盘会失败。")
+            reporter.error("请用管理员身份运行，或加 --elevate 通过 UAC 重新启动。")
+            return EXIT_REFUSED
+
+        reporter.info(
+            "真实写盘：目标盘 "
+            + "、".join(f"Disk {disk.disk_number}" for disk in targets)
+            + "（已提供 --allow-disks 白名单）。"
+        )
+
+    # ------------------------------------------------------------ [5/5]
+    reporter.step(5, "演练结果汇总" if args.dry_run else "执行")
+    if args.dry_run:
+        reporter.info("演练完成：未提交任务，未执行任何写盘命令。")
+        if blockers:
+            reporter.info(
+                f"注意：存在 {len(blockers)} 项阻断项，真实执行会被拒绝（退出码 {EXIT_PREFLIGHT}）。"
+            )
+        report["would_execute"] = False
+        return EXIT_OK
+
+    try:
+        jobs = list(controller.submit(prepared, require_confirmation=False))
+    except workflow_module.WorkflowError as exc:
+        reporter.error(f"提交任务失败：{exc}")
+        return EXIT_PREFLIGHT
+    except Exception as exc:  # noqa: BLE001
+        reporter.error(f"提交任务失败：{exc}")
+        return EXIT_EXECUTION
+
+    reporter.info(f"已提交 {len(jobs)} 个任务，等待执行完成……")
+    try:
+        finished = list(controller.wait_all())
+    except Exception as exc:  # noqa: BLE001
+        reporter.error(f"等待任务完成时出错：{exc}")
+        return EXIT_EXECUTION
+
+    report["jobs"] = [_job_dict(job) for job in finished]
+    _print_jobs(reporter, finished)
+
+    failed = [job for job in finished if not job_succeeded(job)]
+    if failed:
+        reporter.error(f"执行失败：{len(failed)}/{len(finished)} 个任务未成功。")
+        return EXIT_EXECUTION
+
+    reporter.info("执行成功：所有任务均已完成。")
+    return EXIT_OK
+
+
+def _relax_stream_errors() -> None:
+    """把标准输出/错误的编码错误处理放宽为替换，避免罕见字符把入口打崩。
+
+    只改 ``errors`` 不改编码：中文控制台（cp936）下中文仍按本机编码输出，
+    重定向到文件时也一样。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(errors="replace")
+        except (ValueError, OSError):
             pass
 
 
-def _build_service() -> SispService:
-    """构造 CLI 使用的服务，保留模块级 monkeypatch 的兼容性。"""
-    return SispService(
-        config_loader=lambda path: load_config(path),
-        disk_scanner=lambda: scan_disk_summaries(),
-    )
+def main(argv: Sequence[str] | None = None) -> int:
+    """命令行入口；返回进程退出码。"""
+    _relax_stream_errors()
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    parser = build_parser()
+    args = parser.parse_args(raw_argv)
 
-
-def check_config(config_path: str | Path | None = None) -> int:
-    result = _build_service().check_config(config_path)
-    if not result.passed:
-        print(f"配置检查失败: {result.message}", file=sys.stderr)
-        return result.error_code
-
-    payload = result.payload or {}
-    partition_info = payload.get("partition_info") or {}
-    print("配置检查通过")
-    print(f"配置文件: {payload.get('config_path')}")
-    print(f"EFI 分区: {partition_info.get('efi_size_mb')} MB")
-    print(f"C 分区: {partition_info.get('c_size_gb')} GB")
-    print(f"Ghost: {(payload.get('software_paths') or {}).get('ghost64_path')}")
-    print(f"镜像: {(payload.get('image_info') or {}).get('image_path')}")
-    print(f"拷贝源: {(payload.get('copy_info') or {}).get('source_dir')}")
-    print(f"bcdboot: {(payload.get('software_paths') or {}).get('bcdboot_path')}")
-    return ErrorCode.SUCCESS
-
-
-def list_disks(config_path: str | Path | None = None) -> int:
-    try:
-        result = _build_service().list_disks(config_path, ignore_config_errors=True)
-    except Exception as exc:
-        print(f"硬盘信息扫描失败: {exc}", file=sys.stderr)
-        return ErrorCode.PREFLIGHT_FAILED
-
-    if result.warning:
-        print(result.warning, file=sys.stderr)
-
-    print("=" * 80)
-    print("Sisp - 硬盘列表（只读）")
-    print("=" * 80)
-    print_disk_summaries([disk.to_dict() for disk in result.disks])
-    return ErrorCode.SUCCESS
-
-
-def _configure_file_logging(args: argparse.Namespace) -> None:
-    if args.no_log:
-        reset_logging()
-        return
-    log_path = configure_logging(args.log_dir)
-    if log_path:
-        print(f"日志文件: {log_path}")
-
-
-def _run_worker(args: argparse.Namespace) -> int:
-    expected_identity = {
-        "unique_id": args.worker_unique_id,
-        "serial_number": args.worker_serial_number,
-        "model": args.worker_model,
-        "size_bytes": args.worker_size_bytes,
+    reporter = Reporter(json_mode=bool(args.json))
+    report: dict[str, Any] = {
+        "ok": False,
+        "mode": "list" if args.list_only else ("dry-run" if args.dry_run else "execute"),
+        "config_path": args.config,
+        "dry_run": bool(args.dry_run),
+        "test_mode": bool(args.test_mode),
+        "allow_disks": list(args.allow_disks) if args.allow_disks else None,
+        "targets": [],
+        "disks": [],
+        "checks": [],
+        "plans": [],
+        "jobs": [],
+        "blockers": [],
+        "warnings": [],
+        "would_execute": not args.dry_run,
     }
+
     try:
-        drive_letters = parse_worker_drive_letters(args.worker_drive_letters) if args.worker_drive_letters else None
-    except ValueError as exc:
-        raise ConfigError(str(exc)) from exc
-
-    run_worker_flow(
-        args.worker_disk,
-        config_path=args.config_path,
-        expected_identity=expected_identity,
-        drive_letters=drive_letters,
-        result_file=args.worker_result_file,
-        dry_run=args.dry_run,
-    )
-    print()
-    wait_for_exit()
-    return ErrorCode.SUCCESS
-
-
-def main(argv: list[str] | None = None) -> int:
-    try:
-        args = parse_command_line_args(argv)
-        _configure_file_logging(args)
-
-        if args.check_config:
-            exit_code = check_config(args.config_path)
-            wait_for_exit()
-            return exit_code
-        if args.list_disks:
-            exit_code = list_disks(args.config_path)
-            wait_for_exit()
-            return exit_code
-
-        if args.worker_disk is not None:
-            return _run_worker(args)
-
-        run_minimal_main_flow(
-            config_path=args.config_path,
-            worker_interval=args.worker_interval,
-            result_dir=args.result_dir,
-            worker_result_timeout=args.worker_result_timeout,
-            dry_run=args.dry_run,
-            log_dir=args.log_dir,
-            no_log=args.no_log,
-        )
-        wait_for_exit()
-        return ErrorCode.SUCCESS
+        code = _run(args, raw_argv, reporter, report)
     except KeyboardInterrupt:
-        print("\n操作已取消", file=sys.stderr)
-        return ErrorCode.CANCELLED
-    except SispError as exc:
-        get_logger("cli").warning("运行失败: %s", exc)
-        print(f"运行失败: {exc}", file=sys.stderr)
-        wait_for_exit()
-        return exc.error_code
-    except Exception as exc:
-        get_logger("cli").exception("未预期异常")
-        traceback.print_exc()
-        print(f"运行失败: {exc}", file=sys.stderr)
-        wait_for_exit()
-        return ErrorCode.UNEXPECTED_ERROR
+        reporter.error("已中断（Ctrl+C），未完成的任务请到任务日志里确认状态。")
+        code = EXIT_INTERRUPTED
+    except BackendUnavailable as exc:
+        reporter.error(str(exc))
+        code = EXIT_INTERNAL
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 入口绝不能抛栈给使用者
+        reporter.error(f"未预期错误：{exc}")
+        code = EXIT_INTERNAL
+
+    report["exit_code"] = int(code)
+    report["ok"] = int(code) == EXIT_OK
+    reporter.emit_json(report)
+    return int(code)
 
 
 if __name__ == "__main__":

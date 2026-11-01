@@ -1,0 +1,601 @@
+"""真实写盘执行器：diskpart 分区 + dism 应用镜像 + bcdboot 写引导。
+
+``SispService`` 本身不做任何写盘，真实执行必须由调用方注入一个
+``real_runner``（签名 ``(spec, cancel_event) -> WorkerResult``）。本模块提供
+默认实现 :class:`WindowsDiskRunner`，把一次任务拆成六步，逐步记进
+``WorkerResult.steps``，任何一步失败后面的步骤标 ``skipped``：
+
+1. ``efi``：``select disk`` → ``clean`` → 转 GPT → 建 EFI 分区（FAT32 + 盘符）
+2. ``windows``：建 Windows 分区（NTFS + 盘符）
+3. ``data``：建数据分区（NTFS + 盘符；``data_size_gb=auto`` 用剩余空间）
+4. ``image``：``dism /Apply-Image`` 把 ``image_info.image_path`` 应用到 Windows 分区
+5. ``boot``：``bcdboot <Windows 盘>\\Windows /s <EFI 盘> /f UEFI``
+6. ``verify``：重新扫描该盘的分区，把实际结果记进 ``details``
+
+几个刻意的设计：
+
+- **每一步都先看取消标志**：取消是协作式的，一个正在跑的 diskpart 不会被打断，
+  但下一步不会再开始；
+- **整体超时**：diskpart 10 分钟、dism 3 小时、bcdboot 2 分钟；超时会杀掉子进程
+  （连同 diskpart 自己的子进程）并让该步失败，而不是把任务永远挂住；
+- **日志**：给了 ``log_dir`` 就写 ``disk<N>-<时间戳>.log``，命令原文、退出码、
+  输出全在里面；``details`` 里只放 ``tail`` 和日志路径，避免 JSON 过大；
+- **不做安全判断**：``dry_run=False``、白名单、硬盘身份一致性由
+  ``SispService.execute_spec`` 的四道闸门把关，这里假定调用已经获准。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import shutil
+import subprocess
+import tempfile
+import threading
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from app.application.contracts import format_size
+from app.models import STEP_FAILED, STEP_OK, STEP_SKIPPED, StepResult, WorkerResult
+
+_LOGGER = logging.getLogger(__name__)
+
+DISKPART_TIMEOUT = 600.0
+DISM_TIMEOUT = 3 * 3600.0
+BCDBOOT_TIMEOUT = 120.0
+VERIFY_TIMEOUT = 120.0
+
+# 与 service.py 的分区顺序保持一致：EFI → Windows → Data。
+_STEP_ORDER = ("efi", "windows", "data")
+_STEP_TITLES = {
+    "efi": "创建 EFI 分区",
+    "windows": "创建 Windows 分区",
+    "data": "创建数据分区",
+    "image": "应用镜像",
+    "boot": "写入 UEFI 引导",
+    "verify": "校验分区结果",
+}
+
+_VERIFY_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$number = [int]$env:VIX_DISK_NUMBER
+$items = foreach ($part in Get-Partition -DiskNumber $number -ErrorAction SilentlyContinue) {
+    [pscustomobject]@{
+        number        = [int]$part.PartitionNumber
+        size_bytes    = [long]$part.Size
+        offset_bytes  = [long]$part.Offset
+        type          = [string]$part.Type
+        drive_letter  = if ($part.DriveLetter) { [string]$part.DriveLetter } else { $null }
+        is_active     = [bool]$part.IsActive
+        is_hidden     = [bool]$part.IsHidden
+    }
+}
+[pscustomobject]@{
+    disk_number     = $number
+    partition_style = [string](Get-Disk -Number $number).PartitionStyle
+    partitions      = @($items)
+} | ConvertTo-Json -Depth 4 -Compress
+"""
+
+
+class RunnerError(RuntimeError):
+    """执行器内部的可读错误；会被包进对应步骤的 ``message``。"""
+
+
+def _to_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value.strip()))
+        except ValueError:
+            return None
+    return None
+
+
+def _to_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _decode(data: bytes | None) -> str:
+    """dism/diskpart 在中文 Windows 上按 OEM 代码页输出，先 mbcs 再兜底。"""
+    if not data:
+        return ""
+    for encoding in ("mbcs", "utf-8", "latin-1"):
+        try:
+            return data.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def _tail(text: str, limit: int = 4000) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return "…（前略）\n" + text[-limit:]
+
+
+class _CommandLog:
+    """把命令、退出码、输出写进日志文件；没有 ``log_dir`` 时只留内存。"""
+
+    def __init__(self, log_dir: str | os.PathLike[str] | None) -> None:
+        self.path: Path | None = None
+        self._lines: list[str] = []
+        if log_dir:
+            directory = Path(log_dir)
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                self.path = directory / f"disk-runner-{stamp}-{os.getpid()}.log"
+            except OSError:
+                _LOGGER.warning("无法创建日志目录: %s", log_dir, exc_info=True)
+
+    def write(self, line: str) -> None:
+        stamped = f"[{datetime.now().strftime('%H:%M:%S')}] {line}"
+        self._lines.append(stamped)
+        if self.path is not None:
+            try:
+                with self.path.open("a", encoding="utf-8") as handle:
+                    handle.write(stamped + "\n")
+            except OSError:
+                _LOGGER.warning("写执行日志失败: %s", self.path, exc_info=True)
+
+    def block(self, title: str, body: str) -> None:
+        self.write(f"--- {title} ---")
+        for line in (body or "").splitlines():
+            self.write(f"    {line}")
+
+    def summary(self) -> str:
+        return "\n".join(self._lines[-40:])
+
+
+class WindowsDiskRunner:
+    """默认真实执行器；构造好之后可直接当 ``real_runner`` 传给 ``SispService``。"""
+
+    def __init__(
+        self,
+        *,
+        log_dir: str | os.PathLike[str] | None = None,
+        diskpart: str | None = None,
+        dism: str | None = None,
+        bcdboot: str | None = None,
+        powershell: str | None = None,
+    ) -> None:
+        self.log_dir = log_dir
+        self.diskpart = diskpart or self._which("diskpart.exe")
+        self.dism = dism or self._which("dism.exe")
+        self.bcdboot = bcdboot or self._which("bcdboot.exe")
+        self.powershell = powershell or self._which("powershell.exe")
+
+    # ------------------------------------------------------------------ 入口
+    def __call__(self, spec: Any, cancel_event: threading.Event) -> WorkerResult:
+        return self.run(spec, cancel_event)
+
+    def run(self, spec: Any, cancel_event: threading.Event | None = None) -> WorkerResult:
+        cancel_event = cancel_event or threading.Event()
+        disk_number = _to_int(getattr(spec, "disk_number", None)) or 0
+        payload = dict(getattr(spec, "config_payload", None) or {})
+        letters = {
+            str(key): str(value).strip().upper()[:1]
+            for key, value in dict(getattr(spec, "drive_letters", None) or {}).items()
+            if str(value).strip()
+        }
+        log = _CommandLog(self.log_dir)
+        started = datetime.now()
+
+        steps: list[StepResult] = []
+        failure: str | None = None
+        image_path = self._image_path(payload)
+
+        log.write(f"任务开始：disk={disk_number} dry_run=False letters={letters}")
+        log.write(f"配置：{json.dumps(payload, ensure_ascii=False)[:2000]}")
+
+        # 前置条件：缺工具/缺盘符/缺镜像都在动盘之前拦住。
+        missing = [
+            name
+            for name, value in (
+                ("diskpart.exe", self.diskpart),
+                ("dism.exe", self.dism),
+                ("bcdboot.exe", self.bcdboot),
+            )
+            if not value
+        ]
+        if missing:
+            failure = f"缺少系统工具：{'、'.join(missing)}（真实写盘需要管理员环境里的这些命令）"
+            for key in _STEP_ORDER + ("image", "boot"):
+                steps.append(StepResult(key=key, title=_STEP_TITLES[key], status=STEP_SKIPPED, message="前置条件不满足"))
+        else:
+            steps, failure = self._run_steps(
+                disk_number=disk_number,
+                payload=payload,
+                letters=letters,
+                image_path=image_path,
+                cancel_event=cancel_event,
+                log=log,
+                steps=steps,
+            )
+
+        finished = datetime.now()
+        duration = (finished - started).total_seconds()
+        success = failure is None and not any(step.failed for step in steps)
+
+        log.write(
+            f"任务结束：success={success} 用时 {duration:.1f}s"
+            + (f" 失败原因={failure}" if failure else "")
+        )
+        # WorkerResult 没有 details 字段，把日志位置挂到最后一个步骤上。
+        details: dict[str, Any] = {}
+        if log.path is not None:
+            details = {"log_path": str(log.path), "log_tail": _tail(log.summary())}
+            _LOGGER.info("真实执行日志: %s", log.path)
+            if steps:
+                steps[-1] = replace(steps[-1], details={**steps[-1].details, **details})
+
+        return WorkerResult(
+            disk_number=disk_number,
+            success=success,
+            message=(
+                f"硬盘 {disk_number} 真实执行完成"
+                if success
+                else f"硬盘 {disk_number} 执行失败：{failure or '有步骤失败'}"
+            ),
+            dry_run=False,
+            steps=tuple(steps),
+            error=None if success else (failure or "有步骤失败"),
+            started_at=started.isoformat(timespec="seconds"),
+            finished_at=finished.isoformat(timespec="seconds"),
+            duration_seconds=duration,
+        )
+
+    # ------------------------------------------------------------------ 六步
+    def _run_steps(
+        self,
+        *,
+        disk_number: int,
+        payload: Mapping[str, Any],
+        letters: Mapping[str, str],
+        image_path: str | None,
+        cancel_event: threading.Event,
+        log: _CommandLog,
+        steps: list[StepResult],
+    ) -> tuple[list[StepResult], str | None]:
+        partitions = payload.get("partition_info")
+        info = partitions if isinstance(partitions, Mapping) else {}
+        efi_mb = max(int(_to_int(info.get("efi_size_mb")) or 100), 64)
+        c_gb = _to_int(info.get("c_size_gb"))
+        data_gb = _to_int(info.get("data_size_gb"))
+
+        if c_gb is None or c_gb <= 0:
+            return steps, "配置里 partition_info.c_size_gb 必须是正整数"
+        missing_letters = [role for role in _STEP_ORDER if not letters.get(role)]
+        if missing_letters:
+            return steps, f"缺少盘符分配：{', '.join(missing_letters)}"
+        if not image_path:
+            return steps, "配置里缺少 image_info.image_path"
+        if not Path(image_path).is_file():
+            return steps, f"镜像文件不存在: {image_path}"
+
+        # 1-3：清盘 + 三分区（一条 diskpart 脚本，失败即整步失败）
+        script = self._diskpart_script(
+            disk_number=disk_number,
+            efi_mb=efi_mb,
+            c_gb=c_gb,
+            data_gb=data_gb,
+            letters=letters,
+            log=log,
+        )
+        if cancel_event.is_set():
+            return steps, "任务已取消（未开始写盘）"
+
+        try:
+            code, output = self._run_diskpart(script, log)
+        except Exception as exc:  # noqa: BLE001 - 统一翻成步骤失败
+            steps.append(
+                StepResult(
+                    key="efi",
+                    title=_STEP_TITLES["efi"],
+                    status=STEP_FAILED,
+                    message=f"无法执行 diskpart：{exc}",
+                )
+            )
+            return steps, f"无法执行 diskpart：{exc}"
+
+        if code != 0:
+            steps.extend(
+                StepResult(
+                    key=key,
+                    title=_STEP_TITLES[key],
+                    status=STEP_FAILED if key == "efi" else STEP_SKIPPED,
+                    message=(
+                        f"diskpart 失败（退出码 {code}）：{_tail(output, 800)}"
+                        if key == "efi"
+                        else "diskpart 失败，后续步骤未执行"
+                    ),
+                    details={"diskpart_exit": code, "diskpart_tail": _tail(output)},
+                )
+                for key in _STEP_ORDER
+            )
+            return steps, f"diskpart 失败（退出码 {code}）"
+
+        for key in _STEP_ORDER:
+            size_text = {"efi": f"{efi_mb} MB", "windows": f"{c_gb} GB", "data": (f"{data_gb} GB" if data_gb else "剩余空间")}[key]
+            steps.append(
+                StepResult(
+                    key=key,
+                    title=_STEP_TITLES[key],
+                    status=STEP_OK,
+                    message=f"已创建并格式化（{size_text}，盘符 {letters[key]}）",
+                    details={"letter": letters[key], "size": size_text},
+                )
+            )
+
+        # 4：应用镜像
+        if cancel_event.is_set():
+            steps.append(StepResult(key="image", title=_STEP_TITLES["image"], status=STEP_SKIPPED, message="任务已取消"))
+            return steps, "任务已取消（分区已建好，镜像未应用）"
+
+        image_index = _to_int((payload.get("image_info") or {}).get("image_index")) or 1
+        target = f"{letters['windows']}:\\"
+        code, output, elapsed = self._apply_image(image_path, image_index, target, log)
+        if code != 0:
+            steps.append(
+                StepResult(
+                    key="image",
+                    title=_STEP_TITLES["image"],
+                    status=STEP_FAILED,
+                    message=f"dism 失败（退出码 {code}）：{_tail(output, 800)}",
+                    details={"exit": code, "image": image_path, "index": image_index, "seconds": round(elapsed, 1)},
+                )
+            )
+            steps.append(StepResult(key="boot", title=_STEP_TITLES["boot"], status=STEP_SKIPPED, message="镜像未应用成功，跳过引导"))
+            return steps, f"应用镜像失败（dism 退出码 {code}）"
+
+        steps.append(
+            StepResult(
+                key="image",
+                title=_STEP_TITLES["image"],
+                status=STEP_OK,
+                message=f"已应用 {Path(image_path).name}（索引 {image_index}）到 {target}",
+                details={"image": image_path, "index": image_index, "seconds": round(elapsed, 1), "tail": _tail(output, 1200)},
+            )
+        )
+
+        # 5：写引导
+        if cancel_event.is_set():
+            steps.append(StepResult(key="boot", title=_STEP_TITLES["boot"], status=STEP_SKIPPED, message="任务已取消"))
+            return steps, "任务已取消（镜像已写入，引导未写）"
+
+        code, output, elapsed = self._write_boot(letters, log)
+        if code != 0:
+            steps.append(
+                StepResult(
+                    key="boot",
+                    title=_STEP_TITLES["boot"],
+                    status=STEP_FAILED,
+                    message=f"bcdboot 失败（退出码 {code}）：{_tail(output, 800)}",
+                    details={"exit": code, "seconds": round(elapsed, 1)},
+                )
+            )
+            return steps, f"写引导失败（bcdboot 退出码 {code}）"
+
+        steps.append(
+            StepResult(
+                key="boot",
+                title=_STEP_TITLES["boot"],
+                status=STEP_OK,
+                message=f"已写入 UEFI 引导（{letters['efi']}: ← {letters['windows']}:\\Windows）",
+                details={"exit": code, "seconds": round(elapsed, 1), "tail": _tail(output, 800)},
+            )
+        )
+
+        # 6：校验
+        steps.append(self._verify(disk_number, log))
+        if steps[-1].failed:
+            return steps, "分区校验失败"
+        return steps, None
+
+    # ------------------------------------------------------------------ 具体命令
+    def _diskpart_script(
+        self,
+        *,
+        disk_number: int,
+        efi_mb: int,
+        c_gb: int,
+        data_gb: int | None,
+        letters: Mapping[str, str],
+        log: _CommandLog,
+    ) -> list[str]:
+        lines = [
+            f"select disk {disk_number}",
+            "clean",
+            "convert gpt",
+            f"create partition efi size={efi_mb}",
+            "format quick fs=fat32 label=EFI",
+            f"assign letter={letters['efi']}",
+            f"create partition primary size={c_gb * 1024}",
+            "format quick fs=ntfs label=Windows",
+            f"assign letter={letters['windows']}",
+            "create partition primary" if not data_gb else f"create partition primary size={data_gb * 1024}",
+            "format quick fs=ntfs label=Data",
+            f"assign letter={letters['data']}",
+            "exit",
+        ]
+        log.block("diskpart 脚本", "\n".join(lines))
+        return lines
+
+    def _run_diskpart(self, lines: Sequence[str], log: _CommandLog) -> tuple[int, str]:
+        if not self.diskpart:
+            raise RunnerError("找不到 diskpart.exe")
+        handle, path = tempfile.mkstemp(prefix="sisp-diskpart-", suffix=".txt")
+        os.close(handle)
+        try:
+            # diskpart 只认 ANSI 脚本；这里的脚本全是 ASCII。
+            Path(path).write_text("\r\n".join(lines) + "\r\n", encoding="ascii")
+            code, output, _elapsed = self._spawn([self.diskpart, "/s", path], DISKPART_TIMEOUT, log)
+            return code, output
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    def _apply_image(
+        self,
+        image_path: str,
+        index: int,
+        target: str,
+        log: _CommandLog,
+    ) -> tuple[int, str, float]:
+        assert self.dism  # 前置检查已保证
+        command = [
+            self.dism,
+            "/English",
+            "/Apply-Image",
+            f"/ImageFile:{image_path}",
+            f"/Index:{index}",
+            f"/ApplyDir:{target}",
+            "/CheckIntegrity",
+        ]
+        code, output, elapsed = self._spawn(command, DISM_TIMEOUT, log)
+        return code, output, elapsed
+
+    def _write_boot(self, letters: Mapping[str, str], log: _CommandLog) -> tuple[int, str, float]:
+        assert self.bcdboot  # 前置检查已保证
+        windows = f"{letters['windows']}:\\Windows"
+        efi = f"{letters['efi']}:"
+        command = [self.bcdboot, windows, "/s", efi, "/f", "UEFI"]
+        return self._spawn(command, BCDBOOT_TIMEOUT, log)
+
+    def _verify(self, disk_number: int, log: _CommandLog) -> StepResult:
+        title = _STEP_TITLES["verify"]
+        if not self.powershell:
+            return StepResult(
+                key="verify",
+                title=title,
+                status=STEP_FAILED,
+                message="找不到 powershell.exe，无法校验",
+            )
+        env = dict(os.environ)
+        env["VIX_DISK_NUMBER"] = str(disk_number)
+        try:
+            completed = subprocess.run(  # noqa: S603 - 固定脚本，编号来自任务
+                [self.powershell, "-NoProfile", "-NonInteractive", "-Command", _VERIFY_SCRIPT],
+                capture_output=True,
+                timeout=VERIFY_TIMEOUT,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                check=False,
+                env=env,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return StepResult(key="verify", title=title, status=STEP_FAILED, message=f"校验执行失败：{exc}")
+
+        raw = _decode(completed.stdout).strip()
+        log.block("verify 输出", raw)
+        if completed.returncode != 0:
+            return StepResult(
+                key="verify",
+                title=title,
+                status=STEP_FAILED,
+                message=f"校验脚本失败（退出码 {completed.returncode}）：{_tail(_decode(completed.stderr), 500)}",
+                details={"exit": completed.returncode},
+            )
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return StepResult(
+                key="verify",
+                title=title,
+                status=STEP_FAILED,
+                message=f"校验输出不是合法 JSON：{_tail(raw, 300)}",
+            )
+        parts = payload.get("partitions") or []
+        if isinstance(parts, dict):
+            parts = [parts]
+        style = payload.get("partition_style") or "?"
+        summary = "、".join(
+            f"#{part.get('number')}"
+            f"{('(' + str(part.get('drive_letter')) + ':)' if part.get('drive_letter') else '')}"
+            f"={format_size(part.get('size_bytes'))}"
+            for part in parts
+        )
+        ok = str(style).upper() == "GPT" and len(parts) >= 3
+        return StepResult(
+            key="verify",
+            title=title,
+            status=STEP_OK if ok else STEP_FAILED,
+            message=(
+                f"GPT、{len(parts)} 个分区：{summary}"
+                if ok
+                else f"校验不符合预期：style={style}，分区数={len(parts)}"
+            ),
+            details={"partition_style": style, "partitions": parts},
+        )
+
+    # ------------------------------------------------------------------ 进程
+    def _spawn(
+        self,
+        command: Sequence[str],
+        timeout: float,
+        log: _CommandLog,
+    ) -> tuple[int, str, float]:
+        started = datetime.now()
+        log.write(f"$ {' '.join(command)}")
+        try:
+            completed = subprocess.run(  # noqa: S603 - 命令由本模块拼装，参数来自配置
+                list(command),
+                capture_output=True,
+                timeout=timeout,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            output = _decode(exc.stdout) + _decode(exc.stderr)
+            log.block(f"超时（{timeout:.0f}s）", output)
+            raise RunnerError(f"命令超时（{timeout:.0f} 秒）：{command[0]}") from exc
+        except OSError as exc:
+            raise RunnerError(f"无法启动 {command[0]}：{exc}") from exc
+
+        output = _decode(completed.stdout) + _decode(completed.stderr)
+        elapsed = (datetime.now() - started).total_seconds()
+        log.block(f"退出码 {completed.returncode}，用时 {elapsed:.1f}s", output)
+        return completed.returncode, output, elapsed
+
+    # ------------------------------------------------------------------ 小工具
+    @staticmethod
+    def _which(name: str) -> str | None:
+        found = shutil.which(name)
+        if found:
+            return found
+        if os.name == "nt":
+            system32 = Path(os.environ.get("SystemRoot") or r"C:\Windows") / "System32"
+            candidate = system32 / name
+            if candidate.is_file():
+                return str(candidate)
+        return None
+
+    @staticmethod
+    def _image_path(payload: Mapping[str, Any]) -> str | None:
+        info = payload.get("image_info")
+        if not isinstance(info, Mapping):
+            return None
+        return _to_text(info.get("image_path"))
+
+
+def build_real_runner(
+    *,
+    log_dir: str | os.PathLike[str] | None = None,
+) -> WindowsDiskRunner:
+    """工厂函数；``WorkflowController`` 用它给未注入服务的会话配默认执行器。"""
+    return WindowsDiskRunner(log_dir=log_dir)

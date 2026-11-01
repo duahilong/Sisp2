@@ -1,1 +1,15 @@
-wcwidth>=0.2.13
+# Sisp2 运行时依赖
+#
+# 本工具主体只用 Python 标准库：磁盘扫描、分区、格式化、引导修复全部通过
+# Windows 自带命令完成（PowerShell / diskpart / dism / bcdboot / robocopy），
+# 不依赖任何第三方包，所以这个文件里没有需要 pip 安装的条目。
+#
+# 安装（只是确认一下环境，不会装东西）：
+#   python -m pip install -r requirements.txt
+#
+# 版本要求：Python 3.10+（使用了 `X | None` 之类的新语法）。
+# 图形界面需要的 pywebview 单独放在 requirements-web.txt，命令行不需要它。
+#
+# 可选（不写进本文件，避免把系统级工具当 pip 包）：
+#   - PowerShell 5.1+（Windows 10/11 自带）
+#   - wimlib-imagex（仅在需要 wimlib 路径时使用，可用设置页指向外部 exe）

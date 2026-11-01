@@ -1,0 +1,13 @@
+# Sisp2 图形界面（Web 视图）依赖 —— 可选
+#
+# 只有 `python -m app.gui_web`（pywebview 桌面窗口）需要这里的包；
+# 命令行 `python -m app.cli` 完全不需要，磁盘逻辑本身也只用标准库。
+#
+# 安装：
+#   python -m pip install -r requirements-web.txt
+#
+# 说明：
+#   - pywebview 5.x 在 Windows 上默认使用系统自带的 WebView2 运行时
+#     （Windows 11 预装；Windows 10 若缺失，装一次 Microsoft Edge WebView2 Runtime 即可）。
+#   - 界面文件在 app/gui_web/ui/index.html；缺它时入口会提示，不会因为缺依赖崩栈。
+pywebview>=5.0

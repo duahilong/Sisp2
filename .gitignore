@@ -10,7 +10,6 @@ __pycache__/
 venv/
 env/
 ENV/
-.env/
 
 # IDE files
 .vscode/
@@ -40,8 +39,6 @@ build/
 *.egg-info/
 
 # Large files and directories
-img/
-sw/
 *.iso
 *.gho
 *.ghs

@@ -4,6 +4,11 @@ from typing import Any
 
 from app.modules.common.service import POWERSHELL_SCAN_TIMEOUT, run_powershell
 
+# P0 补丁（G1）：保留分区明细。
+# ``POWERSHELL_SCRIPT`` 本来就已经采集了每个分区的号、盘符、大小、偏移、
+# 类型、GPT 类型和卷信息，只是 ``summarize_disk`` 之前在出口把它们丢了。
+# 现在通过 ``normalize_partition`` 把原始结构拍平成界面可直接消费的字典。
+
 POWERSHELL_SCRIPT = r"""
 $disks = Get-Disk | Sort-Object Number
 $result = @()
@@ -149,7 +154,6 @@ def format_size(size_bytes: Any) -> str:
     return f"{size_bytes} B"
 
 
-
 def run_powershell_json(script: str) -> list[dict[str, Any]]:
     completed = run_powershell(script, timeout=POWERSHELL_SCAN_TIMEOUT)
 
@@ -177,6 +181,55 @@ def run_powershell_json(script: str) -> list[dict[str, Any]]:
     return data
 
 
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
+
+
+def _text_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def normalize_partition(partition: dict[str, Any], index: int = 0) -> dict[str, Any]:
+    """把 ``Get-Partition`` + ``Get-Volume`` 的原始结构拍平成界面契约。
+
+    界面只需要：第几分区、盘符、多大、占多少、文件系统、卷标、是否系统/隐藏。
+    """
+    volume = partition.get("volume") or {}
+
+    size_bytes = _int_or_none(partition.get("size_bytes"))
+    if size_bytes is None:
+        size_bytes = _int_or_none(volume.get("size_bytes"))
+    remaining = _int_or_none(volume.get("size_remaining_bytes"))
+    used_bytes = None
+    if size_bytes is not None and remaining is not None:
+        used_bytes = max(size_bytes - remaining, 0)
+
+    letter = partition.get("drive_letter") or volume.get("drive_letter")
+    letter = str(letter).strip().upper()[:1] if letter else None
+
+    number = _int_or_none(partition.get("partition_number"))
+    return {
+        "partition_number": number if number is not None else index,
+        "drive_letter": letter or None,
+        "size_bytes": size_bytes,
+        "size_display": format_size(size_bytes),
+        "offset_bytes": _int_or_none(partition.get("offset_bytes")),
+        "type": _text_or_none(partition.get("type")),
+        "gpt_type": _text_or_none(partition.get("gpt_type")),
+        "file_system": _text_or_none(volume.get("file_system")),
+        "label": _text_or_none(volume.get("file_system_label")),
+        "is_system": bool(partition.get("is_system")),
+        "is_boot": bool(partition.get("is_boot")),
+        "is_hidden": bool(partition.get("is_hidden")),
+        "used_bytes": used_bytes,
+        "free_bytes": remaining,
+    }
+
 
 def collect_drive_letters(disk: dict[str, Any]) -> list[str]:
     drive_letters: list[str] = []
@@ -198,10 +251,19 @@ def collect_drive_letters(disk: dict[str, Any]) -> list[str]:
     return drive_letters
 
 
-
 def summarize_disk(disk: dict[str, Any]) -> dict[str, Any]:
     friendly_name = disk.get("friendly_name")
     model = str(friendly_name).strip() if friendly_name is not None else None
+
+    raw_partitions = disk.get("partitions") or []
+    if not isinstance(raw_partitions, list):
+        raw_partitions = []
+    partitions = [
+        normalize_partition(part, index)
+        for index, part in enumerate(raw_partitions, start=1)
+        if isinstance(part, dict)
+    ]
+
     return {
         "disk_number": disk.get("disk_number"),
         "model": model or None,
@@ -216,18 +278,18 @@ def summarize_disk(disk: dict[str, Any]) -> dict[str, Any]:
         "is_system": bool(disk.get("is_system")),
         "is_offline": bool(disk.get("is_offline")),
         "is_read_only": bool(disk.get("is_read_only")),
+        "partition_count": len(partitions),
+        # P0 补丁：分区明细随摘要一起下发
+        "partitions": partitions,
     }
-
 
 
 def scan_disks() -> list[dict[str, Any]]:
     return run_powershell_json(POWERSHELL_SCRIPT)
 
 
-
 def scan_disk_summaries() -> list[dict[str, Any]]:
     return [summarize_disk(disk) for disk in run_powershell_json(SUMMARY_POWERSHELL_SCRIPT)]
-
 
 
 def scan_used_drive_letters() -> list[str]:

@@ -5,23 +5,32 @@
 
 1. ``start()``：运行前检查、读取配置、扫描并应用硬盘保护规则；
 2. ``refresh_disks()``：重新扫描硬盘，不改变配置和检查结果；
-3. ``prepare()``：执行写前校验，为每块盘生成 ``ExecutionPlan`` 和
+3. ``check_config()``：只重新校验配置文件，不重建会话；
+4. ``prepare()``：执行写前校验，为每块盘生成 ``ExecutionPlan`` 和
    ``JobSpec``，并标明检查项与阻断项；
-4. ``submit()`` / ``confirm()`` / ``cancel()``：交给 ``JobManager`` 执行；
-5. ``results()``：汇总已结束任务的结果。
+5. ``submit()`` / ``confirm()`` / ``cancel()``：交给 ``JobManager`` 执行；
+6. ``results()``：汇总已结束任务的结果。
 
 本模块不依赖 Qt，也不执行任何 PowerShell 或磁盘操作，因此可以直接用
 普通单元测试覆盖。
+
+P0 补丁（G3）：``prepare()`` 现在既接受 ``[1, 3]``，也接受
+``{1: {"c_size": 400, "data_size": 800}}`` 这种“每块盘一套参数”的写法；
+每个任务用合并后的配置载荷构造 ``JobSpec``，盘符分配仍由一次全局调用完成，
+避免并发分配撞车。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import copy
+import threading
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
 from app.application.contracts import CheckItem, DiskInfo
 from app.application.jobs import ExecutionPlan, Job, JobManager, JobSpec, JobStatus
+from app.application.real_runner import build_real_runner
 from app.application.service import SispService
 from app.models import WorkerResult
 from app.orchestrator import build_worker_disk_identity
@@ -36,10 +45,13 @@ _CHECK_KEYS = {
     "配置文件可解析性检查": "config_parse",
 }
 
-_PLAN_STEP_KEYS = ("efi", "windows", "data1", "data2")
+# P0 补丁（G14）：三分区布局，只需 3 个盘符
+_PLAN_STEP_KEYS = ("efi", "windows", "data")
 _DRY_RUN_WARNING = "dry-run 模式：只展示执行计划，不会执行任何写盘操作"
 _DESTRUCTIVE_WARNING = "破坏性操作：将清空目标硬盘全部数据，请再次核对硬盘编号和身份"
 _CANCEL_WARNING = "取消为协作式：当前步骤完成后才会停止"
+BYTES_PER_MB = 1024 * 1024
+BYTES_PER_GB = 1024 * 1024 * 1024
 
 
 class WorkflowError(ValueError):
@@ -113,6 +125,94 @@ def _is_strong_identity(identity: dict[str, Any]) -> bool:
     return bool(unique_id or serial_number)
 
 
+def _as_number(value: Any) -> float | None:
+    """把 int/float/数字字符串转成 float；其他（含 bool、空串、非数字）→ None。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+    return None
+
+
+def _merge_payload(
+    base_payload: dict[str, Any] | None,
+    overrides: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """把单块盘的参数覆盖合并进配置载荷。
+
+    支持的最小键集（其余键透传）：
+    ``efi_size`` / ``efi_size_mb``、``c_size`` / ``c_size_gb``、
+    ``data_size`` / ``data_size_gb``、``win_gho``。
+    """
+    payload = copy.deepcopy(dict(base_payload or {}))
+    if not overrides:
+        return payload
+
+    partition_info = payload.setdefault("partition_info", {})
+    if not isinstance(partition_info, dict):
+        partition_info = {}
+        payload["partition_info"] = partition_info
+
+    efi = _as_number(overrides.get("efi_size", overrides.get("efi_size_mb")))
+    if efi is not None:
+        partition_info["efi_size_mb"] = efi
+
+    c_size = _as_number(overrides.get("c_size", overrides.get("c_size_gb")))
+    if c_size is not None:
+        partition_info["c_size_gb"] = c_size
+
+    data_size = overrides.get("data_size", overrides.get("data_size_gb"))
+    if data_size in ("auto", None, ""):
+        partition_info["data_size_gb"] = None
+    else:
+        value = _as_number(data_size)
+        if value is not None:
+            partition_info["data_size_gb"] = value
+
+    win_gho = overrides.get("win_gho")
+    if isinstance(win_gho, str) and win_gho.strip():
+        image_info = payload.setdefault("image_info", {})
+        if isinstance(image_info, dict):
+            image_info["image_path"] = win_gho.strip()
+
+    return payload
+
+
+def _check_partition_fit(disk: DiskInfo, payload: dict[str, Any]) -> list[str]:
+    """检查三个分区是否放得下（不依赖 PowerShell，纯算术）。"""
+    if not isinstance(disk.size_bytes, int) or disk.size_bytes <= 0:
+        return []
+    info = payload.get("partition_info") or {}
+    if not isinstance(info, dict):
+        return []
+
+    efi_mb = _as_number(info.get("efi_size_mb")) or 100.0
+    c_gb = _as_number(info.get("c_size_gb"))
+    data_gb = _as_number(info.get("data_size_gb"))
+    if c_gb is None:
+        return []
+
+    required = int(efi_mb * BYTES_PER_MB + c_gb * BYTES_PER_GB)
+    if data_gb is not None:
+        required += int(data_gb * BYTES_PER_GB)
+    # 留 1MB 给分区对齐与 GPT 表
+    if required + BYTES_PER_MB > disk.size_bytes:
+        return [
+            f"硬盘 {disk.disk_number} 容量不足：EFI {efi_mb:.0f}MB + C {c_gb:.0f}GB"
+            + (f" + D {data_gb:.0f}GB" if data_gb is not None else "")
+            + f" 超过 {disk.size_display}"
+        ]
+    return []
+
+
 class WorkflowController:
     """把应用服务、计划确认门禁和任务管理器串成一个可测试的工作流。"""
 
@@ -129,19 +229,69 @@ class WorkflowController:
         result_dir: str | None = None,
         resource_resolver: Callable[[Any], int | None] | None = None,
         event_dir: str | None = None,
+        allowed_disk_numbers: Iterable[int] | None = None,
+        real_runner: Callable[[Any, threading.Event], WorkerResult] | None = None,
     ) -> None:
-        self._service = service or SispService()
-        self._manager = job_manager or JobManager(event_dir=event_dir)
-        self._preflight_runner = preflight_runner or run_preflight_checks
         self._dry_run = bool(dry_run)
         self._worker_interval = max(float(worker_interval), 0.0)
         self._max_parallel = max(int(max_parallel), 1)
         self._log_dir = log_dir
         self._result_dir = result_dir
         self._resource_resolver = resource_resolver
+        self._allowed_disk_numbers = (
+            frozenset(int(number) for number in allowed_disk_numbers)
+            if allowed_disk_numbers is not None
+            else None
+        )
+        self._real_runner = real_runner
+        # P0 补丁：服务必须跟着控制器的开关走——dry-run、写盘白名单、执行器
+        # 三者不再各自取默认值（旧实现 new 了一个 dry_run=True 的 SispService，
+        # 于是“真实执行”这条路径永远走不到）。
+        self._service_injected = service is not None
+        self._service = service if service is not None else self._build_service()
+        # 默认执行器直接调本会话的 service；旧的 JobManager 会另造一个 dry-run 服务。
+        self._manager = job_manager or JobManager(
+            executor=self._execute_spec,
+            event_dir=event_dir,
+        )
+        self._preflight_runner = preflight_runner or run_preflight_checks
         self._session: SessionState | None = None
         self._prepared: dict[int, PreparedJob] = {}
         self._jobs: dict[str, PreparedJob] = {}
+
+    # ------------------------------------------------------------------ 装配
+    def _build_service(self) -> SispService:
+        """按当前开关构造应用服务；真实模式的执行器默认是 ``WindowsDiskRunner``。"""
+        runner = self._real_runner
+        if runner is None:
+            runner = build_real_runner(log_dir=self._log_dir)
+        return SispService(
+            dry_run=bool(self._dry_run),
+            allowed_disk_numbers=self._allowed_disk_numbers or (),
+            real_runner=runner,
+        )
+
+    def _execute_spec(self, spec: Any, cancel_event: threading.Event) -> WorkerResult:
+        """``JobManager`` 的默认执行器：走本会话的 service，不再另造一个。"""
+        self._sync_service_policy(dry_run=bool(getattr(spec, "dry_run", False)))
+        return self._service.execute_spec(spec, cancel_event)
+
+    def _explicit_allowlist(self) -> frozenset[int] | None:
+        """显式白名单优先；也认 ``cli.inject_policy_flags`` 挂上的 ``allow_disks``。"""
+        if self._allowed_disk_numbers is not None:
+            return self._allowed_disk_numbers
+        attribute = getattr(self, "allow_disks", None)
+        if attribute:
+            return frozenset(int(number) for number in attribute)
+        return None
+
+    def _sync_service_policy(self, *, dry_run: bool | None = None) -> None:
+        """把控制器的当前开关同步给服务；外部注入的 service 只同步白名单。"""
+        if dry_run is not None and not self._service_injected:
+            self._service.dry_run = bool(dry_run)
+        allowlist = self._explicit_allowlist()
+        if allowlist is not None:
+            self._service.allowed_disk_numbers = frozenset(allowlist)
 
     # ------------------------------------------------------------------ 查询
     @property
@@ -151,6 +301,11 @@ class WorkflowController:
     @property
     def job_manager(self) -> JobManager:
         return self._manager
+
+    @property
+    def service(self) -> SispService:
+        """P0 补丁（G3）：暴露应用服务，界面层不再直接够私有属性。"""
+        return self._service
 
     @property
     def prepared_jobs(self) -> tuple[PreparedJob, ...]:
@@ -230,6 +385,8 @@ class WorkflowController:
         )
         self._session = session
         self._prepared = {}
+        # 会话是“这次运行的真实模式”，服务必须立刻跟上（覆盖构造时的默认值）。
+        self._sync_service_policy(dry_run=self._dry_run)
         return session
 
     def refresh_disks(self) -> list[DiskInfo]:
@@ -257,23 +414,57 @@ class WorkflowController:
         self._prepared = {}
         return list(disks)
 
+    def check_config(self, config_path: str | None = None) -> Any:
+        """P0 补丁（G3）：单独重新校验配置文件，不重建会话。
+
+        返回 ``ConfigCheckResult``；界面只需要 ``passed/message/error_code``。
+        """
+        target = config_path or (self._session.config_path if self._session else None)
+        return self._service.check_config(target)
+
     # ------------------------------------------------------------------ 计划
     def prepare(
         self,
-        selected_disk_numbers: Sequence[int],
+        selected_disk_numbers: Sequence[int] | Mapping[int, Mapping[str, Any]],
         *,
         dry_run: bool | None = None,
     ) -> list[PreparedJob]:
-        """为选中硬盘生成执行计划和任务输入。"""
+        """为选中硬盘生成执行计划和任务输入。
+
+        ``selected_disk_numbers`` 可以是硬盘编号序列，也可以是
+        ``{硬盘编号: {"c_size": 400, "data_size": 800}}`` 形式的每盘覆盖。
+        """
         session = self._require_session()
         if session.config_payload is None:
             raise WorkflowError("配置不可用，无法生成执行计划")
 
-        selected = [int(number) for number in selected_disk_numbers]
+        overrides: dict[int, dict[str, Any]] = {}
+        if isinstance(selected_disk_numbers, Mapping):
+            raw_selection = selected_disk_numbers
+            selected = [int(number) for number in raw_selection]
+            overrides = {
+                int(number): dict(values or {})
+                for number, values in raw_selection.items()
+            }
+        else:
+            selected = [int(number) for number in selected_disk_numbers]
+
         if not selected:
             raise WorkflowError("尚未选择任何硬盘")
 
         active_dry_run = self._dry_run if dry_run is None else bool(dry_run)
+        # P0 补丁：真实模式下先把服务的 dry_run 与白名单对齐。
+        # 没有显式白名单时（GUI 走这条），把“本次选中的硬盘”加入白名单——
+        # 用户在界面上勾选 + 后续确认本身就是授权动作，与 CLI 的
+        # --allow-disks 等价，但只对本会话选过的盘放行。
+        self._sync_service_policy(dry_run=active_dry_run)
+        implicit_allowlist = False
+        if not active_dry_run and self._explicit_allowlist() is None:
+            merged = set(self._service.allowed_disk_numbers)
+            merged.update(int(number) for number in selected)
+            self._service.allowed_disk_numbers = frozenset(merged)
+            implicit_allowlist = True
+
         summaries = [disk.to_dict() for disk in session.disks]
         try:
             selection = self._service.build_selection_plan(
@@ -295,12 +486,17 @@ class WorkflowController:
             if disk is None:
                 raise WorkflowError(f"硬盘编号不存在: {disk_number}")
             drive_letters = selection.drive_letter_allocations.get(disk_number) or {}
+            payload = _merge_payload(session.config_payload, overrides.get(disk_number))
+            for message in _check_partition_fit(disk, payload):
+                raise WorkflowError(message)
             prepared.append(
                 self._build_prepared_job(
                     session,
                     disk,
                     drive_letters,
                     dry_run=active_dry_run,
+                    payload=payload,
+                    implicit_allowlist=implicit_allowlist,
                 )
             )
 
@@ -314,7 +510,10 @@ class WorkflowController:
         drive_letters: dict[str, str],
         *,
         dry_run: bool,
+        payload: dict[str, Any] | None = None,
+        implicit_allowlist: bool = False,
     ) -> PreparedJob:
+        task_payload = payload if payload is not None else (session.config_payload or {})
         identity = build_worker_disk_identity(disk.to_dict())
         checks: list[CheckItem] = []
         blockers: list[str] = list(session.blockers)
@@ -335,6 +534,24 @@ class WorkflowController:
         if not disk.is_selectable:
             reasons = "、".join(disk.protection_reasons) or "受保护"
             blockers.append(f"硬盘 {disk.disk_number} 不可操作：{reasons}")
+
+        if not dry_run:
+            allowed = sorted(int(number) for number in self._service.allowed_disk_numbers)
+            checks.append(
+                CheckItem(
+                    key="write_allowlist",
+                    label="写盘白名单",
+                    passed=disk.disk_number in allowed,
+                    message=(
+                        "按本会话选中的硬盘授权（未显式指定白名单）"
+                        if implicit_allowlist
+                        else f"白名单：{allowed or '空'}"
+                    ),
+                    details={"allowed_disk_numbers": allowed},
+                )
+            )
+            if disk.disk_number not in allowed:
+                blockers.append(f"硬盘 {disk.disk_number} 不在写盘白名单内")
 
         if dry_run:
             checks.append(
@@ -373,7 +590,7 @@ class WorkflowController:
                 label="盘符分配",
                 passed=letters_complete,
                 message=(
-                    "已分配 EFI/Windows/Data1/Data2 盘符"
+                    "已分配 EFI/Windows/Data 盘符"
                     if letters_complete
                     else "盘符分配不完整"
                 ),
@@ -400,7 +617,7 @@ class WorkflowController:
         )
         spec = JobSpec(
             disk_number=disk.disk_number,
-            config_payload=session.config_payload or {},
+            config_payload=task_payload,
             expected_identity=identity,
             drive_letters=dict(drive_letters),
             dry_run=dry_run,
