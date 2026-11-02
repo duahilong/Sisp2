@@ -222,7 +222,8 @@ class SettingsStore:
         data = dict(self._defaults)
         if self.path.exists():
             try:
-                raw = json.loads(self.path.read_text(encoding="utf-8"))
+                # utf-8-sig：兼容记事本 / Windows PowerShell 5.1 保存的 BOM。
+                raw = json.loads(self.path.read_text(encoding="utf-8-sig"))
             except (OSError, json.JSONDecodeError) as exc:
                 self._warnings.append(f"设置文件无法解析，已使用默认值：{exc}")
                 raw = {}

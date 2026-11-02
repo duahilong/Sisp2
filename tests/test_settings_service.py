@@ -175,3 +175,20 @@ def test_to_dict_reports_sections(store: SettingsStore) -> None:
     payload = store.to_dict()
     assert [section["key"] for section in payload["sections"]][0] == "general"
     assert "settings" in payload and "pathKeys" in payload
+
+
+def test_load_tolerates_utf8_bom(tmp_path: Path) -> None:
+    """记事本 / Windows PowerShell 5.1 保存的 UTF-8 BOM 不应让设置退化成默认值。"""
+    path = tmp_path / "settings.json"
+    payload = {
+        "version": 1,
+        "settings": {"sysDefaultGb": 300, "logDir": r"D:\logs", "logLevel": "debug"},
+    }
+    path.write_bytes(b"\xef\xbb\xbf" + json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+
+    loaded = SettingsStore(path, which=lambda _name: None)
+
+    assert loaded.get_warnings() == []
+    assert loaded.get()["sysDefaultGb"] == 300
+    assert loaded.get()["logDir"] == r"D:\logs"
+    assert loaded.get()["logLevel"] == "debug"
