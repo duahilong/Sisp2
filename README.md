@@ -72,4 +72,5 @@ python -m pytest tests/ -q
 - [安全边界与已知风险](Docs/security.md)
 - [业务配置与界面设置](Docs/configuration.md)
 - [Web API、SSE 与部署](Docs/web-api.md)
+- [测试与真实写盘验证](Docs/testing.md)
 - [前端开发说明](app/gui_web/ui/README.md)
