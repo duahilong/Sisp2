@@ -1,0 +1,2320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>硬盘工具箱 · 单页原型</title>
+<style>
+:root{
+  --bg:#E7ECF2;
+  --panel:#FFFFFF;
+  --panel2:#F6F9FC;
+  --chrome:#EDF2F7;
+  --chrome2:#E2E9F1;
+  --line:#CFD8E3;
+  --line2:#E4EAF1;
+  --ink:#14202B;
+  --ink2:#3A4C5D;
+  --muted:#64778A;
+  --faint:#8D9CAB;
+  --accent:#1B5FC1;
+  --accent2:#0E4A9B;
+  --accent-bg:#E5EFFC;
+  --danger:#AF2010;
+  --danger-bg:#FCEDEA;
+  --warn:#8A5607;
+  --warn-bg:#FBF1DD;
+  --ok:#0B6E4F;
+  --ok-bg:#E4F4EC;
+  --ntfs:#2F6FDC;
+  --exfat:#C0841C;
+  --esp:#7A5BC7;
+  --rec:#6E8496;
+  --free:#C6D2DF;
+  --mono:ui-monospace,"Cascadia Mono","Consolas","SF Mono",monospace;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;overflow:hidden;
+  font-family:"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+  font-size:12.5px;line-height:1.5;color:var(--ink);background:var(--bg);
+  -webkit-font-smoothing:antialiased;
+}
+button{font:inherit;color:inherit;background:none;border:none;padding:0;cursor:pointer}
+button:disabled{cursor:default}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+/* ============ 外壳 ============ */
+.app{height:100vh;display:flex;flex-direction:column;min-width:1024px}
+
+.titlebar{
+  height:32px;flex:none;display:flex;align-items:center;gap:10px;padding:0 10px;
+  background:linear-gradient(#FBFCFE,#EFF4F9);
+  border-bottom:1px solid var(--line);
+}
+.logo{
+  width:16px;height:16px;border-radius:2px;flex:none;
+  background:
+    linear-gradient(135deg,var(--accent),#3C86E8);
+  position:relative;
+}
+.logo::after{
+  content:"";position:absolute;inset:3px;border-radius:1px;
+  border:1px solid rgba(255,255,255,.85);border-right-color:transparent;border-bottom-color:transparent;
+}
+.brand{display:flex;align-items:center;gap:7px;font-weight:600;font-size:12.5px;letter-spacing:.01em}
+.ver{font-weight:400;color:var(--faint);font-size:11px;letter-spacing:0}
+.tb-right{margin-left:auto;display:flex;align-items:center;gap:6px}
+.chip{
+  height:19px;display:inline-flex;align-items:center;gap:5px;padding:0 7px;
+  border:1px solid var(--line);border-radius:9px;background:#fff;
+  font-size:10.8px;color:var(--ink2);font-family:var(--mono);
+}
+.chip i{width:5px;height:5px;border-radius:50%;background:var(--faint);display:inline-block}
+.chip.on i{background:var(--accent)}
+.chip.dirty{border-color:#B9CDE9;background:var(--accent-bg);color:var(--accent2)}
+
+.menubar{
+  height:26px;flex:none;display:flex;align-items:stretch;gap:0;padding:0 4px;
+  background:var(--panel2);border-bottom:1px solid var(--line);
+}
+.menu{
+  display:flex;align-items:center;padding:0 10px;font-size:12px;position:relative;
+  border-radius:2px;color:var(--ink2);
+}
+.menu:hover,.menu.open{background:var(--accent-bg);color:var(--accent2)}
+.dropdown{
+  position:absolute;top:100%;left:0;min-width:190px;z-index:40;
+  background:#fff;border:1px solid var(--line);border-radius:2px;
+  box-shadow:0 8px 22px rgba(15,30,50,.14);padding:3px;display:none;
+}
+.menu.open .dropdown{display:block}
+.dd-item{
+  display:flex;align-items:center;gap:8px;height:24px;padding:0 8px;border-radius:2px;
+  font-size:12px;color:var(--ink);white-space:nowrap;
+}
+.dd-item:hover{background:var(--accent-bg)}
+.dd-item .k{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+.dd-sep{height:1px;background:var(--line2);margin:3px 4px}
+
+.toolbar{
+  height:36px;flex:none;display:flex;align-items:center;gap:2px;padding:0 6px;
+  background:var(--panel2);border-bottom:1px solid var(--line);
+}
+.tbtn{
+  height:24px;display:inline-flex;align-items:center;gap:5px;padding:0 9px;
+  border:1px solid transparent;border-radius:3px;font-size:12px;color:var(--ink2);white-space:nowrap;
+}
+.tbtn:hover:not(:disabled){background:#E9F0F8;border-color:#D3DEEA}
+.tbtn:active:not(:disabled){background:#DEE8F4}
+.tbtn:disabled{opacity:.38}
+.tbtn.danger{color:var(--danger)}
+.tbtn.primary{
+  background:linear-gradient(#2C72D6,#1B5FC1);border-color:var(--accent2);color:#fff;font-weight:600;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.22);
+}
+.tbtn.primary:hover:not(:disabled){background:linear-gradient(#2F79E0,#1A5AB6)}
+.tbtn.primary:disabled{background:#CBD8E7;border-color:#BCCBDD;color:#fff;opacity:.75}
+.tbtn .cnt{
+  display:inline-flex;align-items:center;justify-content:center;min-width:15px;height:15px;padding:0 4px;
+  border-radius:8px;background:rgba(255,255,255,.28);font-family:var(--mono);font-size:10px;
+}
+.divider{width:1px;height:18px;background:var(--line);margin:0 6px}
+.spacer{flex:1}
+
+/* ============ 主工作区 ============ */
+.workspace{
+  flex:1;min-height:0;display:grid;
+  grid-template-columns:244px minmax(0,1fr);
+  border-bottom:1px solid var(--line);
+}
+.tb-hint{font-size:11.2px;color:var(--muted);display:flex;align-items:center;gap:5px}
+.pane{min-width:0;min-height:0;background:var(--panel);display:flex;flex-direction:column}
+.pane.left{border-right:1px solid var(--line)}
+.pane.right{border-left:1px solid var(--line)}
+
+.ph{
+  height:24px;flex:none;display:flex;align-items:center;gap:6px;padding:0 9px;
+  background:var(--chrome);border-bottom:1px solid var(--line);
+  font-size:10.8px;font-weight:600;letter-spacing:.05em;color:var(--muted);
+  text-transform:uppercase;
+}
+.ph .r{margin-left:auto;font-weight:400;letter-spacing:0;text-transform:none;font-size:10.8px}
+.pill{
+  display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 5px;
+  border-radius:8px;background:#D3DEEA;color:var(--ink2);font-family:var(--mono);font-size:10px;font-weight:600;
+  letter-spacing:0;
+}
+.pill.hot{background:var(--accent);color:#fff}
+
+/* ---- 左：磁盘树 ---- */
+.tree{flex:1;overflow:auto;padding:3px 0 10px}
+.tnode{display:flex;align-items:center;gap:6px;height:23px;padding:0 9px 0 10px;cursor:pointer;user-select:none;position:relative}
+.tnode:hover{background:#F3F7FB}
+.tnode.disk{height:25px;border-top:1px solid var(--line2);margin-top:2px;font-weight:600;font-size:12px}
+.tnode.disk:first-child{border-top:none;margin-top:0}
+.tnode.on{background:var(--accent-bg)}
+.tnode.on::before{content:"";position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--accent)}
+.tnode.part{padding-left:28px;font-size:12px;color:var(--ink2);height:22px}
+.tnode.part.on{background:#DDEAFB;color:var(--accent2)}
+.tnode.part.pending{color:var(--danger)}
+.tnode .tname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tnode .tsize{font-family:var(--mono);font-size:10.5px;color:var(--faint);flex:none}
+.lbadge{
+  width:17px;height:15px;flex:none;border-radius:2px;display:flex;align-items:center;justify-content:center;
+  font-family:var(--mono);font-size:9.5px;font-weight:700;color:#fff;letter-spacing:-.02em;
+}
+.lbadge.free{background:transparent;border:1px dashed #B9C7D6;color:var(--faint);font-weight:400}
+.tlock{font-size:10px;color:var(--faint);flex:none;font-family:var(--mono)}
+.tdot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--faint)}
+.tdot.sys{background:var(--accent)}
+.tdot.ro{background:var(--warn)}
+
+/* ---- 中：概览 ---- */
+.overview{
+  flex:none;display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;
+  padding:7px 9px;background:var(--panel2);border-bottom:1px solid var(--line);
+}
+.ocard{
+  border:1px solid var(--line);border-radius:3px;background:#fff;padding:4px 7px 5px;
+  min-width:0;cursor:pointer;text-align:left;
+}
+.ocard:hover{border-color:#AFC4DE}
+.ocard.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-bg),2px 0 0 var(--accent) inset}
+.ocard .orow{display:flex;align-items:baseline;gap:5px}
+.ocard .oname{font-size:11.5px;font-weight:600}
+.ocard .ocap{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+.ocard .obar{height:5px;display:flex;margin:4px 0 3px;border-radius:2px;overflow:hidden;background:#EEF2F7}
+.ocard .omodel{display:block;font-size:10px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ocard.locked{background:#FAFCFE}
+.ocard.locked .oname{color:var(--muted)}
+
+/* ---- 中：磁盘标题 ---- */
+.head{
+  flex:none;display:flex;align-items:center;gap:8px;padding:5px 10px;
+  border-bottom:1px solid var(--line);background:#FBFCFE;min-height:29px;
+}
+.head .hname{font-size:13px;font-weight:600}
+.head .hmeta{font-size:11.5px;color:var(--muted);display:flex;align-items:center;gap:8px;min-width:0;overflow:hidden}
+.dotsep{width:2px;height:2px;border-radius:50%;background:#B8C4D2;flex:none}
+.head .hr{margin-left:auto;display:flex;align-items:center;gap:6px}
+.flag{
+  height:17px;display:inline-flex;align-items:center;padding:0 6px;border-radius:2px;font-size:10.5px;
+  border:1px solid var(--line);background:#fff;color:var(--muted);font-family:var(--mono);
+}
+.flag.warn{border-color:#E4CFA4;background:var(--warn-bg);color:var(--warn)}
+.flag.acc{border-color:#B9CDE9;background:var(--accent-bg);color:var(--accent2)}
+
+/* ---- 中：地图 ---- */
+.mapwrap{flex:none;padding:7px 10px 5px;border-bottom:1px solid var(--line)}
+.maphead{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+.maptitle{font-size:10.8px;font-weight:600;letter-spacing:.05em;color:var(--muted);text-transform:uppercase}
+.seg{margin-left:auto;display:inline-flex;border:1px solid var(--line);border-radius:3px;overflow:hidden;background:#fff}
+.seg button{height:19px;padding:0 9px;font-size:11.5px;color:var(--muted)}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button.on{background:var(--accent-bg);color:var(--accent2);font-weight:600}
+.ruler{position:relative;height:13px;margin-bottom:3px}
+.ruler span{position:absolute;top:0;font-family:var(--mono);font-size:9.5px;color:var(--faint);transform:translateX(-50%)}
+.ruler span:first-child{transform:none}
+.ruler span:last-child{transform:translateX(-100%)}
+.ruler i{position:absolute;bottom:0;width:1px;height:4px;background:#C9D4E0}
+
+.bar{
+  display:flex;height:31px;border:1px solid #B9C6D4;border-radius:2px;overflow:hidden;background:#F2F6FA;
+  box-shadow:inset 0 1px 2px rgba(20,40,70,.07);
+}
+.seg-piece{
+  position:relative;flex:none;display:flex;align-items:center;justify-content:center;gap:4px;min-width:0;
+  color:#fff;font-size:11px;border-right:1px solid rgba(255,255,255,.5);overflow:hidden;
+  transition:width .18s ease;
+}
+.seg-piece:last-child{border-right:none}
+.seg-piece .sl{font-family:var(--mono);font-size:10.5px;font-weight:700;letter-spacing:-.03em}
+.seg-piece .sz{font-family:var(--mono);font-size:10px;opacity:.92;white-space:nowrap}
+.seg-piece.free{
+  background:repeating-linear-gradient(45deg,#E9EFF6 0,#E9EFF6 4px,#DCE5EF 4px,#DCE5EF 8px);
+  color:#63758A;border-right:1px dashed #B9C7D6;
+}
+.seg-piece.free .sz{opacity:1;color:#5B6E84}
+.seg-piece:hover{filter:brightness(1.06)}
+.seg-piece.sel{box-shadow:inset 0 0 0 2px #fff,inset 0 0 0 3px #101C28;z-index:2}
+.seg-piece.isnew{outline:1px dashed rgba(255,255,255,.9);outline-offset:-3px}
+.legend{display:flex;align-items:center;gap:12px;padding:5px 0 1px;font-size:10.8px;color:var(--muted)}
+.legend .lg{display:inline-flex;align-items:center;gap:4px}
+.legend .lg i{width:7px;height:7px;border-radius:1px;display:inline-block}
+.legend .lg b{font-family:var(--mono);font-weight:400;color:var(--faint)}
+
+/* ---- 中：表格 ---- */
+.tablewrap{flex:1;overflow:auto;min-height:0}
+table.grid{width:100%;border-collapse:separate;border-spacing:0;font-size:12px}
+.grid thead th{
+  position:sticky;top:0;z-index:2;height:24px;padding:0 9px;text-align:left;
+  background:var(--chrome);border-bottom:1px solid var(--line);
+  font-size:10.8px;font-weight:600;letter-spacing:.04em;color:var(--muted);text-transform:uppercase;white-space:nowrap;
+}
+.grid td{
+  height:23px;padding:0 9px;border-bottom:1px solid #EFF3F8;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;max-width:220px;
+}
+.grid tbody tr{cursor:pointer}
+.grid tbody tr:hover td{background:#F5F9FD}
+.grid tbody tr.sel td{background:#DDEAFB}
+.grid tbody tr.sel td:first-child{box-shadow:inset 2px 0 0 var(--accent)}
+.grid td.num{text-align:right;font-family:var(--mono);font-size:11.5px}
+.grid td.dim{color:var(--faint)}
+.grid .lt{display:inline-flex;align-items:center;gap:6px}
+.badge{
+  display:inline-block;height:15px;line-height:15px;padding:0 5px;border-radius:2px;
+  font-size:10.3px;font-family:var(--mono);letter-spacing:.01em;
+}
+.badge.deleting{background:var(--danger-bg);color:var(--danger)}
+.badge.formatting{background:var(--warn-bg);color:var(--warn)}
+.badge.creating{background:var(--accent-bg);color:var(--accent2)}
+.badge.ok{background:var(--ok-bg);color:var(--ok)}
+.emptyrow td{height:60px;text-align:center;color:var(--faint);font-size:11.5px}
+
+/* ---- 右：队列 + 日志 ---- */
+.queue{flex:1;overflow:auto;min-height:90px}
+.qempty{padding:20px 14px;color:var(--faint);font-size:11.5px;line-height:1.7}
+.qempty b{display:block;color:var(--muted);font-size:12px;margin-bottom:3px;font-weight:600}
+.qitem{display:flex;gap:7px;padding:5px 8px;border-bottom:1px solid #F0F4F8;position:relative}
+.qitem:hover{background:#F7FAFD}
+.qitem .qi{
+  width:15px;flex:none;font-family:var(--mono);font-size:10px;color:var(--faint);text-align:right;padding-top:1px;
+}
+.qitem .qbody{flex:1;min-width:0}
+.qitem .qt{font-size:12px;display:flex;align-items:center;gap:5px}
+.qitem .qt em{font-style:normal;font-weight:600}
+.qitem .qt .k{font-size:10.5px;font-family:var(--mono);padding:0 4px;border-radius:2px;height:15px;line-height:15px}
+.k.del{background:var(--danger-bg);color:var(--danger)}
+.k.fmt{background:var(--warn-bg);color:var(--warn)}
+.k.new{background:var(--accent-bg);color:var(--accent2)}
+.qitem .qm{font-size:10.8px;color:var(--muted);margin-top:1px;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qx{
+  width:18px;height:18px;flex:none;border-radius:2px;color:var(--faint);font-size:13px;line-height:1;
+  display:flex;align-items:center;justify-content:center;align-self:flex-start;
+}
+.qx:hover{background:var(--danger-bg);color:var(--danger)}
+.qfoot{flex:none;display:flex;gap:5px;padding:7px 8px;border-top:1px solid var(--line);background:var(--panel2)}
+.qfoot .tbtn{flex:1;justify-content:center;height:25px}
+.qfoot .tbtn.block{flex:1}
+.log{flex:none;height:148px;overflow:auto;background:#FBFDFE;border-top:1px solid var(--line2);padding:4px 0}
+.log div{
+  display:flex;gap:6px;padding:0 8px;font-family:var(--mono);font-size:10.8px;line-height:1.62;color:var(--ink2);
+}
+.log .t{color:#A6B3C0;flex:none}
+.log div.hl{color:var(--accent2)}
+.log div.wn{color:var(--warn)}
+.log div.er{color:var(--danger)}
+.log div.ok{color:var(--ok)}
+
+/* ---- 底部日志 ---- */
+.logdock{flex:none;display:flex;flex-direction:column;border-top:1px solid var(--line);background:var(--panel)}
+.logdock .ph{background:var(--chrome)}
+.logdock .ph .lnk{margin-left:10px;height:16px}
+.logdock .log{height:106px;border-top:none;background:#FBFDFE}
+.logdock .log:empty::after{
+  content:"暂无日志";display:block;padding:2px 10px;color:var(--faint);font-family:var(--mono);font-size:10.8px;
+}
+.app.in-wizard .logdock{display:none}
+
+/* ---- 状态栏 ---- */
+.statusbar{
+  height:22px;flex:none;display:flex;align-items:center;gap:12px;padding:0 9px;
+  background:var(--chrome);border-top:1px solid var(--line);font-size:11px;color:var(--muted);
+}
+.statusbar .sb{display:flex;align-items:center;gap:5px}
+.statusbar .sb .mono{color:var(--ink2)}
+.sb-sep{width:1px;height:11px;background:var(--line)}
+
+.flag.ok{border-color:#A8C9B9;background:var(--ok-bg);color:var(--ok)}
+
+/* ---- 安装向导 ---- */
+.tbtn.install{background:linear-gradient(#F7FBF9,#EAF4EE);border-color:#A8C9B9;color:#0B6E4F;font-weight:600}
+.tbtn.install:hover:not(:disabled){background:linear-gradient(#F1FAF5,#DDEDE5);border-color:#8FBFA9}
+
+/* 顶部视图切换：主页面 / 系统安装 */
+.navseg{
+  display:inline-flex;flex:none;height:24px;border:1px solid var(--line);border-radius:4px;
+  overflow:hidden;background:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,.7);
+}
+.navseg button{
+  height:22px;padding:0 13px;font-size:12px;color:var(--muted);
+  display:inline-flex;align-items:center;gap:6px;white-space:nowrap;
+}
+.navseg button + button{border-left:1px solid var(--line2)}
+.navseg button:hover:not(.on){background:#EEF4FB;color:var(--ink2)}
+.navseg button.on{background:var(--accent-bg);color:var(--accent2);font-weight:600;box-shadow:inset 0 -2px 0 var(--accent)}
+.navseg .dot{width:5px;height:5px;flex:none;border-radius:50%;background:var(--accent2)}
+
+.wizard{display:none;grid-column:1/-1;flex-direction:column;min-height:0;min-width:0;background:var(--panel)}
+.workspace.wizard-mode > .pane{display:none}
+.workspace.wizard-mode > .wizard{display:flex}
+
+/* ---- 设置页 ---- */
+.settings{display:none;grid-column:1/-1;flex-direction:column;min-height:0;background:var(--panel)}
+.workspace.view-settings > .pane{display:none}
+.workspace.view-settings > .settings{display:flex}
+.set-head{
+  flex:none;display:flex;align-items:center;gap:10px;padding:9px 16px;
+  border-bottom:1px solid var(--line);background:#FBFCFE;
+}
+.set-title{font-size:13.5px;font-weight:600}
+.set-sub{font-size:11.5px;color:var(--muted)}
+.set-state{font-size:11px;color:var(--warn)}
+.set-body{flex:1;min-height:0;overflow:auto;padding:16px 16px 44px}
+.set-sec{max-width:740px;margin:0 auto 20px}
+.set-sec > h4{
+  margin:0 0 7px;font-size:10.5px;font-weight:600;letter-spacing:.08em;
+  color:var(--muted);text-transform:uppercase;
+}
+.set-card{border:1px solid var(--line);border-radius:4px;background:#fff;overflow:hidden}
+.set-row{display:flex;align-items:center;gap:16px;padding:11px 14px;border-bottom:1px solid #F0F4F8}
+.set-row:last-child{border-bottom:none}
+.set-l{min-width:0;flex:1}
+.set-t{font-size:12.5px;color:var(--ink)}
+.set-d{font-size:11.2px;color:var(--muted);line-height:1.55;margin-top:2px}
+.set-c{flex:none;display:flex;align-items:center;gap:7px}
+
+.switch{position:relative;display:inline-block;width:34px;height:19px;flex:none}
+.switch input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer}
+.switch .sl{position:absolute;inset:0;border-radius:19px;background:#C9D5E2;transition:background .14s}
+.switch .sl::after{
+  content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;
+  background:#fff;box-shadow:0 1px 2px rgba(16,30,48,.25);transition:transform .14s;
+}
+.switch input:checked + .sl{background:var(--accent)}
+.switch input:checked + .sl::after{transform:translateX(15px)}
+.switch input:focus-visible + .sl{outline:2px solid var(--accent);outline-offset:2px}
+
+.sel{
+  height:26px;min-width:140px;padding:0 6px;border:1px solid var(--line2);border-radius:3px;
+  background:#fff;font:inherit;font-size:12px;color:var(--ink);cursor:pointer;
+}
+.numin{
+  width:76px;height:26px;padding:0 7px;border:1px solid var(--line2);border-radius:3px;
+  background:#fff;font:inherit;font-family:var(--mono);font-size:12px;color:var(--ink);text-align:right;
+}
+.numin:focus,.sel:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-bg)}
+.chips{display:inline-flex;border:1px solid var(--line2);border-radius:3px;overflow:hidden;background:#fff}
+.chips .chip{height:26px;padding:0 11px;font-size:12px;color:var(--muted);border:none;border-radius:0;background:transparent}
+.chips .chip + .chip{border-left:1px solid var(--line2)}
+.chips .chip:hover:not(.on){background:#F2F7FD;color:var(--ink2)}
+.chips .chip.on{background:var(--accent-bg);color:var(--accent2);font-weight:600}
+.set-mono{
+  font-family:var(--mono);font-size:11px;color:var(--ink2);
+  background:#F4F7FA;border:1px solid var(--line);border-radius:3px;padding:3px 7px;
+}
+.path-row{align-items:flex-start}
+.ext-off{opacity:.45;pointer-events:none;filter:grayscale(1)}
+.path-row .set-c{flex-direction:column;align-items:stretch;gap:6px;padding-top:2px}
+.path-row .set-c .tbtn{height:23px;font-size:11.5px;padding:0 10px;justify-content:center}
+.pathbox{
+  display:flex;align-items:center;gap:7px;margin-top:7px;padding:5px 8px;
+  background:#F7FAFD;border:1px solid var(--line);border-radius:3px;
+  font-family:var(--mono);font-size:11px;color:var(--ink2);max-width:520px;
+}
+.pathbox .p{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pathbox .pemon{color:var(--faint);font-family:var(--ui);font-style:normal}
+.pico{flex:none;width:13px;height:13px;border-radius:2px;background:var(--accent2);opacity:.8}
+.pico.folder{background:#D9A93A;border-radius:1px 3px 3px 3px}
+.pstate{
+  flex:none;font-family:var(--ui);font-size:10.5px;line-height:1;padding:3px 6px;border-radius:2px;
+  background:#EEF1F4;color:var(--muted);
+}
+.pstate.ok{background:var(--ok-bg);color:var(--ok)}
+.pstate.miss{background:var(--danger-bg);color:var(--danger)}
+.pstate.na{background:#F2F5F8;color:var(--faint)}
+.tag{
+  display:inline-block;margin-left:6px;vertical-align:1px;font-size:10px;font-weight:500;
+  color:var(--accent2);background:var(--accent-bg);border-radius:2px;padding:1px 5px;
+}
+
+/* ---- 模拟文件选择器 ---- */
+.modal.picker{width:600px}
+.picker .mb{padding:0;display:flex;gap:0;overflow:hidden;min-height:300px}
+.pc-side{width:138px;flex:none;border-right:1px solid var(--line);background:#F8FAFC;padding:7px 0}
+.pc-drive{display:flex;align-items:center;gap:8px;padding:6px 12px;font-size:12px;color:var(--ink2);cursor:pointer}
+.pc-drive:hover{background:#EEF4FB}
+.pc-drive.on{background:var(--accent-bg);color:var(--accent2);font-weight:600}
+.pc-main{flex:1;min-width:0;display:flex;flex-direction:column}
+.pc-crumb{
+  flex:none;display:flex;align-items:center;gap:6px;padding:7px 12px;background:#FBFCFE;
+  border-bottom:1px solid var(--line);font-family:var(--mono);font-size:11.5px;color:var(--ink2);
+  white-space:nowrap;overflow:hidden;
+}
+.pc-list{flex:1;min-height:210px;max-height:262px;overflow:auto;padding:5px 0}
+.pc-item{display:flex;align-items:center;gap:8px;padding:6px 12px;font-size:12px;color:var(--ink2);cursor:pointer}
+.pc-item:hover{background:#EEF4FB}
+.pc-item.sel{background:var(--accent-bg);color:var(--accent2);font-weight:600}
+.pc-item .ss{flex:none;width:13px;height:13px;border-radius:2px;background:var(--faint);opacity:.8}
+.pc-item.dir .ss{background:#D9A93A;border-radius:1px 3px 3px 3px}
+.pc-item .sz{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+.pc-foot{
+  flex:none;display:flex;align-items:center;gap:8px;padding:8px 12px;
+  border-top:1px solid var(--line);background:var(--panel2);
+}
+.pc-input{
+  flex:1;min-width:0;height:26px;padding:0 8px;border:1px solid var(--line2);border-radius:3px;
+  background:#fff;font:inherit;font-family:var(--mono);font-size:11.5px;color:var(--ink);
+}
+.pc-foot .tbtn{height:26px;padding:0 14px}
+.wz-head{flex:none;display:flex;align-items:center;gap:8px;padding:7px 14px;border-bottom:1px solid var(--line);background:#FBFCFE}
+.wz-title{font-size:13.5px;font-weight:600}
+.wz-sub{font-weight:400;color:var(--muted);font-size:11.5px;margin-left:4px}
+.wz-head .tbtn{margin-left:auto;height:23px}
+.wz-actions{margin-left:auto;display:flex;align-items:center;gap:12px}
+.wz-actions .tbtn{margin-left:0}
+.wz-actions .lnk{white-space:nowrap}
+
+.stepper{flex:none;display:flex;align-items:center;list-style:none;margin:0;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel2)}
+.stepper li{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--faint);flex:1;min-width:0}
+.stepper li::after{content:"";flex:1;height:1px;background:var(--line);margin:0 12px}
+.stepper li:last-child{flex:0 0 auto}
+.stepper li:last-child::after{display:none}
+.stepper .sn{
+  width:20px;height:20px;flex:none;border-radius:50%;border:1px solid #C6D2DF;background:#fff;
+  display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:10.5px;color:var(--faint);
+}
+.stepper .st{white-space:nowrap}
+.stepper li.on{color:var(--accent2);font-weight:600}
+.stepper li.on .sn{background:var(--accent);border-color:var(--accent2);color:#fff}
+.stepper li.done{color:var(--ink2)}
+.stepper li.done .sn{background:var(--ok);border-color:var(--ok);color:#fff}
+
+.wz-body{flex:1;min-height:0;overflow:auto;padding:16px 20px 22px}
+.wz-inner{max-width:780px}
+.wz-h{font-size:13.5px;font-weight:600;margin:0 0 4px}
+.wz-p{font-size:12px;color:var(--muted);margin:0 0 14px;line-height:1.65;max-width:680px}
+
+/* 步骤 1：选盘 */
+.dsel{
+  display:flex;gap:11px;align-items:center;width:100%;text-align:left;
+  border:1px solid var(--line);border-radius:3px;background:#fff;padding:9px 11px;margin-bottom:7px;cursor:pointer;
+}
+.dsel:hover{border-color:#AFC4DE;background:#FAFCFF}
+.dsel.on{border-color:var(--accent);background:#F5F9FF;box-shadow:0 0 0 1px var(--accent-bg),2px 0 0 var(--accent) inset}
+.dsel.off{opacity:.6;cursor:not-allowed}
+.dsel.off:hover{border-color:var(--line);background:#fff}
+.radio{width:14px;height:14px;flex:none;border-radius:50%;border:1px solid #B9C6D5;background:#fff}
+.dsel.on .radio{border:4px solid var(--accent)}
+.dmain{flex:1;min-width:0}
+.dt{font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:6px}
+.dm{display:block;font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dbar{height:6px;display:flex;border-radius:2px;overflow:hidden;margin-top:6px;background:#EEF2F7}
+.dright{flex:none;text-align:right;font-size:10.8px;color:var(--faint);max-width:170px;line-height:1.5}
+.dright b{display:block;font-family:var(--mono);font-size:11.5px;color:var(--ink2);font-weight:600}
+.tag{height:16px;line-height:16px;padding:0 5px;border-radius:2px;font-size:10px;font-family:var(--mono);font-weight:400;background:var(--ok-bg);color:var(--ok)}
+.tag.no{background:#EEF2F7;color:var(--muted)}
+
+/* 步骤 2：分区大小 */
+.szrow{
+  display:grid;grid-template-columns:186px 100px 26px minmax(0,1fr);align-items:center;gap:8px;
+  padding:8px 10px;border:1px solid var(--line);border-radius:3px;background:#fff;margin-bottom:7px;
+}
+.szname{font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:6px}
+.szrow input{
+  width:100px;height:27px;padding:0 8px;border:1px solid var(--line);border-radius:2px;background:#fff;
+  font-family:var(--mono);font-size:13px;outline:none;
+}
+.szrow input:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-bg)}
+.szrow input.bad{border-color:var(--danger);box-shadow:0 0 0 2px var(--danger-bg)}
+.unit{font-size:11.5px;color:var(--muted)}
+.szsub{font-size:11px;color:var(--faint)}
+.wzbar{
+  position:relative;display:flex;height:32px;margin:13px 0 7px;
+  border:1px solid #B9C6D4;border-radius:2px;overflow:hidden;background:#F2F6FA;
+  cursor:col-resize;user-select:none;touch-action:none;
+}
+.wzbar:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.wseg{
+  display:flex;align-items:center;justify-content:center;flex:none;overflow:hidden;
+  color:#fff;font-size:10.8px;font-family:var(--mono);white-space:nowrap;
+  transition:width .06s linear;
+}
+.wzbar.drag .wseg{transition:none}
+.wseg span{padding:0 6px;overflow:hidden;text-overflow:ellipsis}
+.wseg.sys{background:#2F6FDC}
+.wseg.dat{background:#3E8E5A}
+.wseg.free{
+  background:repeating-linear-gradient(45deg,#E9EFF6 0,#E9EFF6 4px,#DCE5EF 4px,#DCE5EF 8px);
+  color:#63758A;
+}
+.wgrip{
+  position:absolute;top:0;bottom:0;width:2px;background:rgba(255,255,255,.85);pointer-events:none;
+}
+.wgrip::after{
+  content:"";position:absolute;top:50%;left:50%;width:16px;height:24px;transform:translate(-50%,-50%);
+  border-radius:3px;border:1px solid #AEBECE;box-shadow:0 1px 3px rgba(10,20,35,.2);
+  background-color:#fff;
+  background-image:radial-gradient(#B7C5D4 1px,transparent 1px);
+  background-size:4px 4px;background-position:center;
+}
+.wzbar:hover .wgrip::after{border-color:var(--accent)}
+.wzbar.drag .wgrip::after{border-color:var(--accent2);background-color:var(--accent-bg)}
+.wzrest{display:flex;align-items:center;gap:9px;font-size:11.5px;color:var(--muted);flex-wrap:wrap}
+.wzrest b{font-family:var(--mono);color:var(--ink2);font-weight:600}
+.presets{display:flex;gap:5px;margin-top:12px}
+.presets button{height:22px;padding:0 9px;border:1px solid var(--line);border-radius:2px;background:#fff;font-size:11.5px;color:var(--ink2)}
+.presets button:hover{border-color:var(--accent);color:var(--accent2);background:var(--accent-bg)}
+
+/* 步骤 3：版本 */
+.vcards{display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:720px}
+.vcard{border:1px solid var(--line);border-radius:3px;background:#fff;padding:11px 12px;text-align:left;cursor:pointer}
+.vcard:hover{border-color:#AFC4DE}
+.vcard.on{border-color:var(--accent);background:#F5F9FF;box-shadow:0 0 0 1px var(--accent-bg)}
+.vt{font-size:13px;font-weight:600;display:flex;align-items:baseline;gap:7px}
+.vt .vb{font-size:11px;color:var(--muted);font-family:var(--mono);font-weight:400}
+.vn{display:block;font-size:11.5px;color:var(--ink2);margin-top:7px;line-height:1.6}
+.vcard ul{margin:8px 0 0;padding:0;list-style:none;display:flex;flex-wrap:wrap;gap:4px}
+.vcard li{border:1px solid var(--line2);background:var(--panel2);border-radius:2px;padding:0 5px;height:17px;line-height:15px;font-family:var(--mono);font-size:10px;color:var(--faint)}
+
+/* 步骤 4：确认 */
+.sum{border:1px solid var(--line);border-radius:3px;overflow:hidden;max-width:780px}
+.sum table{width:100%;border-collapse:collapse;font-size:12px}
+.sum th{background:var(--chrome);height:22px;padding:0 10px;text-align:left;font-size:10.5px;letter-spacing:.04em;color:var(--muted);font-weight:600;border-bottom:1px solid var(--line)}
+.sum td{height:27px;padding:0 10px;border-bottom:1px solid #F0F4F8}
+.sum tr:last-child td{border-bottom:none}
+.sum td.k{width:96px;color:var(--muted)}
+.sum td.v{font-weight:600}
+.checkrow{display:flex;align-items:flex-start;gap:8px;margin-top:13px;font-size:12px;color:var(--ink2);line-height:1.6;cursor:pointer}
+.checkrow input{margin-top:3px;width:14px;height:14px;accent-color:var(--accent)}
+.wz-startrow{display:flex;align-items:center;gap:12px;margin-top:18px}
+.startbtn{height:34px;padding:0 28px;font-size:13.5px;border-radius:3px}
+.startbtn:disabled{background:#CBD8E7;border-color:#BCCBDD;color:#fff;opacity:.85;box-shadow:none}
+.wz-startnote{font-size:11.5px;color:var(--faint)}
+
+/* 步骤 4：危险操作提示 */
+.dangeralert{
+  display:flex;gap:12px;margin-top:14px;padding:14px 16px;max-width:780px;
+  border:1px solid #E0A9A2;border-radius:4px;
+  background:linear-gradient(#FDF3F1,#FBE5E1);
+  box-shadow:inset 0 1px 0 #fff,0 1px 3px rgba(173,36,28,.08);
+}
+.da-ico{
+  flex:none;width:24px;height:24px;margin-top:1px;border-radius:50%;background:var(--danger);color:#fff;
+  font-size:15px;font-weight:700;line-height:24px;text-align:center;
+  box-shadow:0 1px 2px rgba(140,26,20,.35);
+}
+.da-body{min-width:0;flex:1}
+.da-t{font-size:14px;font-weight:700;color:#8E1C15;line-height:1.5}
+.da-t em{
+  font-style:normal;color:var(--danger);
+  text-decoration:underline;text-decoration-thickness:1.5px;text-underline-offset:2px;
+}
+.da-s{margin-top:5px;font-size:12px;line-height:1.75;color:#94443C}
+.da-s strong{color:#7E241D;font-weight:700}
+.da-list{
+  margin:9px 0 0;padding:8px 11px;list-style:none;border-radius:3px;
+  border:1px dashed #DFB2AC;background:rgba(255,255,255,.62);
+  font-size:11.5px;line-height:1.8;color:#7C4139;
+}
+.da-list li+li{border-top:1px solid #F0DEDB;margin-top:3px;padding-top:3px}
+.da-list b{color:#6E211B}
+.da-lost{display:block;color:#9A5F57;font-family:var(--mono);font-size:11px;margin-top:1px;word-break:break-all}
+.ackbar{
+  display:flex;align-items:flex-start;gap:9px;margin-top:12px;padding:11px 13px;max-width:780px;
+  border:1.5px solid #D9E2EC;border-radius:4px;background:#fff;cursor:pointer;
+  font-size:12.2px;line-height:1.6;color:var(--ink2);
+  transition:border-color .12s,background .12s;
+}
+.ackbar:hover{border-color:#BCCBDD}
+.ackbar input{flex:none;margin-top:2px;width:16px;height:16px;accent-color:var(--danger);cursor:pointer}
+.ackbar.on{border-color:#A8C9B9;background:var(--ok-bg)}
+.ackbar strong{color:#7E241D}
+.tbtn.danger{background:linear-gradient(#C93B30,#AE241C);border-color:#96201A;color:#fff;font-weight:600}
+.tbtn.danger:hover:not(:disabled){background:linear-gradient(#D0453A,#B8281F);border-color:#8F1D16}
+.tbtn.danger:active:not(:disabled){background:linear-gradient(#B42A22,#9A1F19)}
+.tbtn.danger:disabled{background:#E4C9C5;border-color:#D7B6B1;color:#fff;opacity:.9;box-shadow:none}
+
+/* 多选：选择条 + 方形勾选框 */
+.selbar{display:flex;align-items:center;gap:10px;margin-bottom:9px;font-size:11.5px;color:var(--muted);flex-wrap:wrap}
+.selbar b{font-family:var(--mono);color:var(--ink2)}
+.lnk{color:var(--accent);font-size:11.5px;line-height:16px;border:0;border-bottom:1px dashed rgba(27,95,193,.45);background:none;padding:0;cursor:pointer}
+.lnk:hover{color:var(--accent2);border-bottom-color:var(--accent2)}
+.cb{width:14px;height:14px;flex:none;border-radius:2px;border:1px solid #B9C6D5;background:#fff;position:relative;transition:all .1s}
+.dsel.on .cb{background:var(--accent);border-color:var(--accent2)}
+.dsel.on .cb::after{content:"";position:absolute;left:4px;top:0;width:4px;height:8px;border-right:2px solid #fff;border-bottom:2px solid #fff;transform:rotate(42deg)}
+
+/* 每块盘一张配置卡 */
+.tgt{border:1px solid var(--line);border-radius:3px;background:#fff;margin-bottom:9px;overflow:hidden}
+.tgt-h{display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--panel2);border-bottom:1px solid var(--line2);font-size:12px}
+.tgt-h .tn{font-weight:600}
+.tgt-h .tm{color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tgt-h .trest{margin-left:auto;font-size:11px;color:var(--muted);white-space:nowrap}
+.tgt-h .trest b{font-family:var(--mono);color:var(--ink2)}
+.tgt .szrow{margin:9px 10px 0;border:none;background:transparent;border-radius:0;grid-template-columns:172px 96px 26px minmax(0,1fr)}
+.tgt .szrow + .szrow{margin-top:5px}
+.tgt .wzbar{margin:9px 10px 0}
+.tgt-f{display:flex;align-items:center;gap:8px;padding:6px 10px 9px;min-height:18px}
+.tgt-f .presets{margin:0 0 0 auto}
+
+/* 每块盘一行版本选择 */
+.vrow{display:flex;align-items:center;gap:12px;padding:7px 10px;border:1px solid var(--line);border-radius:3px;background:#fff;margin-bottom:7px}
+.vrow-n{font-size:12.5px;font-weight:600;width:76px;flex:none}
+.vrow-s{font-size:11px;color:var(--muted);font-family:var(--mono);width:150px;flex:none}
+.vchips{display:flex;gap:6px;margin-left:auto}
+.vchip{height:26px;padding:0 12px;border:1px solid var(--line);border-radius:3px;background:#fff;font-size:12px;color:var(--ink2);display:inline-flex;align-items:center;gap:6px;transition:all .1s}
+.vchip em{font-style:normal;font-family:var(--mono);font-size:10px;color:var(--faint)}
+.vchip:hover{border-color:#AFC4DE}
+.vchip.on{border-color:var(--accent);background:var(--accent-bg);color:var(--accent2);font-weight:600}
+.vchip.on em{color:var(--accent)}
+.dim{color:var(--muted);font-weight:400}
+
+.wz-foot{flex:none;display:flex;align-items:center;gap:6px;padding:9px 14px;border-top:1px solid var(--line);background:var(--panel2)}
+.wz-foot .tbtn{height:27px;padding:0 16px}
+.wz-hint{font-size:11.5px;color:var(--muted)}
+.wz-hint.warn{color:var(--danger)}
+.wp{max-width:660px;padding-top:2px}
+
+/* ---- 弹窗 ---- */
+.overlay{
+  position:fixed;inset:0;background:rgba(12,22,34,.42);z-index:60;
+  display:none;align-items:center;justify-content:center;padding:24px;
+}
+.overlay.on{display:flex}
+.modal{
+  width:540px;max-width:100%;max-height:88vh;display:flex;flex-direction:column;
+  background:#fff;border:1px solid #B7C4D3;border-radius:3px;
+  box-shadow:0 18px 48px rgba(10,20,35,.3);
+}
+.modal.wide{width:600px}
+.mh{
+  height:31px;flex:none;display:flex;align-items:center;gap:8px;padding:0 10px;
+  background:linear-gradient(#FBFCFE,#EEF3F8);border-bottom:1px solid var(--line);
+  font-size:12.5px;font-weight:600;
+}
+.mh .x{margin-left:auto;width:20px;height:20px;display:flex;align-items:center;justify-content:center;border-radius:2px;font-size:14px;color:var(--muted)}
+.mh .x:hover{background:var(--danger-bg);color:var(--danger)}
+.mb{padding:12px 14px;overflow:auto;font-size:12.2px}
+.mf{
+  flex:none;display:flex;justify-content:flex-end;gap:6px;padding:9px 12px;
+  border-top:1px solid var(--line);background:var(--panel2);
+}
+.mf .tbtn{height:26px;padding:0 14px}
+.opsum{border:1px solid var(--line);border-radius:2px;margin:0 0 10px;overflow:hidden}
+.opsum table{width:100%;border-collapse:collapse;font-size:11.8px}
+.opsum th{
+  height:21px;padding:0 8px;text-align:left;background:var(--chrome);font-size:10.5px;font-weight:600;
+  color:var(--muted);letter-spacing:.04em;border-bottom:1px solid var(--line);
+}
+.opsum td{height:21px;padding:0 8px;border-bottom:1px solid #F0F4F8}
+.opsum tr:last-child td{border-bottom:none}
+.opsum td.num{font-family:var(--mono);text-align:right}
+.warnbox{
+  display:flex;gap:8px;padding:8px 10px;border:1px solid #E6C9A0;background:var(--warn-bg);
+  border-radius:2px;font-size:11.8px;color:#6E4405;line-height:1.6;margin-bottom:10px;
+}
+.warnbox .wi{
+  width:15px;height:15px;flex:none;border-radius:50%;background:var(--warn);color:#fff;
+  display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;margin-top:1px;
+}
+.fieldrow{display:flex;align-items:center;gap:8px;margin-top:8px}
+.fieldrow label{font-size:11.8px;color:var(--ink2)}
+.code{
+  font-family:var(--mono);font-size:12.5px;font-weight:700;letter-spacing:.06em;
+  padding:1px 6px;border-radius:2px;background:var(--chrome);border:1px solid var(--line);
+}
+input.confirm{
+  width:180px;height:26px;padding:0 8px;border:1px solid var(--line);border-radius:2px;
+  font-family:var(--mono);font-size:12.5px;outline:none;background:#fff;
+}
+input.confirm:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-bg)}
+input.confirm.bad{border-color:var(--danger);box-shadow:0 0 0 2px var(--danger-bg)}
+.hint{font-size:11px;color:var(--faint);margin-left:auto}
+.errmsg{font-size:11px;color:var(--danger);height:14px}
+
+/* 进度 */
+.prog{padding:14px 16px}
+.prog .prow{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.prog .pname{font-size:12.5px;font-weight:600}
+.prog .peta{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--muted)}
+.track{height:8px;border:1px solid #C3D0DE;background:#EEF3F8;border-radius:2px;overflow:hidden}
+.track i{display:block;height:100%;width:0;background:linear-gradient(90deg,#2C72D6,#1B5FC1);transition:width .3s ease}
+.stages{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:4px}
+.stages li{display:flex;align-items:center;gap:7px;font-size:11.8px;color:var(--faint)}
+.stages li .sk{
+  width:13px;height:13px;flex:none;border-radius:50%;border:1px solid #C8D4E1;
+  display:flex;align-items:center;justify-content:center;font-size:9px;font-family:var(--mono);
+}
+.stages li.on{color:var(--ink)}
+.stages li.on .sk{border-color:var(--accent);color:var(--accent);font-weight:700}
+.stages li.done{color:var(--ink2)}
+.stages li.done .sk{background:var(--ok);border-color:var(--ok);color:#fff}
+.stages li .stt{margin-left:auto;font-size:10.5px;font-family:var(--mono)}
+.plog{
+  margin-top:10px;height:118px;overflow:auto;background:#F8FBFE;border:1px solid var(--line2);
+  border-radius:2px;padding:4px 0;font-family:var(--mono);font-size:10.8px;line-height:1.6;color:var(--ink2);
+}
+.plog div{display:flex;gap:6px;padding:0 8px}
+.plog .t{color:#A6B3C0}
+.plog .hl{color:var(--accent2)}
+.plog .wn{color:var(--warn)}
+
+/* toast */
+.toasts{position:fixed;right:14px;bottom:34px;z-index:80;display:flex;flex-direction:column;gap:6px;align-items:flex-end}
+.toast{
+  padding:7px 11px;border-radius:3px;background:#1D2C3B;color:#fff;font-size:11.8px;
+  box-shadow:0 6px 18px rgba(10,20,35,.28);animation:tin .18s ease;
+}
+@keyframes tin{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <div class="titlebar">
+    <span class="logo"></span>
+    <span class="brand">硬盘工具箱 <span class="ver">1.0 · 界面原型</span></span>
+    <div class="tb-right">
+      <span class="chip"><i></i><span id="chipDisks">4 块磁盘</span></span>
+      <span class="chip"><i></i><span id="chipParts">10 个分区</span></span>
+    </div>
+  </div>
+
+  <div class="menubar" id="menubar">
+    <div class="menu" data-menu="ops">操作
+      <div class="dropdown">
+        <div class="dd-item" data-act="install">安装系统…</div>
+        <div class="dd-sep"></div>
+        <div class="dd-item" data-act="check">检查磁盘</div>
+        <div class="dd-sep"></div>
+        <div class="dd-item" data-act="settings">设置…<span class="k">Ctrl+,</span></div>
+      </div>
+    </div>
+    <div class="menu" data-menu="help">帮助
+      <div class="dropdown">
+        <div class="dd-item" data-act="about">关于这个原型</div>
+        <div class="dd-item" data-act="keys">快捷键</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <div class="navseg" id="navseg">
+      <button class="on" data-nav="main">主页面</button>
+      <button data-nav="install">系统安装</button>
+      <button data-nav="settings">设置</button>
+    </div>
+    <span class="divider"></span>
+    <button class="tbtn" id="tbRefresh">刷新磁盘</button>
+    <span class="spacer"></span>
+    <span class="tb-hint">只读查看 · 改动磁盘请用「系统安装」</span>
+  </div>
+
+  <div class="workspace" id="workspace">
+    <aside class="pane left">
+      <div class="ph">磁盘与分区 <span class="r" id="treeHint"></span></div>
+      <div class="tree" id="tree"></div>
+    </aside>
+
+    <section class="pane center">
+      <div class="overview" id="overview"></div>
+      <div class="head" id="diskHead"></div>
+      <div class="mapwrap">
+        <div class="maphead">
+          <span class="maptitle">分区布局</span>
+        </div>
+        <div id="map"></div>
+        <div class="legend" id="legend"></div>
+      </div>
+      <div class="tablewrap">
+        <table class="grid" id="grid">
+          <thead><tr>
+            <th style="width:74px">分区</th>
+            <th>卷标</th>
+            <th style="width:84px">文件系统</th>
+            <th style="width:100px;text-align:right">容量</th>
+            <th style="width:88px">类型</th>
+          </tr></thead>
+          <tbody id="gridBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="wizard" id="wizard">
+      <div class="wz-head">
+        <span class="wz-title">安装系统</span>
+        <span class="wz-sub">四步完成 · 点左上角「主页面」随时回去看盘，进度不会丢</span>
+        <span class="wz-actions">
+          <button class="lnk" id="wzReset">重新开始</button>
+          <button class="tbtn" id="wzExit">返回主页面</button>
+        </span>
+      </div>
+      <ol class="stepper" id="stepper">
+        <li data-step="1"><span class="sn">1</span><span class="st">选择硬盘</span></li>
+        <li data-step="2"><span class="sn">2</span><span class="st">分区与格式化</span></li>
+        <li data-step="3"><span class="sn">3</span><span class="st">系统版本</span></li>
+        <li data-step="4"><span class="sn">4</span><span class="st">确认并开始</span></li>
+      </ol>
+      <div class="wz-body" id="wzBody"></div>
+      <div class="wz-foot">
+        <span class="wz-hint" id="wzHint"></span>
+        <span class="spacer"></span>
+        <button class="tbtn" id="wzBack">上一步</button>
+        <button class="tbtn primary" id="wzNext">下一步</button>
+      </div>
+    </section>
+
+    <section class="settings" id="settings">
+      <div class="set-head">
+        <span class="set-title">设置</span>
+        <span class="set-sub">影响安装向导、外部程序调用和磁盘检查的默认行为</span>
+        <span class="spacer"></span>
+        <span class="set-state" id="setState"></span>
+        <button class="lnk" id="setDefaults">恢复默认</button>
+        <button class="tbtn primary" id="setSave" disabled>保存设置</button>
+      </div>
+      <div class="set-body" id="settingsBody"></div>
+    </section>
+  </div>
+
+  <div class="logdock" id="logDock">
+    <div class="ph">日志<span class="r">本次会话</span><button class="lnk" id="logClear" title="清空日志">清空</button></div>
+    <div class="log" id="logBody"></div>
+  </div>
+
+  <div class="statusbar">
+    <span class="sb" id="sbLeft">就绪</span>
+    <span class="sb-sep"></span>
+    <span class="sb" id="sbMid"></span>
+  </div>
+</div>
+
+<div class="overlay" id="overlay"></div>
+<div class="toasts" id="toasts"></div>
+
+<script>
+/* =========================================================
+   数据
+   ========================================================= */
+const FS_NAME = { NTFS:'NTFS', exFAT:'exFAT', ESP:'EFI', REC:'恢复', FREE:'未分配' };
+const FS_COLOR = { NTFS:'#2F6FDC', exFAT:'#C0841C', ESP:'#7A5BC7', REC:'#6E8496', FREE:'#C6D2DF' };
+
+const disks = [
+  { id:0, model:'Samsung SSD 970 EVO 500GB', bus:'NVMe', total:476.9, table:'GPT', system:true, readonly:false,
+    parts:[
+      { id:'p1', letter:'', label:'EFI 系统分区', fs:'ESP',  size:0.1,   type:'主分区' },
+      { id:'p2', letter:'C:', label:'系统',       fs:'NTFS', size:475.8, type:'主分区', system:true },
+      { id:'p3', letter:'', label:'恢复',         fs:'REC',  size:1.0,   type:'恢复分区' }
+    ]},
+  { id:1, model:'WDC WD10EZEX-00RKKA0', bus:'SATA', total:1000.2, table:'MBR', system:false, readonly:false,
+    parts:[
+      { id:'p4', letter:'E:', label:'工作资料', fs:'NTFS',  size:400,   type:'主分区' },
+      { id:'p5', letter:'F:', label:'素材库',   fs:'exFAT', size:300,   type:'主分区' },
+      { id:'p6', letter:'',   label:'',         fs:'FREE',  size:300.2, type:'未分配' }
+    ]},
+  { id:2, model:'SanDisk Ultra USB 3.0', bus:'USB', total:28.9, table:'MBR', system:false, readonly:true,
+    parts:[
+      { id:'p7', letter:'G:', label:'KINGSTON', fs:'exFAT', size:28.9, type:'主分区' }
+    ]},
+  { id:3, model:'ST2000DM008-2FR102', bus:'SATA', total:2000.3, table:'GPT', system:false, readonly:false,
+    parts:[
+      { id:'p8',  letter:'',  label:'EFI 引导', fs:'ESP',  size:0.5,    type:'主分区' },
+      { id:'p9',  letter:'D:', label:'旧系统',  fs:'NTFS', size:222,    type:'主分区' },
+      { id:'p10', letter:'',  label:'数据',     fs:'NTFS', size:1777.8, type:'主分区' }
+    ]},
+  { id:4, model:'KINGSTON SA400S37480G', bus:'SATA', total:447.1, table:'MBR', system:false, readonly:false,
+    parts:[
+      { id:'p11', letter:'H:', label:'文档', fs:'NTFS', size:247.1, type:'主分区' },
+      { id:'p12', letter:'',   label:'',     fs:'FREE', size:200,   type:'未分配' }
+    ]},
+  { id:5, model:'Seagate Expansion 4TB', bus:'USB', total:3726.0, table:'GPT', system:false, readonly:false,
+    parts:[
+      { id:'p13', letter:'I:', label:'备份盘', fs:'exFAT', size:3726, type:'主分区' }
+    ]}
+];
+
+const state = { diskId:1, partId:'p4' };
+
+/* =========================================================
+   小工具
+   ========================================================= */
+const $ = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+const disk = id => disks.find(d => d.id === id);
+
+function fmt(gb){
+  if (gb >= 1000) return (gb/1000).toFixed(2) + ' TB';
+  if (gb >= 10)   return Math.round(gb) + ' GB';
+  if (gb >= 1)    return gb.toFixed(1) + ' GB';
+  return Math.round(gb*1000) + ' MB';
+}
+function nowStamp(){
+  const t = new Date();
+  return [t.getHours(), t.getMinutes(), t.getSeconds()].map(n => String(n).padStart(2,'0')).join(':');
+}
+/* 写一条日志：同时落到底部日志区 + 状态栏左侧 */
+function log(msg, cls){
+  const plain = String(msg).replace(/<[^>]+>/g, '');
+  const bar = $('#sbLeft');
+  if (bar) bar.textContent = plain;
+
+  const box = $('#logBody');
+  if (!box) return;
+  const div = document.createElement('div');
+  if (cls) div.className = cls;
+  div.innerHTML = '<span class="t">' + nowStamp() + '</span><span>' + msg + '</span>';
+  box.appendChild(div);
+  while (box.children.length > 400) box.removeChild(box.firstChild);
+  box.scrollTop = box.scrollHeight;
+}
+function toast(msg){
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  $('#toasts').appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .25s'; }, 1900);
+  setTimeout(() => el.remove(), 2250);
+}
+
+/* =========================================================
+   渲染：左树
+   ========================================================= */
+function renderTree(){
+  const el = $('#tree');
+  let html = '';
+  disks.forEach(d => {
+    const locked = d.system || d.readonly;
+    const on = d.id === state.diskId ? ' on' : '';
+    const flag = d.system ? '<span class="tdot sys" title="系统盘"></span>' : d.readonly ? '<span class="tdot ro" title="只读"></span>' : '';
+    html += `<div class="tnode disk${on}" data-disk="${d.id}" title="${d.model}">
+      ${flag}<span class="tname">磁盘 ${d.id} · ${locked ? (d.system ? '系统盘' : '只读') : d.model}</span>
+      <span class="tsize">${fmt(d.total)}</span></div>`;
+    d.parts.forEach(p => {
+      const pOn = (d.id === state.diskId && p.id === state.partId) ? ' on' : '';
+      const ltr = p.fs === 'FREE' ? '·' : (p.letter ? p.letter.replace(':','') : '—');
+      const name = p.fs === 'FREE' ? '未分配空间' : ((p.letter ? p.letter + ' ' : '') + (p.label || FS_NAME[p.fs]));
+      const badge = p.fs === 'FREE'
+        ? '<span class="lbadge free">·</span>'
+        : `<span class="lbadge" style="background:${FS_COLOR[p.fs]}">${ltr}</span>`;
+      html += `<div class="tnode part${pOn}" data-disk="${d.id}" data-part="${p.id}" title="${name} · ${fmt(p.size)}">
+        ${badge}<span class="tname">${name}</span><span class="tsize">${fmt(p.size)}</span></div>`;
+    });
+  });
+  el.innerHTML = html;
+  $('#treeHint').textContent = disks.length + ' 块 / ' + disks.reduce((s,d) => s + d.parts.filter(p => p.fs !== 'FREE').length, 0) + ' 分区';
+
+  $$('.tnode.disk').forEach(n => n.addEventListener('click', () => selectDisk(+n.dataset.disk)));
+  $$('.tnode.part').forEach(n => n.addEventListener('click', () => selectPart(+n.dataset.disk, n.dataset.part)));
+}
+
+/* =========================================================
+   渲染：概览
+   ========================================================= */
+function renderOverview(){
+  const el = $('#overview');
+  el.innerHTML = disks.map(d => {
+    const parts = d.parts;
+    const segs = parts.map(p => {
+      const w = p.size / d.total * 100;
+      return `<i style="width:${w.toFixed(2)}%;background:${FS_COLOR[p.fs]}"></i>`;
+    }).join('');
+    const on = d.id === state.diskId ? ' on' : '';
+    const lk = (d.system || d.readonly) ? ' locked' : '';
+    return `<button class="ocard${on}${lk}" data-disk="${d.id}" title="${d.model}">
+      <span class="orow"><span class="oname">磁盘 ${d.id}</span><span class="ocap">${fmt(d.total)}</span></span>
+      <span class="obar">${segs}</span>
+      <span class="omodel">${d.model}</span>
+    </button>`;
+  }).join('');
+  $$('.ocard').forEach(c => c.addEventListener('click', () => selectDisk(+c.dataset.disk)));
+}
+
+/* =========================================================
+   渲染：中栏（标题 / 地图 / 表格）
+   ========================================================= */
+function renderCenter(){
+  const d = disk(state.diskId);
+  if (!d) return;
+  const locked = d.system || d.readonly;
+  const parts = d.parts;
+
+  /* 标题 */
+  $('#diskHead').innerHTML = `
+    <span class="hname">磁盘 ${d.id}</span>
+    <span class="hmeta">
+      <span>${d.model}</span><span class="dotsep"></span>
+      <span class="mono">${fmt(d.total)}</span><span class="dotsep"></span>
+      <span>${d.table}</span><span class="dotsep"></span>
+      <span>${d.bus}</span><span class="dotsep"></span>
+      <span>${d.parts.filter(p => p.fs !== 'FREE').length} 个分区</span>
+    </span>
+    <span class="hr">
+      ${d.os ? `<span class="flag ok">${d.os}</span>` : ''}
+      ${d.system ? '<span class="flag warn">系统盘 · 已锁定</span>' : d.readonly ? '<span class="flag warn">只读磁盘</span>' : ''}
+    </span>`;
+
+  /* 标尺 */
+  let ruler = '';
+  [0,25,50,75,100].forEach(pc => {
+    const left = pc + '%';
+    const label = pc === 0 ? '0' : pc === 100 ? fmt(d.total) : fmt(d.total * pc / 100);
+    ruler += `<i style="left:${left}"></i><span style="left:${left}">${label}</span>`;
+  });
+
+  /* 色块 */
+  const segs = parts.map(p => {
+    const w = p.size / d.total * 100;
+    const cls = ['seg-piece'];
+    if (p.fs === 'FREE') cls.push('free');
+    if (state.partId === p.id) cls.push('sel');
+    const bg = p.fs === 'FREE' ? '' : `background:${FS_COLOR[p.fs]};`;
+    let inner = '';
+    if (w > 7.5) inner = `<span class="sl">${p.fs === 'FREE' ? '空' : (p.letter || '—')}</span><span class="sz">${fmt(p.size)}</span>`;
+    else if (w > 3.4) inner = `<span class="sl">${p.fs === 'FREE' ? '空' : (p.letter || '—')}</span>`;
+    const title = (p.letter ? p.letter + ' ' : '') + (p.label || FS_NAME[p.fs]) + ' · ' + FS_NAME[p.fs] + ' · ' + fmt(p.size);
+    return `<div class="${cls.join(' ')}" style="width:${w.toFixed(3)}%;${bg}" data-part="${p.id}" title="${title}">${inner}</div>`;
+  }).join('');
+
+  $('#map').innerHTML = `<div class="ruler">${ruler}</div><div class="bar">${segs}</div>`;
+
+  /* 图例 */
+  const groups = {};
+  parts.forEach(p => {
+    const g = groups[p.fs] || (groups[p.fs] = { n:0, size:0 });
+    g.n++; g.size += p.size;
+  });
+  $('#legend').innerHTML = Object.entries(groups).map(([fs, g]) =>
+    `<span class="lg"><i style="background:${FS_COLOR[fs]}"></i>${FS_NAME[fs]} <b>${fmt(g.size)}</b></span>`
+  ).join('') + `<span class="lg" style="margin-left:auto;color:var(--faint)">共 ${parts.length} 项</span>`;
+
+  $$('#map .seg-piece').forEach(el => {
+    el.addEventListener('click', () => selectPart(state.diskId, el.dataset.part));
+  });
+
+  /* 表格 */
+  const rows = parts.map(p => {
+    const sel = state.partId === p.id ? ' sel' : '';
+    const ltr = p.fs === 'FREE' ? '—' : (p.letter || '—');
+    const badge = p.fs === 'FREE'
+      ? '<span class="lbadge free" style="width:17px;height:15px;display:inline-flex">·</span>'
+      : `<span class="lbadge" style="background:${FS_COLOR[p.fs]}">${(p.letter || '—').replace(':','')}</span>`;
+    return `<tr class="${sel.trim()}" data-part="${p.id}">
+      <td><span class="lt">${badge}<span>${ltr}</span></span></td>
+      <td class="${p.label ? '' : 'dim'}">${p.label || (p.fs === 'FREE' ? '未分配空间' : '（无卷标）')}</td>
+      <td class="${p.fs === 'FREE' ? 'dim' : ''}">${FS_NAME[p.fs]}</td>
+      <td class="num">${fmt(p.size)}</td>
+      <td class="dim">${p.type}</td>
+    </tr>`;
+  }).join('');
+
+  $('#gridBody').innerHTML = rows || '<tr class="emptyrow"><td colspan="5">这块磁盘上没有分区</td></tr>';
+  $$('#gridBody tr[data-part]').forEach(tr => {
+    tr.addEventListener('click', () => selectPart(state.diskId, tr.dataset.part));
+  });
+}
+
+/* 顶部/底部状态 */
+function syncChrome(){
+  $('#chipDisks').textContent = disks.length + ' 块磁盘';
+  $('#chipParts').textContent = disks.reduce((s,d) => s + d.parts.filter(p => p.fs !== 'FREE').length, 0) + ' 个分区';
+  const d = disk(state.diskId);
+  const p = d && d.parts.find(x => x.id === state.partId);
+  $('#sbMid').innerHTML = `<span class="mono">磁盘 ${d ? d.id : '—'}</span><span class="sb-sep"></span>` +
+    (p ? `<span class="mono">${p.letter || '—'}</span> <span>${p.label || FS_NAME[p.fs]}</span>` : '<span>未选中分区</span>');
+
+  const tbRef = $('#tbRefresh');
+  if (tbRef) tbRef.disabled = view !== 'main';
+
+  /* 装系统的时候把底部日志让给向导自己的安装日志 */
+  const app = $('.app');
+  if (app) app.classList.toggle('in-wizard', view === 'install');
+  syncNav();
+}
+
+function renderAll(){
+  renderTree(); renderOverview(); renderCenter(); syncChrome();
+}
+
+/* =========================================================
+   选择
+   ========================================================= */
+function selectDisk(id){
+  state.diskId = id;
+  state.partId = null;
+  renderAll();
+  const d = disk(id);
+  log('选择磁盘 ' + id + (d.system ? '（系统盘，已锁定）' : d.readonly ? '（只读磁盘）' : ''));
+}
+function selectPart(diskId, partId){
+  const d = disk(diskId);
+  if (!d) return;
+  state.diskId = diskId;
+  state.partId = partId;
+  renderAll();
+  const p = d.parts.find(x => x.id === partId);
+  if (p) {
+    $('#sbLeft').textContent = '选中 ' + (p.fs === 'FREE' ? '未分配空间' : ((p.letter || '') + ' ' + (p.label || FS_NAME[p.fs]))) +
+      ' · ' + FS_NAME[p.fs] + ' · ' + fmt(p.size) + (d.system ? ' · 系统盘只读' : d.readonly ? ' · 只读磁盘' : '');
+  }
+}
+
+/* =========================================================
+   动作：只读检查
+   ========================================================= */
+function actCheck(){
+  const d = disk(state.diskId);
+  log('正在检查磁盘 ' + d.id + ' 的文件系统…', 'hl');
+  setTimeout(() => log('磁盘 ' + d.id + '：文件系统正常，没有发现错误', 'ok'), 800);
+  setTimeout(() => toast('检查完成：未发现错误'), 850);
+}
+
+/* 重新扫描磁盘列表：主页面顶部的「刷新磁盘」按钮和 F5 都走这里 */
+function doRefresh(){
+  if (view !== 'main'){ toast('回到主页面才能刷新磁盘'); return; }
+  renderAll();
+  log('已刷新磁盘列表 · ' + disks.length + ' 块磁盘 / ' +
+      disks.reduce((s, d) => s + d.parts.filter(p => p.fs !== 'FREE').length, 0) + ' 个分区');
+  toast('磁盘列表已刷新');
+}
+
+function closeOverlay(){
+  $('#overlay').classList.remove('on');
+  $('#overlay').innerHTML = '';
+}
+
+/* =========================================================
+   事件绑定
+   ========================================================= */
+$('#tbRefresh').addEventListener('click', doRefresh);
+$('#logClear').addEventListener('click', () => {
+  const box = $('#logBody');
+  if (box) box.innerHTML = '';
+  const bar = $('#sbLeft');
+  if (bar) bar.textContent = '日志已清空';
+});
+
+/* 菜单栏 */
+function closeMenus(){ $$('.menu').forEach(m => m.classList.remove('open')); }
+$$('.menu').forEach(m => {
+  if (!m.querySelector('.dropdown')) return;
+  m.addEventListener('click', e => {
+    if (e.target.closest('.dd-item')) return;
+    const wasOpen = m.classList.contains('open');
+    closeMenus();
+    if (!wasOpen) m.classList.add('open');
+    e.stopPropagation();
+  });
+});
+document.addEventListener('click', e => { if (!e.target.closest('.menu')) closeMenus(); });
+
+$$('.dd-item').forEach(item => item.addEventListener('click', () => {
+  const act = item.dataset.act;
+  closeMenus();
+  if (act === 'install') openWizard();
+  else if (act === 'check') actCheck();
+  else if (act === 'refresh') doRefresh();
+  else if (act === 'settings') gotoView('settings');
+  else if (act === 'about'){
+    $('#overlay').innerHTML = `<div class="modal">
+      <div class="mh">关于这个原型<button class="x" data-close>×</button></div>
+      <div class="mb">
+        <p style="margin:0 0 8px">这是一个用来讨论界面结构的<b>可点击原型</b>，所有磁盘数据都是假的，不会对真实磁盘做任何操作。</p>
+        <p style="margin:0;color:var(--muted);font-size:11.8px">主页面只负责<b>看</b>：左侧选磁盘或分区，中间看分区布局和分区明细。<br>要分区、装系统，点左上角「系统安装」；软件自己的参数在「设置」里。</p>
+      </div>
+      <div class="mf"><button class="tbtn" data-close>知道了</button></div>
+    </div>`;
+    $('#overlay').classList.add('on');
+    $$('#overlay [data-close]').forEach(b => b.addEventListener('click', closeOverlay));
+  }
+  else if (act === 'keys'){
+    $('#overlay').innerHTML = `<div class="modal">
+      <div class="mh">快捷键<button class="x" data-close>×</button></div>
+      <div class="mb"><table class="opsum" style="margin:0"><tbody>
+        <tr><td>Ctrl + ,</td><td style="color:var(--muted)">打开设置</td></tr>
+        <tr><td>F5</td><td style="color:var(--muted)">刷新磁盘列表</td></tr>
+        <tr><td>Esc</td><td style="color:var(--muted)">关闭弹窗 / 收起菜单</td></tr>
+      </tbody></table></div>
+      <div class="mf"><button class="tbtn" data-close>关闭</button></div>
+    </div>`;
+    $('#overlay').classList.add('on');
+    $$('#overlay [data-close]').forEach(b => b.addEventListener('click', closeOverlay));
+  }
+}));
+
+/* 键盘 */
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === ','){
+    e.preventDefault();
+    gotoView('settings');
+    return;
+  }
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if (e.key === 'F5'){ e.preventDefault(); doRefresh(); return; }
+  if (e.key === 'Escape'){ closeOverlay(); closeMenus(); }
+});
+
+/* =========================================================
+   安装向导：选硬盘 → 填分区大小 → 选系统 → 开始
+   ========================================================= */
+const VERSIONS = [
+  { id:'win10', name:'Windows 10', build:'22H2 · 专业版',
+    note:'老电脑更稳，4 GB 内存就能跑，旧软件兼容性更好。',
+    tags:['需要 4 GB 内存','64 位','镜像 4.2 GB'] },
+  { id:'win11', name:'Windows 11', build:'23H2 · 专业版',
+    note:'界面新，支持到 2028 年，但对硬件有要求。',
+    tags:['需要 8 GB 内存','需要 TPM 2.0','镜像 5.1 GB'] }
+];
+
+/* ---------------- 软件设置 ---------------- */
+const SETTINGS_DEFAULTS = {
+  autoRefresh:true,      // 启动时自动刷新磁盘列表
+  tray:false,            // 关闭时收到托盘
+  startView:'main',      // 启动后显示
+  lang:'zh',             // 界面语言
+  version:'win10',       // 默认系统版本
+  defaultFs:'NTFS',      // 数据分区默认文件系统
+  sysDefault:120,        // 系统分区默认大小（GB）
+  confirmInstall:true,   // 安装前列出会被清空的分区
+  confirmDelete:true,    // 删除分区前二次确认
+  warnSystem:true,       // 禁止对系统盘写入
+  lockReadonly:true,     // 只读设备不可操作
+  logLevel:'normal',     // 日志详细程度
+  logDays:'30',          // 日志保留天数
+
+  /* 外部程序 */
+  extEnabled:true,       // 允许调用外部程序
+  extConfirm:true,       // 调用前二次确认
+  extDiskpart:'C:\\Windows\\System32\\diskpart.exe',
+  extDism:'C:\\Windows\\System32\\dism.exe',
+  extWimlib:'',
+  extVentoy:'',
+  ext7z:'C:\\Program Files\\7-Zip\\7z.exe',
+
+  /* 系统文件 */
+  sysIsoDir:'D:\\ISO',
+  sysWim:'D:\\ISO\\sources\\install.wim',
+  sysBoot:'D:\\ISO\\sources\\boot.wim',
+  sysUnattend:'',
+  sysDrivers:'',
+  sysTemp:'C:\\Temp\\hardbox'
+};
+const settings = Object.assign({}, SETTINGS_DEFAULTS);
+try {
+  const saved = JSON.parse(localStorage.getItem('hardbox.settings') || '{}');
+  Object.keys(SETTINGS_DEFAULTS).forEach(k => { if (k in saved) settings[k] = saved[k]; });
+} catch (_) {}
+let settingsDirty = false;
+
+/* ---------------- 外部程序 / 系统文件：设置页里的「引用」项 ---------------- */
+const EXT_PROGRAMS = [
+  { key:'extDiskpart', name:'diskpart.exe', builtin:true, mode:'file', filter:'exe',
+    use:'分区、清盘、设活动分区。Windows 自带，不写进配置文件。' },
+  { key:'extDism', name:'dism.exe', builtin:true, mode:'file', filter:'exe',
+    use:'展开 install.wim、注入驱动、离线打补丁。Windows 自带。' },
+  { key:'extWimlib', name:'wimlib-imagex.exe', mode:'file', filter:'exe',
+    use:'拆分超过 4 GB 的 install.wim —— FAT32 的 U 盘必须先拆。' },
+  { key:'extVentoy', name:'Ventoy2Disk.exe', mode:'file', filter:'exe',
+    use:'把 U 盘做成多镜像启动盘，镜像直接拷进去就能启动。' },
+  { key:'ext7z', name:'7z.exe', mode:'file', filter:'exe',
+    use:'解压 .iso / .esd 镜像，比系统自带的挂载更通用。' }
+];
+
+const SYS_FILES = [
+  { key:'sysIsoDir', name:'Windows 镜像目录', mode:'folder',
+    use:'放 .iso 或解压后镜像的文件夹，装系统时从这里选版本。' },
+  { key:'sysWim', name:'install.wim / install.esd', mode:'file', filter:'wim,esd',
+    use:'系统安装映像，分完区就把它展开到 C:。' },
+  { key:'sysBoot', name:'boot.wim', mode:'file', filter:'wim',
+    use:'PE 启动映像，U 盘启动后先进入它。' },
+  { key:'sysUnattend', name:'自动应答文件', mode:'file', filter:'xml',
+    use:'autounattend.xml，跳过安装过程中的问答（可选）。' },
+  { key:'sysDrivers', name:'驱动目录', mode:'folder',
+    use:'装完系统自动注入的驱动文件夹（可选）。' },
+  { key:'sysTemp', name:'临时工作目录', mode:'folder',
+    use:'展开镜像时的暂存位置，建议留 8 GB 以上空闲。' }
+];
+
+/* 原型里的假文件系统：只用于演示「浏览…」和「检测」 */
+const FS = {
+  'C:': ['Windows', 'Program Files', 'Users', 'Temp'],
+  'C:\\Windows': ['System32', 'SysWOW64', 'Temp'],
+  'C:\\Windows\\System32': ['diskpart.exe', 'dism.exe', 'cmd.exe', 'bcdedit.exe', 'format.com'],
+  'C:\\Windows\\Temp': ['hardbox.log'],
+  'C:\\Program Files': ['7-Zip', 'Ventoy', 'wimlib'],
+  'C:\\Program Files\\7-Zip': ['7z.exe', '7z.dll'],
+  'C:\\Program Files\\Ventoy': ['Ventoy2Disk.exe', 'VentoyPlugson.exe'],
+  'C:\\Program Files\\wimlib': ['wimlib-imagex.exe'],
+  'C:\\Users': ['Public'],
+  'C:\\Temp': ['hardbox'],
+  'D:': ['ISO', 'Tools', 'Backup'],
+  'D:\\ISO': ['Win10_22H2_x64.iso', 'Win11_23H2_x64.iso', 'sources'],
+  'D:\\ISO\\sources': ['install.wim', 'boot.wim', 'autounattend.xml'],
+  'D:\\Tools': ['驱动', '日志', 'Ventoy2Disk.exe'],
+  'D:\\Tools\\驱动': ['Intel_RST_19.5.exe', 'NVIDIA_536.23.exe'],
+  'E:': ['Backup_2025', 'ISO']
+};
+
+const escHTML = s => String(s == null ? '' : s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+function pathJoin(dir, name){
+  if (!dir) return String(name || '');
+  return dir.endsWith('\\') ? dir + name : dir + '\\' + name;
+}
+function pathParent(p){
+  const s = String(p || '');
+  if (!s || /^[A-Za-z]:$/.test(s)) return '';
+  const i = s.lastIndexOf('\\');
+  if (i <= 0) return '';
+  return s.slice(0, i);
+}
+function pathDirOf(p){
+  const s = String(p || '');
+  if (!s) return '';
+  const i = s.lastIndexOf('\\');
+  const d = i > 0 ? s.slice(0, i) : '';
+  return d;
+}
+const KNOWN_PATHS = (() => {
+  const out = [];
+  Object.keys(FS).forEach(dir => {
+    out.push(dir);
+    FS[dir].forEach(n => out.push(pathJoin(dir, n)));
+  });
+  return out.map(x => x.toLowerCase());
+})();
+const ALL_PATH_ITEMS = EXT_PROGRAMS.concat(SYS_FILES);
+
+function probePath(key){
+  const it = ALL_PATH_ITEMS.find(x => x.key === key) || {};
+  const v = String(settings[key] || '').trim();
+  if (!v) return { cls:'na', text:'未设置' };
+  if (it.builtin) return { cls:'ok', text:'系统自带' };
+  const hit = KNOWN_PATHS.indexOf(v.toLowerCase()) >= 0;
+  if (hit) return { cls:'ok', text: it.mode === 'folder' ? '目录存在' : '已找到' };
+  return { cls:'miss', text: it.mode === 'folder' ? '目录不存在' : '未找到' };
+}
+
+function pathRow(it){
+  const st = probePath(it.key);
+  const v = String(settings[it.key] || '');
+  return `<div class="set-row path-row">
+    <div class="set-l">
+      <div class="set-t">${escHTML(it.name)}${it.builtin ? '<span class="tag">系统自带</span>' : ''}</div>
+      <div class="set-d">${escHTML(it.use)}</div>
+      <div class="pathbox">
+        <i class="pico${it.mode === 'folder' ? ' folder' : ''}"></i>
+        <span class="p" title="${escHTML(v)}">${v ? escHTML(v) : '<span class="pemon">还没有指定</span>'}</span>
+        <span class="pstate ${st.cls}">${st.text}</span>
+      </div>
+    </div>
+    <div class="set-c">
+      <button class="tbtn" data-browse="${it.key}">浏览…</button>
+      <button class="tbtn" data-probe="${it.key}"${v ? '' : ' disabled'}>检测</button>
+    </div>
+  </div>`;
+}
+
+/* ---------------- 模拟文件选择器 ---------------- */
+let picker = null;
+
+function openPicker(key){
+  const it = ALL_PATH_ITEMS.find(x => x.key === key);
+  if (!it) return;
+  const cur = String(settings[key] || '');
+  let cwd = it.mode === 'folder' && FS[cur] ? cur : pathDirOf(cur);
+  if (!cwd || !FS[cwd]) cwd = 'C:';
+  picker = { key, mode: it.mode || 'file', filter: it.filter || '', cwd, sel: '' };
+  renderPicker();
+  $('#overlay').classList.add('on');
+}
+
+function renderPicker(){
+  const it = ALL_PATH_ITEMS.find(x => x.key === picker.key) || {};
+  const cwd = picker.cwd;
+  const entries = (FS[cwd] || []).slice().sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+  const parent = pathParent(cwd);
+  const rows = [];
+
+  if (parent) rows.push(`<div class="pc-item dir" data-go="${escHTML(parent)}"><i class="ss"></i><span>..</span></div>`);
+
+  const filters = picker.filter ? picker.filter.split(',').map(s => '.' + s.trim().toLowerCase()) : [];
+  entries.forEach(n => {
+    const full = pathJoin(cwd, n);
+    const isDir = Object.prototype.hasOwnProperty.call(FS, full);
+    if (!isDir && filters.length && !filters.some(f => n.toLowerCase().endsWith(f))) return;
+    const cls = 'pc-item' + (isDir ? ' dir' : '') + (picker.sel === full ? ' sel' : '');
+    rows.push(`<div class="${cls}" data-${isDir ? 'go' : 'pick'}="${escHTML(full)}"><i class="ss"></i><span>${escHTML(n)}</span></div>`);
+  });
+  if (!rows.length) rows.push('<div class="pc-item" style="cursor:default;color:var(--faint)">这个文件夹里没有符合条件的文件</div>');
+
+  const drives = [['C:', '本地磁盘'], ['D:', '数据盘'], ['E:', '移动硬盘']];
+  const ok = picker.mode === 'folder' ? !!FS[cwd] : !!picker.sel;
+
+  $('#overlay').innerHTML = `<div class="modal picker">
+    <div class="mh">选择${picker.mode === 'folder' ? '文件夹' : '文件'} · ${escHTML(it.name || '')}<button class="x" data-close>×</button></div>
+    <div class="mb">
+      <div class="pc-side">${drives.map(([d, label]) => `<div class="pc-drive${cwd === d || cwd.indexOf(d + '\\') === 0 ? ' on' : ''}" data-go="${d}"><i class="pico"></i>${d}<span style="font-size:10.5px;color:var(--faint);margin-left:auto">${label}</span></div>`).join('')}</div>
+      <div class="pc-main">
+        <div class="pc-crumb">${escHTML(cwd)}</div>
+        <div class="pc-list">${rows.join('')}</div>
+      </div>
+    </div>
+    <div class="pc-foot">
+      <input class="pc-input" id="pcName" readonly value="${escHTML(picker.mode === 'folder' ? cwd : picker.sel)}">
+      <button class="tbtn" data-close>取消</button>
+      <button class="tbtn primary" id="pcOk"${ok ? '' : ' disabled'}>${picker.mode === 'folder' ? '选择此文件夹' : '打开'}</button>
+    </div>
+  </div>`;
+
+  $$('#overlay [data-close]').forEach(b => b.addEventListener('click', () => { picker = null; closeOverlay(); }));
+
+  $$('#overlay [data-go]').forEach(el => el.addEventListener('click', () => {
+    picker.cwd = el.dataset.go;
+    picker.sel = '';
+    renderPicker();
+  }));
+
+  $$('#overlay [data-pick]').forEach(el => {
+    el.addEventListener('click', () => {
+      picker.sel = el.dataset.pick;
+      $$('#overlay .pc-item').forEach(x => x.classList.toggle('sel', x.dataset.pick === picker.sel));
+      const name = $('#pcName');
+      if (name) name.value = picker.sel;
+      const okBtn = $('#pcOk');
+      if (okBtn) okBtn.disabled = false;
+    });
+    el.addEventListener('dblclick', () => {
+      picker.sel = el.dataset.pick;
+      pickCommit();
+    });
+  });
+
+  $('#pcOk').addEventListener('click', pickCommit);
+}
+
+function pickCommit(){
+  if (!picker) return;
+  const val = picker.mode === 'folder' ? picker.cwd : picker.sel;
+  if (!val) return;
+  const key = picker.key;
+  const isExt = EXT_PROGRAMS.some(p => p.key === key);
+  settings[key] = val;
+  picker = null;
+  closeOverlay();
+  markSettingsDirty();
+  log((isExt ? '已指定外部程序：' : '已指定系统文件：') + val, 'ok');
+  renderSettings();
+}
+
+function runProbe(key){
+  const it = ALL_PATH_ITEMS.find(x => x.key === key) || {};
+  const st = probePath(key);
+  toast((it.name || key) + ' · ' + st.text);
+  log('检测 ' + (it.name || key) + ' → ' + st.text, st.cls === 'ok' ? 'ok' : 'wn');
+  renderSettings();
+}
+
+const wz = { on:false, step:1, targets:[], ack:false, installing:false, finished:false };
+let wzTimer = null;
+
+/* 当前视图：main（磁盘信息）/ install（安装向导）/ settings（设置） */
+let view = 'main';
+
+function installable(d){ return !d.system && !d.readonly; }
+
+/* 每块被选中的磁盘各有一份独立配置：diskId / sys / data / version */
+function tgtOf(id){ return wz.targets.find(t => t.diskId === id); }
+function defaultSizes(d){
+  /* 用设置里的「系统分区默认大小」，盘太小再夹到可用范围内 */
+  const want = Math.round(+settings.sysDefault || 120);
+  const sys = Math.min(Math.max(want, 60), Math.floor(d.total - 20));
+  return { sys, data: Math.round((d.total - sys) * 10) / 10 };
+}
+function addTarget(id){
+  if (tgtOf(id)) return;
+  const d = disk(id);
+  const s = defaultSizes(d);
+  wz.targets.push({ diskId:id, sys:s.sys, data:s.data, version: settings.version || 'win10' });
+  wz.targets.sort((a,b) => a.diskId - b.diskId);
+}
+function validTgt(t){
+  const d = disk(t.diskId);
+  const s = +t.sys, x = +t.data;
+  if (!(s > 0) || !(x > 0)) return false;
+  if (s < 60 || x < 20) return false;
+  if (s + x > d.total + 0.05) return false;
+  return true;
+}
+function allValid(){ return wz.targets.length > 0 && wz.targets.every(validTgt); }
+
+/* 打开向导：有进度就接着上次的地方继续，没有才从第一步开始 */
+function openWizard(){
+  if (wz.finished) resetWizardState();
+  if (!wz.targets.length) wz.step = 1;
+  wz.on = true; wz.installing = false;
+  view = 'install';
+  renderWizard();
+  syncChrome();
+  log(wz.step > 1 ? '回到安装向导，继续第 ' + wz.step + ' 步' : '打开安装向导');
+}
+
+/* 收起向导：进度全部保留，随时可以回来接着填 */
+function leaveWizard(){
+  wz.on = false;
+  view = 'main';
+  $('#workspace').classList.remove('wizard-mode', 'view-settings');
+  $('#wzBody').innerHTML = '';
+  syncChrome();
+  log('已回到主页面，安装进度保留着，随时可以在「系统安装」里接着填');
+}
+
+/* 清空向导的所有状态（不动磁盘数据） */
+function resetWizardState(){
+  if (wzTimer){ clearInterval(wzTimer); wzTimer = null; }
+  wz.on = false; wz.step = 1; wz.targets = [];
+  wz.ack = false; wz.installing = false; wz.finished = false;
+  if (view === 'install') view = 'main';
+  $('#workspace').classList.remove('wizard-mode');
+  $('#wzBody').innerHTML = '';
+  syncNav();
+}
+
+function resetWizard(){
+  resetWizardState();
+  renderAll();
+  log('安装向导已重置');
+}
+
+/* 顶部三个视图按钮：主页面 / 系统安装 / 设置（有进度时「系统安装」带一个小圆点） */
+function applyView(){
+  const ws = $('#workspace');
+  if (ws){
+    ws.classList.toggle('wizard-mode', view === 'install');
+    ws.classList.toggle('view-settings', view === 'settings');
+  }
+  const app = $('.app');
+  if (app) app.classList.toggle('in-wizard', view === 'install');
+  $$('#navseg button').forEach(b => b.classList.toggle('on', b.dataset.nav === view));
+  const btn = $('#navseg [data-nav="install"]');
+  if (btn){
+    const pending = wz.targets.length > 0 && !wz.finished && view !== 'install';
+    btn.innerHTML = '系统安装' + (pending ? '<span class="dot"></span>' : '');
+    btn.title = pending
+      ? '上次填到第 ' + wz.step + ' 步，点一下接着装'
+      : '选硬盘、分好区、装系统，四步完成';
+  }
+}
+
+function syncNav(){ applyView(); }
+
+/* ---------------- 设置页 ---------------- */
+const setToggle = (key, t, d) => `<div class="set-row">
+  <div class="set-l"><div class="set-t">${t}</div><div class="set-d">${d}</div></div>
+  <div class="set-c"><label class="switch"><input type="checkbox" data-set="${key}" ${settings[key] ? 'checked' : ''}><span class="sl"></span></label></div>
+</div>`;
+const setSelect = (key, t, d, opts) => `<div class="set-row">
+  <div class="set-l"><div class="set-t">${t}</div><div class="set-d">${d}</div></div>
+  <div class="set-c"><select class="sel" data-set="${key}">${opts.map(o =>
+    `<option value="${o[0]}"${settings[key] === o[0] ? ' selected' : ''}>${o[1]}</option>`).join('')}</select></div>
+</div>`;
+const setChips = (key, t, d, opts) => `<div class="set-row">
+  <div class="set-l"><div class="set-t">${t}</div><div class="set-d">${d}</div></div>
+  <div class="set-c"><span class="chips">${opts.map(o =>
+    `<button class="chip${settings[key] === o[0] ? ' on' : ''}" data-set="${key}" data-val="${o[0]}">${o[1]}</button>`).join('')}</span></div>
+</div>`;
+const setNum = (key, t, d, min, max, unit) => `<div class="set-row">
+  <div class="set-l"><div class="set-t">${t}</div><div class="set-d">${d}</div></div>
+  <div class="set-c"><input class="numin" type="number" data-set="${key}" value="${settings[key]}" min="${min}" max="${max}"><span class="unit">${unit}</span></div>
+</div>`;
+const setInfo = (t, d, val) => `<div class="set-row">
+  <div class="set-l"><div class="set-t">${t}</div><div class="set-d">${d}</div></div>
+  <div class="set-c"><span class="set-mono">${val}</span></div>
+</div>`;
+
+function renderSettings(){
+  const body = $('#settingsBody');
+  if (!body) return;
+  body.innerHTML = `
+    <div class="set-sec"><h4>常规</h4><div class="set-card">
+      ${setToggle('autoRefresh', '启动时自动刷新磁盘列表', '每次打开软件都重新扫描一遍所有磁盘，而不是用上次的缓存')}
+      ${setToggle('tray', '关闭窗口时收到托盘', '点 × 不退出程序，缩到托盘继续在后台监听磁盘插拔')}
+      ${setSelect('startView', '启动后显示', '打开软件时先停在哪个页面', [['main','主页面'], ['last','上次停留的页面'], ['install','系统安装']])}
+      ${setSelect('lang', '界面语言', '目前只有简体中文是完整的', [['zh','简体中文'], ['en','English（未完成）']])}
+    </div></div>
+
+    <div class="set-sec"><h4>安装系统默认值</h4><div class="set-card">
+      ${setChips('version', '默认系统版本', '第 1 步勾选磁盘时自动预选的版本', [['win10','Windows 10 22H2'], ['win11','Windows 11 23H2']])}
+      ${setChips('defaultFs', '数据分区默认文件系统', 'D: 分区默认格式，改完对新任务生效', [['NTFS','NTFS'], ['exFAT','exFAT']])}
+      ${setNum('sysDefault', '系统分区默认大小', '新勾选的磁盘按这个大小预填 C: 分区', 60, 500, 'GB')}
+      ${setToggle('confirmInstall', '安装前列出会被清空的分区', '确认页逐盘列出将删除的分区，必须手工勾选才能开始')}
+    </div></div>
+
+    <div class="set-sec"><h4>外部程序</h4><div class="set-card">
+      ${setToggle('extEnabled', '允许调用外部程序', '展开镜像、拆 WIM、做启动盘时调用下面这些程序；关掉就只用内置实现')}
+      ${setToggle('extConfirm', '调用前先确认', '每次调用都先弹出完整命令行，确认后才执行')}
+      <div class="${settings.extEnabled ? '' : 'ext-off'}">${EXT_PROGRAMS.map(pathRow).join('')}</div>
+    </div></div>
+
+    <div class="set-sec"><h4>系统文件</h4><div class="set-card">
+      ${SYS_FILES.map(pathRow).join('')}
+    </div></div>
+
+    <div class="set-sec"><h4>安全与提醒</h4><div class="set-card">
+      ${setToggle('confirmDelete', '删除分区前二次确认', '单分区操作时先弹一次确认框')}
+      ${setToggle('warnSystem', '禁止对系统盘写入', '磁盘 0 永远只读，避免把正在运行的系统弄坏')}
+      ${setToggle('lockReadonly', '只读设备不可操作', 'U 盘、写保护卡等直接禁用所有写操作')}
+    </div></div>
+
+    <div class="set-sec"><h4>日志与诊断</h4><div class="set-card">
+      ${setChips('logLevel', '日志详细程度', '越详细越占空间，排查问题时可临时调高', [['simple','简要'], ['normal','标准'], ['full','详细']])}
+      ${setSelect('logDays', '日志保留天数', '超期的日志会自动清理', [['7','7 天'], ['30','30 天'], ['90','90 天'], ['keep','永久保留']])}
+      ${setInfo('配置文件', '所有设置都保存在这个文件里', '%APPDATA%\\HardBox\\config.json')}
+    </div></div>
+
+    <div class="set-sec"><h4>关于</h4><div class="set-card">
+      ${setInfo('版本', '硬盘工具箱 1.0 · 界面原型', 'build 2026.10.31')}
+    </div></div>
+  `;
+  bindSettings();
+  syncSettingsState();
+}
+
+function bindSettings(){
+  $$('#settingsBody input[type="checkbox"][data-set]').forEach(el => {
+    el.addEventListener('change', () => {
+      settings[el.dataset.set] = el.checked;
+      markSettingsDirty();
+      /* 关掉「允许调用外部程序」时，下面那组路径要跟着变灰 */
+      if (el.dataset.set === 'extEnabled') renderSettings();
+    });
+  });
+  $$('#settingsBody input[type="number"][data-set]').forEach(el => {
+    el.addEventListener('input', () => {
+      const v = Math.max(60, Math.min(500, Math.round(+el.value || 60)));
+      settings[el.dataset.set] = v;
+      markSettingsDirty();
+    });
+    el.addEventListener('blur', () => { el.value = settings[el.dataset.set]; });
+  });
+  $$('#settingsBody select[data-set]').forEach(el => {
+    el.addEventListener('change', () => { settings[el.dataset.set] = el.value; markSettingsDirty(); });
+  });
+  $$('#settingsBody .chip[data-set]').forEach(el => {
+    el.addEventListener('click', () => {
+      const key = el.dataset.set;
+      settings[key] = el.dataset.val;
+      $$(`#settingsBody .chip[data-set="${key}"]`).forEach(x => x.classList.toggle('on', x === el));
+      markSettingsDirty();
+    });
+  });
+  $$('#settingsBody [data-browse]').forEach(el => {
+    el.addEventListener('click', () => openPicker(el.dataset.browse));
+  });
+  $$('#settingsBody [data-probe]').forEach(el => {
+    el.addEventListener('click', () => runProbe(el.dataset.probe));
+  });
+}
+
+function markSettingsDirty(){ settingsDirty = true; syncSettingsState(); }
+
+function syncSettingsState(){
+  const st = $('#setState'), save = $('#setSave');
+  if (st) st.textContent = settingsDirty ? '有未保存的修改' : '';
+  if (save) save.disabled = !settingsDirty;
+}
+
+function saveSettings(silent){
+  try { localStorage.setItem('hardbox.settings', JSON.stringify(settings)); } catch (_) {}
+  settingsDirty = false;
+  syncSettingsState();
+  if (!silent){ toast('设置已保存'); log('设置已保存', 'ok'); }
+}
+
+function renderWizard(){
+  $('#workspace').classList.toggle('wizard-mode', view === 'install');
+  if (!wz.on) return;
+  $$('#stepper li').forEach(li => {
+    const n = +li.dataset.step;
+    li.classList.toggle('on', n === wz.step);
+    li.classList.toggle('done', n < wz.step);
+  });
+  const body = $('#wzBody');
+  if (!body) return;
+  if (wz.step === 1) body.innerHTML = stepDisk();
+  else if (wz.step === 2) body.innerHTML = stepSize();
+  else if (wz.step === 3) body.innerHTML = stepVersion();
+  else body.innerHTML = stepConfirm();
+  bindWizard();
+  updateFoot();
+}
+
+/* ---------------- 步骤 1：选硬盘（可多选） ---------------- */
+function stepDisk(){
+  const n = wz.targets.length;
+  return `<div class="wz-inner">
+    <h3 class="wz-h">选择要装系统的硬盘</h3>
+    <p class="wz-p">可以一次选多块盘。选中的每块盘在下一步单独填分区大小、单独选系统版本，互不影响。</p>
+    <div class="selbar">
+      <span>已选 <b>${n}</b> 块</span>
+      <span class="dotsep"></span>
+      <button class="lnk" data-sel="all">全选可安装的</button>
+      <button class="lnk" data-sel="none">全不选</button>
+      <span class="dotsep"></span>
+      <span>点击整条切换选中</span>
+    </div>
+    ${disks.map(d => {
+      const ok = installable(d);
+      const on = tgtOf(d.id) ? ' on' : '';
+      const parts = d.parts.filter(p => p.fs !== 'FREE');
+      const segs = d.parts.map(p => `<i style="width:${(p.size/d.total*100).toFixed(2)}%;background:${FS_COLOR[p.fs]}"></i>`).join('');
+      const right = d.system ? '正在使用的系统盘<br>不能覆盖'
+                  : d.readonly ? '只读设备<br>不能写入'
+                  : '现有分区<b>' + parts.length + ' 个</b>';
+      return `<button class="dsel${ok ? '' : ' off'}${on}" data-disk="${d.id}" ${ok ? '' : 'data-no="1"'}>
+        <span class="cb"></span>
+        <span class="dmain">
+          <span class="dt">磁盘 ${d.id} · ${d.model}
+            ${ok ? '<span class="tag">可安装</span>' : `<span class="tag no">${d.system ? '系统盘' : '只读'}</span>`}
+          </span>
+          <span class="dm">${d.bus} · ${fmt(d.total)} · ${d.table} · ${parts.length} 个分区</span>
+          <span class="dbar">${segs}</span>
+        </span>
+        <span class="dright">${right}</span>
+      </button>`;
+    }).join('')}
+  </div>`;
+}
+
+/* ---------------- 步骤 2：给每块盘分别填分区大小 ---------------- */
+function stepSize(){
+  if (!wz.targets.length) return `<div class="wz-inner"><p class="wz-p">还没有选硬盘，请回到第一步。</p></div>`;
+  return `<div class="wz-inner">
+    <h3 class="wz-h">给每块盘分别填两个分区的大小</h3>
+    <p class="wz-p">每块盘各自独立设置，互不影响。每块盘固定 2 个分区：系统分区 C: 装系统，数据分区 D: 放文件。<br>
+      下面的色条可以直接<b>拖动中间的手柄</b>分配大小，也可以在上面的输入框里填数字，两边实时同步。</p>
+    ${wz.targets.map(t => {
+      const d = disk(t.diskId);
+      const n = d.parts.filter(p => p.fs !== 'FREE').length;
+      return `<div class="tgt" data-disk="${d.id}">
+        <div class="tgt-h">
+          <span class="tn">磁盘 ${d.id}</span>
+          <span class="tm">${d.model} · ${fmt(d.total)} · 原有 ${n} 个分区会被清除</span>
+          <span class="trest">剩余 <b id="rest-${d.id}">—</b></span>
+        </div>
+        <div class="szrow">
+          <span class="szname"><span class="lbadge" style="background:${FS_COLOR.NTFS}">C</span>系统分区 C:</span>
+          <input class="szi" id="sys-${d.id}" data-disk="${d.id}" data-kind="sys" type="number" min="60" max="${d.total}" value="${t.sys}">
+          <span class="unit">GB</span>
+          <span class="szsub">建议 100 GB 以上</span>
+        </div>
+        <div class="szrow">
+          <span class="szname"><span class="lbadge" style="background:#3E8E5A">D</span>数据分区 D:</span>
+          <input class="szi" id="dat-${d.id}" data-disk="${d.id}" data-kind="dat" type="number" min="20" max="${d.total}" value="${t.data}">
+          <span class="unit">GB</span>
+          <span class="szsub">个人文件、游戏、下载</span>
+        </div>
+        <div class="wzbar" id="bar-${d.id}" data-disk="${d.id}" role="slider" tabindex="0"
+             aria-label="磁盘 ${d.id} 的系统分区容量，左右方向键微调"
+             aria-valuemin="60" aria-valuemax="${Math.round(d.total - 20)}" aria-valuenow="${t.sys}">
+          <div class="wseg sys" id="bsys-${d.id}"><span id="bsysv-${d.id}">系统 ${fmt(t.sys)}</span></div>
+          <div class="wseg dat" id="bdat-${d.id}"><span id="bdatv-${d.id}">数据 ${fmt(t.data)}</span></div>
+          <div class="wseg free" id="bfree-${d.id}" style="display:none"></div>
+          <div class="wgrip" id="wgrip-${d.id}"></div>
+        </div>
+        <div class="tgt-f">
+          <span class="errmsg" id="err-${d.id}"></span>
+          <span class="presets">
+            <button data-preset="150" data-disk="${d.id}">系统 150 GB</button>
+            <button data-preset="200" data-disk="${d.id}">系统 200 GB</button>
+            <button data-preset="half" data-disk="${d.id}">各占一半</button>
+          </span>
+        </div>
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
+/* 刷新某一块盘的卡片：比例条 / 剩余 / 错误提示 */
+function refreshTgt(id){
+  const t = tgtOf(id), d = disk(id);
+  if (!t || !d) return;
+  const s = +t.sys || 0, x = +t.data || 0;
+  const rest = Math.round((d.total - s - x) * 100) / 100;
+  const pct = n => Math.max(0, Math.min(100, n / d.total * 100));
+
+  const bar = $('#bar-' + id);
+  if (bar){
+    const ps = pct(s), px = pct(x), pr = Math.max(0, pct(rest));
+    const bsys = $('#bsys-' + id), bdat = $('#bdat-' + id), bfree = $('#bfree-' + id), grip = $('#wgrip-' + id);
+    if (bsys) bsys.style.width = ps + '%';
+    if (bdat) bdat.style.width = px + '%';
+    if (bfree){
+      bfree.style.width = pr + '%';
+      bfree.style.display = pr > 0.4 ? '' : 'none';
+    }
+    if (grip) grip.style.left = ps + '%';
+    const sv = $('#bsysv-' + id), dv = $('#bdatv-' + id);
+    if (sv) sv.textContent = '系统 ' + fmt(s);
+    if (dv) dv.textContent = '数据 ' + fmt(x);
+    bar.setAttribute('aria-valuenow', String(Math.round(s)));
+  }
+  const restEl = $('#rest-' + id);
+  if (restEl) restEl.textContent = rest < -0.05 ? '超出 ' + fmt(-rest) : fmt(rest);
+
+  let msg = '';
+  if (!(s > 0) || !(x > 0)) msg = '两个分区都要填大小';
+  else if (s < 60) msg = '系统分区至少 60 GB';
+  else if (x < 20) msg = '数据分区至少 20 GB';
+  else if (rest < -0.05) msg = '超过磁盘容量 ' + fmt(d.total);
+  const errEl = $('#err-' + id);
+  if (errEl) errEl.textContent = msg;
+  ['sys-','dat-'].forEach(p => {
+    const el = $('#' + p + id);
+    if (el) el.classList.toggle('bad', !!msg);
+  });
+  updateFoot();
+}
+
+/* 拖动比例条分配容量：拖动边界 = 把整块盘重新分给 C: 和 D:
+   （数据区拿剩下的部分，所以拖完一定没有残余空间） */
+function bindBar(id){
+  const bar = $('#bar-' + id), d = disk(id), t = tgtOf(id);
+  if (!bar || !d || !t) return;
+
+  const MIN_SYS = 60, MIN_DAT = 20;
+  const maxSys = Math.max(MIN_SYS, Math.floor((d.total - MIN_DAT) * 10) / 10);
+
+  const setSys = gb => {
+    const v = Math.round(Math.max(MIN_SYS, Math.min(maxSys, gb)) * 10) / 10;
+    t.sys = v;
+    t.data = Math.round((d.total - v) * 10) / 10;
+    const si = $('#sys-' + id), di = $('#dat-' + id);
+    if (si && document.activeElement !== si) si.value = v;
+    if (di && document.activeElement !== di) di.value = t.data;
+    refreshTgt(id);
+  };
+  const fromX = clientX => {
+    const r = bar.getBoundingClientRect();
+    if (r.width < 1) return;
+    setSys((clientX - r.left) / r.width * d.total);
+  };
+
+  bar.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || wz.installing) return;
+    e.preventDefault();
+    bar.focus({ preventScroll: true });
+    bar.classList.add('drag');
+    try { bar.setPointerCapture(e.pointerId); } catch (_) {}
+    fromX(e.clientX);
+
+    const onMove = ev => fromX(ev.clientX);
+    const onUp = () => {
+      bar.classList.remove('drag');
+      bar.removeEventListener('pointermove', onMove);
+      bar.removeEventListener('pointerup', onUp);
+      bar.removeEventListener('pointercancel', onUp);
+    };
+    bar.addEventListener('pointermove', onMove);
+    bar.addEventListener('pointerup', onUp);
+    bar.addEventListener('pointercancel', onUp);
+  });
+
+  /* 键盘也能调：方向键 ±10 GB，Shift 加速到 ±50 GB */
+  bar.addEventListener('keydown', e => {
+    const stepGb = e.shiftKey ? 50 : 10;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight'){
+      e.preventDefault();
+      setSys((+t.sys || 0) + (e.key === 'ArrowRight' ? stepGb : -stepGb));
+    } else if (e.key === 'Home'){
+      e.preventDefault(); setSys(MIN_SYS);
+    } else if (e.key === 'End'){
+      e.preventDefault(); setSys(maxSys);
+    }
+  });
+}
+
+/* ---------------- 步骤 3：每块盘单独选版本 ---------------- */
+function stepVersion(){
+  return `<div class="wz-inner">
+    <h3 class="wz-h">给每块盘单独选系统版本</h3>
+    <p class="wz-p">每块盘可以装不一样的系统，互不影响。装完开机时会先出现一个菜单，让你选进哪一个。</p>
+    ${wz.targets.map(t => {
+      const d = disk(t.diskId);
+      return `<div class="vrow" data-disk="${d.id}">
+        <span class="vrow-n">磁盘 ${d.id}</span>
+        <span class="vrow-s">C: ${fmt(t.sys)} · D: ${fmt(t.data)}</span>
+        <span class="vchips">
+          ${VERSIONS.map(v => `<button class="vchip${t.version === v.id ? ' on' : ''}" data-ver="${v.id}" data-vd="${d.id}">
+            ${v.name}<em>${v.build.split(' · ')[0]}</em></button>`).join('')}
+        </span>
+      </div>`;
+    }).join('')}
+    <div class="wzrest" style="margin-top:12px">
+      ${VERSIONS.map(v => `<span>${v.name}：${v.tags[0]}</span>`).join('<span class="dotsep"></span>')}
+    </div>
+  </div>`;
+}
+
+/* ---------------- 步骤 4：确认 ---------------- */
+/* 安装期盘符：真实实现里由后端 prepare() 的 plan.drive_letters 给出，
+   这里用同一套规则（从 Z 往 D 降序、跳过已占用字母）在浏览器里模拟。 */
+const LETTER_ROLES = [['windows', 'W'], ['data', 'D'], ['efi', 'EFI']];
+function usedLetters(){
+  const s = new Set(['A', 'B', 'C']);
+  disks.forEach(d => (d.parts || []).forEach(p => {
+    if (p.letter) s.add(String(p.letter).replace(':', '').toUpperCase());
+  }));
+  return s;
+}
+function allocLetters(targets){
+  const used = usedLetters();
+  const pool = 'ZYXWVUTSRQPONMLKJIHGFED'.split('').filter(l => !used.has(l));
+  let i = 0;
+  const out = {};
+  targets.forEach(t => {
+    const m = {};
+    LETTER_ROLES.forEach(([key]) => { if (i < pool.length) m[key] = pool[i++]; });
+    out[t.diskId] = m;
+  });
+  return out;
+}
+function roleLetters(m){
+  if (!m) return '—';
+  return LETTER_ROLES.filter(([k]) => m[k]).map(([k, label]) => label + ':' + m[k]).join('  ');
+}
+
+function stepConfirm(){
+  /* 设置里关掉「安装前列出会被清空的分区」时，不再要求手工勾选 */
+  if (settings.confirmInstall === false) wz.ack = true;
+  const letters = allocLetters(wz.targets);
+  const rows = wz.targets.map(t => {
+    const d = disk(t.diskId);
+    const v = VERSIONS.find(x => x.id === t.version);
+    const lost = d.parts.filter(p => p.fs !== 'FREE');
+    return `<tr>
+      <td class="mono">磁盘 ${d.id}</td>
+      <td>${d.model}</td>
+      <td>C: ${fmt(t.sys)} + D: ${fmt(t.data)}</td>
+      <td class="mono dim">${roleLetters(letters[d.id])}</td>
+      <td>${v.name} <span class="dim">${v.build.split(' · ')[0]}</span></td>
+      <td class="dim">${lost.length} 个分区被清除</td>
+    </tr>`;
+  }).join('');
+  const lostParts = t => disk(t.diskId).parts.filter(p => p.fs !== 'FREE');
+  const totalKill = wz.targets.reduce((s,t) => s + lostParts(t).length, 0);
+  const lostGB = wz.targets.reduce((s,t) => s + lostParts(t).reduce((a,p) => a + (+p.size || 0), 0), 0);
+  const ids = wz.targets.map(t => t.diskId).join('、');
+  const mins = Math.max(4, wz.targets.length * 6);
+  const killList = wz.targets.map(t => {
+    const d = disk(t.diskId);
+    const lost = lostParts(t);
+    const names = lost.map(p => (p.letter ? p.letter + ' ' : '') + (p.label || '未命名') + '（' + fmt(p.size) + '）').join('、');
+    return `<li><b>磁盘 ${d.id}</b> ${d.model}<span class="da-lost">清除 ${lost.length} 个分区 · ${names}</span></li>`;
+  }).join('');
+  return `<div class="wz-inner">
+    <h3 class="wz-h">最后一步：确认要清空的磁盘</h3>
+
+    <div class="dangeralert" role="alert">
+      <div class="da-ico">!</div>
+      <div class="da-body">
+        <div class="da-t">点「开始安装并清空磁盘」后，选中的 ${wz.targets.length} 块磁盘（磁盘 ${ids}）会被重新分区，<em>原有数据全部清空、无法恢复</em></div>
+        <div class="da-s">共 <strong>${totalKill}</strong> 个现有分区将被删除，合计约 <strong>${fmt(lostGB)}</strong> 的内容会被永久抹掉。
+          没被勾选的磁盘（包括正在使用的系统盘）不会被动到。</div>
+        <ul class="da-list">${killList}</ul>
+      </div>
+    </div>
+    <p class="wz-p" style="margin-top:10px">安装过程中不能中途取消，也不要关机或拔掉硬盘。</p>
+
+    <div class="sum" style="margin-top:2px"><table>
+      <thead><tr><th style="width:74px">磁盘</th><th>型号</th><th style="width:160px">装完后的分区</th><th style="width:186px">安装期盘符</th><th style="width:150px">系统版本</th><th style="width:120px">影响</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    <p class="wz-p dim" style="margin-top:6px;font-size:11.5px">盘符只在安装过程中使用：装完第一次开机后 Windows 会重新分配盘符，系统分区固定为 C:。</p>
+
+    <label class="ackbar${wz.ack ? ' on' : ''}"><input type="checkbox" id="wzAck" ${wz.ack ? 'checked' : ''}>
+      <span>我已确认：这 ${wz.targets.length} 块磁盘上的文件会被<strong>全部清空</strong>，重新分成 C: 和 D: 两个分区来装系统，<strong>清空之后无法恢复</strong>。</span></label>
+
+    <div class="wz-startrow">
+      <button class="tbtn danger startbtn" id="wzStart" ${wz.ack ? '' : 'disabled'}>开始安装并清空磁盘</button>
+      <span class="wz-startnote">点下去立即开始写盘，不能中途取消 · 预计 ${mins} 分钟</span>
+    </div>
+  </div>`;
+}
+
+/* ---------------- 绑定 ---------------- */
+function bindWizard(){
+  if (wz.step === 1){
+    $$('#wzBody .dsel').forEach(el => el.addEventListener('click', () => {
+      const id = +el.dataset.disk;
+      if (el.dataset.no){
+        const d = disk(id);
+        toast(d.system ? '磁盘 0 是正在用的系统盘，不能覆盖' : '磁盘 2 是只读设备，不能写入');
+        return;
+      }
+      if (tgtOf(id)) wz.targets = wz.targets.filter(t => t.diskId !== id);
+      else addTarget(id);
+      wz.ack = false;
+      renderWizard();
+    }));
+    $$('#wzBody [data-sel]').forEach(b => b.addEventListener('click', () => {
+      if (b.dataset.sel === 'none') wz.targets = [];
+      else disks.filter(installable).forEach(d => addTarget(d.id));
+      wz.ack = false;
+      renderWizard();
+    }));
+  } else if (wz.step === 2){
+    $$('#wzBody .szi').forEach(inp => {
+      const id = +inp.dataset.disk;
+      const kind = inp.dataset.kind;
+      inp.addEventListener('input', () => {
+        const t = tgtOf(id);
+        if (!t) return;
+        const v = inp.value === '' ? 0 : +inp.value;
+        if (kind === 'sys') t.sys = v; else t.data = v;
+        refreshTgt(id);
+      });
+    });
+    $$('#wzBody [data-preset]').forEach(b => b.addEventListener('click', () => {
+      const card = b.closest('.tgt');
+      const id = +(b.dataset.disk || (card ? card.dataset.disk : 0));
+      const t = tgtOf(id), d = disk(id);
+      if (!t || !d) return;
+      const key = b.dataset.preset;
+      t.sys = key === 'half' ? Math.floor(d.total / 2) : Math.min(+key, Math.floor(d.total) - 20);
+      t.data = Math.round((d.total - t.sys) * 10) / 10;
+      $('#sys-' + id).value = t.sys;
+      $('#dat-' + id).value = t.data;
+      refreshTgt(id);
+    }));
+    wz.targets.forEach(t => { bindBar(t.diskId); refreshTgt(t.diskId); });
+  } else if (wz.step === 3){
+    $$('#wzBody .vchip').forEach(b => b.addEventListener('click', () => {
+      const t = tgtOf(+b.dataset.vd);
+      if (!t) return;
+      t.version = b.dataset.ver;
+      wz.ack = false;
+      renderWizard();
+    }));
+  } else {
+    const ack = $('#wzAck');
+    if (ack) ack.addEventListener('change', () => {
+      wz.ack = ack.checked;
+      const bar = ack.closest('.ackbar');
+      if (bar) bar.classList.toggle('on', ack.checked);
+      updateFoot();
+    });
+    const st = $('#wzStart');
+    if (st) st.addEventListener('click', () => { if (wz.ack) startInstall(); });
+  }
+}
+
+function updateFoot(){
+  const back = $('#wzBack'), next = $('#wzNext'), hint = $('#wzHint');
+  if (!back || !next) return;
+  next.style.display = '';
+  if (wz.installing){
+    back.disabled = true; next.disabled = true;
+    next.textContent = '安装中…';
+    return;
+  }
+  if (wz.finished){ back.disabled = true; next.disabled = false; next.textContent = '完成'; return; }
+  back.disabled = wz.step === 1;
+  next.textContent = wz.step === 4 ? '开始安装' : '下一步';
+  hint.classList.remove('warn');
+  if (wz.step === 1){
+    next.disabled = !wz.targets.length;
+    hint.textContent = wz.targets.length ? '已选 ' + wz.targets.length + ' 块磁盘，下一步分别设置' : '至少选一块硬盘';
+  } else if (wz.step === 2){
+    next.disabled = !allValid();
+    hint.textContent = wz.targets.length > 1 ? '每块盘的两个分区都要填对' : '两个分区合计不能超过磁盘容量';
+  } else if (wz.step === 3){
+    next.disabled = !wz.targets.length;
+    hint.textContent = '';
+  } else {
+    /* 第 4 步的主操作是页内那颗红色危险按钮，底部不再放一个同名按钮 */
+    next.style.display = 'none';
+    next.disabled = !wz.ack;
+    hint.textContent = wz.ack ? '确认无误后，点下面的红色按钮开始' : '请先勾选确认项，再点红色按钮';
+    hint.classList.toggle('warn', !wz.ack);
+    const st = $('#wzStart');
+    if (st) st.disabled = !wz.ack;
+  }
+}
+
+/* ---------------- 开始安装 ---------------- */
+function startInstall(){
+  if (!allValid()){ wz.step = 2; renderWizard(); return; }
+  wz.installing = true;
+
+  const stages = ['检查镜像','重新分区','格式化分区','写入系统文件','配置启动项','收尾'];
+  const lines = [];
+  wz.targets.forEach(t => {
+    const d = disk(t.diskId);
+    const v = VERSIONS.find(x => x.id === t.version);
+    const n = d.parts.filter(p => p.fs !== 'FREE').length;
+    lines.push(['—— 磁盘 ' + d.id + '：' + v.name + ' ' + v.build.split(' · ')[0] + ' ——', 'hl']);
+    lines.push(['锁定磁盘 ' + d.id + '，阻止其它程序访问', 'wn']);
+    lines.push(['删除原有 ' + n + ' 个分区', 'wn']);
+    lines.push(['创建 系统分区 C: ' + fmt(t.sys), '']);
+    lines.push(['创建 数据分区 D: ' + fmt(t.data), '']);
+    lines.push(['把 ' + v.name + ' 镜像写入磁盘 ' + d.id, '']);
+  });
+  lines.push(['更新启动菜单，登记全部系统', '']);
+  lines.push(['移除安装介质，准备重启', '']);
+  lines.push(['全部完成', 'hl']);
+
+  $('#wzBody').innerHTML = `<div class="wp">
+    <div class="prow"><span class="pname" id="wpName">${stages[0]}…</span>
+      <span class="peta" id="wpEta">剩余时间 —</span></div>
+    <div class="track"><i id="wpBar"></i></div>
+    <ul class="stages" id="wpStages">
+      ${stages.map((s,i) => `<li data-i="${i}"><span class="sk">${i+1}</span>${s}<span class="stt"></span></li>`).join('')}
+    </ul>
+    <div class="plog" id="wpLog"></div>
+  </div>`;
+  updateFoot();
+  $('#wzHint').textContent = '安装过程中请不要关闭窗口';
+  $('#wzHint').classList.remove('warn');
+
+  const logEl = $('#wpLog');
+  const stamp = () => {
+    const t = new Date();
+    return [t.getHours(), t.getMinutes(), t.getSeconds()].map(n => String(n).padStart(2,'0')).join(':');
+  };
+  const addLine = (text, cls) => {
+    const div = document.createElement('div');
+    if (cls) div.className = cls;
+    div.innerHTML = '<span class="t">' + stamp() + '</span><span>' + text + '</span>';
+    logEl.appendChild(div);
+    logEl.scrollTop = logEl.scrollHeight;
+  };
+  addLine('开始安装：' + wz.targets.map(t => '磁盘 ' + t.diskId).join('、'), 'hl');
+
+  let pct = 0, li = 0;
+  const total = lines.length;
+  wzTimer = setInterval(() => {
+    pct = Math.min(100, pct + Math.random() * 5 + 2.5);
+    const bar = $('#wpBar');
+    if (!bar){ clearInterval(wzTimer); wzTimer = null; return; }
+    bar.style.width = pct + '%';
+    $('#wpEta').textContent = pct >= 100 ? '完成' : '剩余约 ' + Math.max(1, Math.round((100 - pct) / 100 * (wz.targets.length * 12))) + ' 秒';
+
+    const step = Math.min(stages.length - 1, Math.floor(pct / 100 * stages.length));
+    $$('#wpStages li').forEach((el, i) => {
+      el.classList.toggle('done', i < step || pct >= 100);
+      el.classList.toggle('on', i === step && pct < 100);
+      el.querySelector('.stt').textContent = i < step || pct >= 100 ? '完成' : (i === step ? '进行中' : '等待');
+    });
+    $('#wpName').textContent = stages[step] + '…';
+
+    if (li < total && Math.random() > 0.3){ addLine(lines[li][0], lines[li][1]); li++; }
+    if (pct >= 100){
+      clearInterval(wzTimer); wzTimer = null;
+      while (li < total){ addLine(lines[li][0], lines[li][1]); li++; }
+      setTimeout(finishInstall, 650);
+    }
+  }, 300);
+}
+
+function finishInstall(){
+  const rows = wz.targets.map(t => {
+    const d = disk(t.diskId);
+    const v = VERSIONS.find(x => x.id === t.version);
+    return `<tr><td class="k" style="width:64px">磁盘 ${d.id}</td>
+      <td class="v">${v.name} ${v.build.split(' · ')[0]}　<span style="font-weight:400;color:var(--muted)">C: ${fmt(t.sys)} / D: ${fmt(t.data)}</span></td></tr>`;
+  }).join('');
+  commitInstall();
+  wz.installing = false;
+  wz.finished = true;
+  $('#wzBody').innerHTML = `<div class="wz-inner" style="padding:26px 0 10px">
+    <div style="font-size:15px;font-weight:600;margin-bottom:4px">全部装好了</div>
+    <p class="wz-p">可以拔掉安装介质，重启这台电脑。第一次开机会慢一些，属于正常现象。</p>
+    <div class="sum" style="max-width:520px"><table>${rows}</table></div>
+  </div>`;
+  updateFoot();
+  $('#wzHint').textContent = '装完后这台电脑就可以正常开机了';
+  toast('系统安装完成');
+}
+
+function commitInstall(){
+  const stamp = Date.now();
+  wz.targets.forEach((t, i) => {
+    const d = disk(t.diskId);
+    const v = VERSIONS.find(x => x.id === t.version);
+    const rest = Math.round((d.total - t.sys - t.data) * 100) / 100;
+    const parts = [
+      { id:'s' + stamp + i, letter:'C:', label:'系统', fs:'NTFS', size:t.sys, type:'主分区', system:true },
+      { id:'t' + stamp + i, letter:'D:', label:'数据', fs:'NTFS', size:t.data, type:'主分区' }
+    ];
+    if (rest > 0.05) parts.push({ id:'u' + stamp + i, letter:'', label:'', fs:'FREE', size:rest, type:'未分配' });
+    d.parts = parts;
+    d.table = 'GPT';
+    d.os = v.name + ' ' + v.build.split(' · ')[0];
+    log('磁盘 ' + d.id + ' 已安装 ' + d.os, 'ok');
+  });
+  const first = wz.targets[0];
+  if (first){
+    const d = disk(first.diskId);
+    state.diskId = d.id;
+    state.partId = d.parts.length ? d.parts[0].id : null;
+  }
+  renderAll();
+}
+
+/* ---------------- 视图切换：主页面 / 系统安装 / 设置 ---------------- */
+function gotoView(nav){
+  if (!nav || nav === view) return;
+  if (wz.installing && nav !== 'install'){
+    toast('正在写入磁盘，装完再切换页面');
+    return;
+  }
+  if (nav === 'install'){ openWizard(); return; }
+
+  /* 离开向导：只收起，进度保留 */
+  if (view === 'install') leaveWizard();
+  view = nav === 'settings' ? 'settings' : 'main';
+  applyView();
+  if (view === 'settings') renderSettings();
+  log(view === 'settings' ? '打开设置' : '回到主页面');
+}
+
+$('#navseg').addEventListener('click', e => {
+  const b = e.target.closest('button[data-nav]');
+  if (b) gotoView(b.dataset.nav);
+});
+
+/* 设置页的保存 / 恢复默认 */
+$('#setSave').addEventListener('click', () => saveSettings());
+$('#setDefaults').addEventListener('click', () => {
+  Object.assign(settings, SETTINGS_DEFAULTS);
+  settingsDirty = true;
+  saveSettings(true);
+  renderSettings();
+  toast('已恢复默认设置');
+  log('设置已恢复默认', 'wn');
+});
+
+/* ---------------- 向导按钮 ---------------- */
+$('#wzExit').addEventListener('click', () => {
+  if (wz.installing){ toast('安装正在进行，不能返回'); return; }
+  leaveWizard();
+});
+$('#wzReset').addEventListener('click', () => {
+  if (wz.installing){ toast('安装正在进行，不能重置'); return; }
+  resetWizardState();
+  openWizard();
+});
+$('#wzNext').addEventListener('click', () => {
+  if (wz.finished){ resetWizard(); return; }
+  if (wz.installing) return;
+  if (wz.step < 4){ wz.step++; renderWizard(); return; }
+  startInstall();
+});
+$('#wzBack').addEventListener('click', () => {
+  if (wz.installing || wz.finished) return;
+  if (wz.step > 1){ wz.step--; renderWizard(); }
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && wz.on && !wz.installing && !$('#overlay').classList.contains('on')) leaveWizard();
+});
+
+/* 初始化 */
+renderAll();
+log('就绪 · 检测到 ' + disks.length + ' 块磁盘', 'hl');
+</script>
+</body>
+</html>
