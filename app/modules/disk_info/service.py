@@ -4,10 +4,9 @@ from typing import Any
 
 from app.modules.common.service import POWERSHELL_SCAN_TIMEOUT, run_powershell
 
-# P0 补丁（G1）：保留分区明细。
-# ``POWERSHELL_SCRIPT`` 本来就已经采集了每个分区的号、盘符、大小、偏移、
-# 类型、GPT 类型和卷信息，只是 ``summarize_disk`` 之前在出口把它们丢了。
-# 现在通过 ``normalize_partition`` 把原始结构拍平成界面可直接消费的字典。
+# 保留分区明细：``POWERSHELL_SCRIPT`` 采集每个分区的号、盘符、大小、偏移、
+# 类型、GPT 类型和卷信息，``normalize_partition`` 把原始结构拍平成界面可直接
+# 消费的字典。
 
 POWERSHELL_SCRIPT = r"""
 $disks = Get-Disk | Sort-Object Number
@@ -279,7 +278,7 @@ def summarize_disk(disk: dict[str, Any]) -> dict[str, Any]:
         "is_offline": bool(disk.get("is_offline")),
         "is_read_only": bool(disk.get("is_read_only")),
         "partition_count": len(partitions),
-        # P0 补丁：分区明细随摘要一起下发
+        # 分区明细随摘要一起下发
         "partitions": partitions,
     }
 

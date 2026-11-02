@@ -4,8 +4,7 @@ from typing import Any
 from app.modules.common.service import print_step_results
 from app.modules.disk_info.service import scan_disks
 
-# P0 补丁（G2/G14）：三分区布局 —— EFI + Windows(C) + Data(D)。
-# 原实现要求 EFI/Windows/Data1/Data2 四个分区，现在 Data2 消失，
+# 三分区布局 —— EFI + Windows(C) + Data(D)。
 # 剩余空间全部给 Data。
 
 DiskScanner = Callable[[], list[dict[str, Any]]]

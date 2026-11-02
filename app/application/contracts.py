@@ -3,9 +3,8 @@
 这些对象只包含可序列化数据，不包含 PowerShell 命令、文件句柄或 UI 控件，
 方便 CLI、桌面 GUI 和未来的本地 HTTP 服务复用。
 
-P0 补丁（G1）：新增 ``PartitionInfo``，并让 ``DiskInfo`` 携带分区明细。
-界面需要“每块盘有哪些分区、多大、什么文件系统”才能画出分区条，
-此前的契约只到硬盘粒度，分区信息在 ``summarize_disk`` 里被丢掉了。
+``DiskInfo`` 除了硬盘级摘要，还通过 ``PartitionInfo`` 携带分区明细
+（每块盘有哪些分区、多大、什么文件系统），界面据此画出分区条。
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
-"""P0 回归：真实执行路径必须真的可达。
+"""回归测试：真实执行路径必须真的可达。
 
-覆盖三处曾经的断点：
+覆盖三处曾经的断点（历史 bug）：
 
 1. ``WorkflowController`` 从没把 ``dry_run`` 传给 ``SispService``（服务默认 True）；
 2. ``JobManager`` 的默认执行器会另造一个 ``SispService()``（也是 True），

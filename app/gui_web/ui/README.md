@@ -4,21 +4,23 @@
 
 ## 需要的文件
 
-| 文件 | 来源 |
+| 文件 | 说明 |
 |---|---|
-| `index.html` | 由原型 `disk-tools-app.html` 复制而来（单文件即可运行） |
-| `bridge.js` | 已提供，负责任意 `window.pywebview.api` 调用的封装 |
+| `index.html` | 单文件界面，包含全部 HTML/CSS/JS |
 
-最小可运行状态 = `index.html` + `bridge.js`。如果先把原型整份丢进来，
-`bridge.js` 可以暂时不引入，原型会走自己的假数据，界面能看但改不了真磁盘。
+`index.html` 是唯一必需文件。界面通过 **REST（fetch）+ SSE（EventSource）**
+与本机 HTTP 后端通信，不再依赖 `window.pywebview.api`：
+
+- 操作调用走 `API_ROUTES` 路由映射表（`call(name, ...args)` 约定不变）；
+- 任务事件走 `GET /api/events` 实时推送，断线自动重连补发；
+- 完整协议见仓库根目录 `Docs/web-api.md`。
 
 ## 快速验证
 
 ```powershell
-python -m app.gui_web --mock      # 只开窗口，不连后端
-python -m app.gui_web --dry-run   # 连后端，但所有写盘动作都是演练
+python -m app.gui_web.main --mock       # 只开窗口，不连后端
+python -m app.gui_web.main --dry-run    # 连后端，但所有写盘动作都是演练
+python -m app.gui_web.main --serve      # 浏览器模式：起本机 HTTP 服务
 ```
 
-## 把原型接上真后端要改的 5 个地方
-
-见仓库根目录 `app/gui_web/ui/FRONTEND.md`（随补丁包提供）。
+界面启动后可访问接口文档：`http://127.0.0.1:8765/docs`。

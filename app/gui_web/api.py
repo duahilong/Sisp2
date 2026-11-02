@@ -9,7 +9,7 @@
 禁止在此层写任何磁盘、PowerShell 或业务判断逻辑；
 也不 import 除 ``workflow`` 之外的模块，避免把重依赖带进界面进程。
 
-P0 补丁：新增设置相关方法（get_settings / update_settings / reset_settings /
+设置相关方法（get_settings / update_settings / reset_settings /
 probe_path / probe_all_paths / pick_path / open_settings_folder），
 ``SettingsStore`` 通过构造参数注入，不传时按默认路径创建。
 """

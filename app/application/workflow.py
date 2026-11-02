@@ -14,7 +14,7 @@
 本模块不依赖 Qt，也不执行任何 PowerShell 或磁盘操作，因此可以直接用
 普通单元测试覆盖。
 
-P0 补丁（G3）：``prepare()`` 现在既接受 ``[1, 3]``，也接受
+``prepare()`` 既接受 ``[1, 3]``，也接受
 ``{1: {"c_size": 400, "data_size": 800}}`` 这种“每块盘一套参数”的写法；
 每个任务用合并后的配置载荷构造 ``JobSpec``，盘符分配仍由一次全局调用完成，
 避免并发分配撞车。
@@ -45,7 +45,7 @@ _CHECK_KEYS = {
     "配置文件可解析性检查": "config_parse",
 }
 
-# P0 补丁（G14）：三分区布局，只需 3 个盘符
+# 三分区布局，只需 3 个盘符
 _PLAN_STEP_KEYS = ("efi", "windows", "data")
 _DRY_RUN_WARNING = "dry-run 模式：只展示执行计划，不会执行任何写盘操作"
 _DESTRUCTIVE_WARNING = "破坏性操作：将清空目标硬盘全部数据，请再次核对硬盘编号和身份"
@@ -244,9 +244,8 @@ class WorkflowController:
             else None
         )
         self._real_runner = real_runner
-        # P0 补丁：服务必须跟着控制器的开关走——dry-run、写盘白名单、执行器
-        # 三者不再各自取默认值（旧实现 new 了一个 dry_run=True 的 SispService，
-        # 于是“真实执行”这条路径永远走不到）。
+        # 服务必须跟着控制器的开关走——dry-run、写盘白名单、执行器
+        # 三者由控制器统一装配，不各自取默认值。
         self._service_injected = service is not None
         self._service = service if service is not None else self._build_service()
         # 默认执行器直接调本会话的 service；旧的 JobManager 会另造一个 dry-run 服务。
@@ -304,7 +303,7 @@ class WorkflowController:
 
     @property
     def service(self) -> SispService:
-        """P0 补丁（G3）：暴露应用服务，界面层不再直接够私有属性。"""
+        """暴露应用服务，界面层不再直接够私有属性。"""
         return self._service
 
     @property
@@ -415,7 +414,7 @@ class WorkflowController:
         return list(disks)
 
     def check_config(self, config_path: str | None = None) -> Any:
-        """P0 补丁（G3）：单独重新校验配置文件，不重建会话。
+        """单独重新校验配置文件，不重建会话。
 
         返回 ``ConfigCheckResult``；界面只需要 ``passed/message/error_code``。
         """
@@ -453,7 +452,7 @@ class WorkflowController:
             raise WorkflowError("尚未选择任何硬盘")
 
         active_dry_run = self._dry_run if dry_run is None else bool(dry_run)
-        # P0 补丁：真实模式下先把服务的 dry_run 与白名单对齐。
+        # 真实模式下先把服务的 dry_run 与白名单对齐。
         # 没有显式白名单时（GUI 走这条），把“本次选中的硬盘”加入白名单——
         # 用户在界面上勾选 + 后续确认本身就是授权动作，与 CLI 的
         # --allow-disks 等价，但只对本会话选过的盘放行。

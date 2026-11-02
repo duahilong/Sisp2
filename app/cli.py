@@ -49,7 +49,7 @@ EXIT_INTERRUPTED = 130
 
 STEP_TOTAL = 5
 
-# 测试模式的约定环境变量（见 TESTING-ENV.md §6.1），下游断言可直接读它
+# 测试模式的约定环境变量，下游断言可直接读它
 TEST_MODE_ENV = "SISP_TEST_MODE"
 
 # 虚拟盘判断：总线类型或型号里出现下列特征之一
@@ -68,7 +68,7 @@ VIRTUAL_MODEL_HINTS = (
 
 
 class BackendUnavailable(RuntimeError):
-    """后端模块缺失（当前工作拷贝不完整）时抛出，提示使用者换完整仓库。"""
+    """后端应用层模块无法导入时抛出，提示使用者在完整仓库里运行。"""
 
 
 # ---------------------------------------------------------------- 输出
@@ -222,8 +222,7 @@ def _workflow_module() -> Any:
     except ModuleNotFoundError as exc:
         missing = getattr(exc, "name", None) or str(exc)
         raise BackendUnavailable(
-            f"后端模块缺失：{missing}。当前工作拷贝只包含本次要改的文件，"
-            "请在完整仓库里运行本命令（见 MIGRATION.md 第 2 节）。"
+            f"后端模块缺失：{missing}。请在包含完整后端的仓库里运行本命令。"
         ) from exc
     return workflow_module
 
@@ -294,7 +293,7 @@ def create_controller(
     ):
         if _supports_keyword(controller_class.__init__, name):
             kwargs[name] = value
-    # P0 补丁：控制器现在自己装配服务（dry_run / 白名单 / real_runner），
+    # 控制器自己装配服务（dry_run / 白名单 / real_runner），
     # 白名单必须走构造参数，否则真实写盘会在安全闸门处被拒绝。
     if allow_disks and _supports_keyword(controller_class.__init__, "allowed_disk_numbers"):
         kwargs["allowed_disk_numbers"] = list(allow_disks)
@@ -311,7 +310,7 @@ def _unique(items: Sequence[str]) -> list[str]:
 
 
 def is_virtual_disk(disk: Any) -> bool:
-    """按总线类型或型号判断是不是虚拟盘（与 TESTING-ENV.md §6.1 的规则一致）。"""
+    """按总线类型或型号判断是不是虚拟盘。"""
     bus_type = str(getattr(disk, "bus_type", "") or "").strip().lower()
     model = str(getattr(disk, "model", "") or "").strip().lower()
     if bus_type in VIRTUAL_BUS_TYPES:

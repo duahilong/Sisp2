@@ -479,7 +479,7 @@ input[type="radio"] { accent-color: var(--accent); }
     <span class="badge" id="connBadge"><span class="dot"></span>正在连接后端…</span>
     <span class="badge" id="modeBadge">模式未知</span>
     <span class="badge" id="verBadge">版本 —</span>
-    <button class="btn small" id="btnReconnect" title="重新检测 pywebview.api">重新连接</button>
+    <button class="btn small" id="btnReconnect" title="重新检测后端连接">重新连接</button>
     <button class="btn small" id="btnRefreshAll">刷新</button>
   </div>
 </header>
@@ -619,7 +619,7 @@ input[type="radio"] { accent-color: var(--accent); }
           <label class="check"><input type="checkbox" id="logAuto" checked> 自动滚动</label>
           <button class="btn small" id="btnClearLog">清空日志</button>
           <span class="spacer"></span>
-          <span class="hint">每 1.2 秒按游标轮询 poll_events。</span>
+          <span class="hint">任务事件由 SSE 实时推送（GET /api/events），断线自动重连并补发。</span>
         </div>
         <div class="log" id="logBox"><div class="log-line placeholder">等待事件…</div></div>
       </div>
@@ -748,7 +748,8 @@ input[type="radio"] { accent-color: var(--accent); }
   };
 
   var API_DOC = [
-    ['poll_events(cursor, limit)', '是', '按游标取任务事件 + 任务列表，界面每 1.2 秒轮询'],
+    ['GET /api/events（SSE）', '是', '任务事件实时推送 + 任务列表快照；断线按游标补发'],
+    ['poll_events(cursor, limit)', '是', '轮询兜底端点（POST /api/events/poll），确认任务后补拉一次'],
     ['start_session(config_path, dry_run)', '是', '运行前检查、读配置、扫描磁盘（「运行预检」）'],
     ['refresh_disks()', '是', '重新扫描磁盘（「重新扫描」与启动时）'],
     ['prepare(selection, dry_run)', '是', '生成执行计划，selection 为磁盘号数组'],
@@ -870,21 +871,73 @@ input[type="radio"] { accent-color: var(--accent); }
   }
 
   /* ============================================================== API 封装 */
+  /* 与 app/gui_web/server.py 的路由一一对应；调用点仍用 call(name, ...args)，
+     传输层对业务代码透明。非 HTTP 环境（旧 pywebview js_api 模式）走原有桥。 */
+  function httpMode() {
+    return location.protocol === 'http:' || location.protocol === 'https:';
+  }
+
+  var HTTP_MARKER = {};
+
+  var API_ROUTES = {
+    start_session:       { method: 'POST',   url: '/api/session', body: function (a) { return { config_path: a[0] || null, dry_run: !!a[1] }; } },
+    refresh_disks:       { method: 'GET',    url: '/api/disks' },
+    prepare:             { method: 'POST',   url: '/api/prepare', body: function (a) { return { selection: a[0], dry_run: a.length > 1 ? a[1] : null }; } },
+    submit:              { method: 'POST',   url: '/api/submit' },
+    confirm:             { method: 'POST',   url: '/api/confirm', body: function (a) { return { job_ids: a[0] || null }; } },
+    cancel:              { method: 'POST',   url: '/api/cancel', body: function (a) { return { job_id: a[0] || null }; } },
+    get_job:             { method: 'GET',    url: function (a) { return '/api/jobs/' + encodeURIComponent(a[0]); } },
+    poll_events:         { method: 'POST',   url: '/api/events/poll', body: function (a) { return { cursor: a[0] || 0, limit: a[1] || 300 }; } },
+    get_settings:        { method: 'GET',    url: '/api/settings' },
+    update_settings:     { method: 'PUT',    url: '/api/settings', body: function (a) { return a[0] || {}; } },
+    reset_settings:      { method: 'DELETE', url: '/api/settings' },
+    probe_path:          { method: 'POST',   url: '/api/settings/probe', body: function (a) { return { key: a[0] }; } },
+    probe_all_paths:     { method: 'POST',   url: '/api/settings/probe_all' },
+    pick_path:           { method: 'POST',   url: '/api/dialog/pick', body: function (a) { return { key: a[0] || '', kind: a[1] || 'file' }; } },
+    open_settings_folder:{ method: 'POST',   url: '/api/settings/open_folder' },
+    check_config:        { method: 'POST',   url: '/api/config/check', body: function (a) { return { config_path: a[0] || null }; } },
+    app_info:            { method: 'GET',    url: '/api/info' }
+  };
+
+  function httpCall(name, args) {
+    var route = API_ROUTES[name];
+    if (!route) { return Promise.reject(new Error('后端未提供方法：' + name)); }
+    var url = typeof route.url === 'function' ? route.url(args) : route.url;
+    var options = { method: route.method, headers: {} };
+    if (route.body) {
+      options.headers['Content-Type'] = 'application/json';
+      options.body = JSON.stringify(route.body(args));
+    }
+    return fetch(url, options).then(function (resp) {
+      return resp.json().catch(function () {
+        throw new Error('后端响应不是合法 JSON（HTTP ' + resp.status + '）');
+      });
+    });
+  }
+
   function apiObject() {
+    if (httpMode()) { return HTTP_MARKER; }
     return (window.pywebview && window.pywebview.api) ? window.pywebview.api : null;
   }
 
   function call(name) {
     var args = Array.prototype.slice.call(arguments, 1);
-    var api = apiObject();
-    if (!api) {
-      return Promise.reject(new Error('pywebview 尚未就绪，无法调用 ' + name));
+    if (!apiObject()) {
+      return Promise.reject(new Error('后端尚未就绪，无法调用 ' + name));
     }
-    if (typeof api[name] !== 'function') {
-      return Promise.reject(new Error('后端未提供方法：' + name));
+    var invoke;
+    if (httpMode()) {
+      invoke = httpCall(name, args);
+    } else {
+      invoke = Promise.resolve().then(function () {
+        var api = apiObject();
+        if (typeof api[name] !== 'function') {
+          throw new Error('后端未提供方法：' + name);
+        }
+        return api[name].apply(api, args);
+      });
     }
-    return Promise.resolve()
-      .then(function () { return api[name].apply(api, args); })
+    return Promise.resolve(invoke)
       .then(function (res) {
         if (res && typeof res === 'object' && 'ok' in res) {
           if (!res.ok) {
@@ -956,7 +1009,7 @@ input[type="radio"] { accent-color: var(--accent); }
     state.ready = true;
     if (state.retryTimer) { clearInterval(state.retryTimer); state.retryTimer = null; }
     setConn('已连接后端', 'ok');
-    bootLog('pywebview 已就绪，开始初始化。', 'ok');
+    bootLog('后端已连接，开始初始化。', 'ok');
     startPolling();
     run('初始化', function () {
       return Promise.resolve()
@@ -968,6 +1021,8 @@ input[type="radio"] { accent-color: var(--accent); }
   }
 
   function waitForBridge() {
+    // HTTP 模式（--serve / 桌面窗口加载本机服务）没有桥接等待，直接初始化。
+    if (httpMode()) { boot(); return; }
     var attempts = 0;
     state.retryTimer = setInterval(function () {
       attempts += 1;
@@ -1597,6 +1652,9 @@ input[type="radio"] { accent-color: var(--accent); }
   }
 
   function startPolling() {
+    // HTTP 模式：SSE 实时推送，断线由浏览器自动重连（Last-Event-ID 补发）；
+    // 非 HTTP 环境退回 1.2 秒游标轮询。
+    if (httpMode()) { startEventStream(); return; }
     if (state.pollTimer) { return; }
     state.pollTimer = setInterval(function () {
       if (!state.ready || state.polling) { return; }
@@ -1616,6 +1674,36 @@ input[type="radio"] { accent-color: var(--accent); }
         state.polling = false;
       });
     }, 1200);
+  }
+
+  function startEventStream() {
+    if (state.eventSource) { return; }
+    var es;
+    try {
+      es = new EventSource('/api/events?cursor=' + encodeURIComponent(state.cursor || 0));
+    } catch (err) {
+      showError('事件流', err);
+      return;
+    }
+    state.eventSource = es;
+    es.onopen = function () {
+      state.pollErrors = 0;
+      setConn('已连接后端', 'ok');
+    };
+    es.onmessage = function (message) {
+      var data;
+      try { data = JSON.parse(message.data); } catch (err) { return; }
+      if (!data || typeof data !== 'object') { return; }
+      if (typeof data.cursor === 'number' && data.cursor >= state.cursor) {
+        state.cursor = data.cursor;
+      }
+      if (Array.isArray(data.events)) { consumeEvents(data.events); }
+      else if (data.event) { consumeEvents([data.event]); }
+      if (Array.isArray(data.jobs)) { applyJobs(data.jobs); }
+    };
+    es.onerror = function () {
+      setConn('事件流中断，重连中…', 'warn');
+    };
   }
 
   /* ============================================================== 执行动作 */

@@ -1,7 +1,7 @@
 """盘符分配与 worker 盘符参数解析。
 
-P0 补丁（G14）：三分区布局（EFI + C + D）后，每块盘只需要 3 个盘符，
-角色键从 ``efi/windows/data1/data2`` 收敛为 ``efi/windows/data``。
+采用三分区布局（EFI + C + D），每块盘需要 3 个盘符，
+角色键为 ``efi/windows/data``。
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from app.modules.common.service import get_system_drive_letter
 AVAILABLE_DRIVE_LETTERS = [
     "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
 ]
-# P0 补丁：三分区（EFI / Windows / Data）
+# 三分区（EFI / Windows / Data）
 LETTERS_PER_DISK = 3
 DRIVE_LETTER_ROLES = ("efi", "windows", "data")
 

@@ -16,9 +16,9 @@
 
 也就是说，默认构造 + 默认调用一定不会碰磁盘；这不是配置项，而是代码路径本身。
 
-依赖说明：``app.modules.common.service`` 在当前工作拷贝里缺失，导致
-``app.modules.disk_info`` / ``app.drive_letters`` 无法导入。本模块对它们的引用
-全部放在函数内部并带 ``ImportError`` 兜底，保证 ``import`` 本身永远可用。
+导入说明：本模块对 ``app.modules.disk_info`` / ``app.drive_letters`` 的引用
+放在函数内部并带 ``ImportError`` 兜底，这两个模块不可用时仍能 ``import``
+本模块，并退回到内置的只读扫描与同规则盘符分配。
 """
 
 from __future__ import annotations
@@ -172,7 +172,7 @@ class SispService:
         """返回硬盘摘要列表（纯只读）。
 
         优先用 ``app.modules.disk_info.service.scan_disk_summaries``；
-        该模块依赖缺失时退回到本模块内置的 ``Get-Disk`` 扫描。
+        该模块不可用时退回到本模块内置的 ``Get-Disk`` 扫描。
         """
         if self._disk_scanner is not None:
             return [dict(item) for item in self._disk_scanner()]
