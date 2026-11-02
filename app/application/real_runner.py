@@ -45,6 +45,7 @@ from app.models import STEP_FAILED, STEP_OK, STEP_SKIPPED, StepResult, WorkerRes
 _LOGGER = logging.getLogger(__name__)
 
 DISKPART_TIMEOUT = 600.0
+LETTER_RELEASE_TIMEOUT = 120.0
 DISM_TIMEOUT = 3 * 3600.0
 BCDBOOT_TIMEOUT = 120.0
 VERIFY_TIMEOUT = 120.0
@@ -234,15 +235,23 @@ class WindowsDiskRunner:
             for key in _STEP_ORDER + ("image", "boot"):
                 steps.append(StepResult(key=key, title=_STEP_TITLES[key], status=STEP_SKIPPED, message="前置条件不满足"))
         else:
-            steps, failure = self._run_steps(
-                disk_number=disk_number,
-                payload=payload,
-                letters=letters,
-                image_path=image_path,
-                cancel_event=cancel_event,
-                log=log,
-                steps=steps,
-            )
+            # tracker 用来保证：只要 diskpart 开始动盘，就尝试释放 EFI 盘符，
+            # 避免隐藏 EFI 卷的盘符在下次 clean 后变成幽灵盘符。
+            tracker = {"diskpart_ran": False}
+            try:
+                steps, failure = self._run_steps(
+                    disk_number=disk_number,
+                    payload=payload,
+                    letters=letters,
+                    image_path=image_path,
+                    cancel_event=cancel_event,
+                    log=log,
+                    steps=steps,
+                    tracker=tracker,
+                )
+            finally:
+                if tracker["diskpart_ran"]:
+                    self._release_efi_letter(disk_number, letters.get("efi"), log)
 
         finished = datetime.now()
         duration = (finished - started).total_seconds()
@@ -287,6 +296,7 @@ class WindowsDiskRunner:
         cancel_event: threading.Event,
         log: _CommandLog,
         steps: list[StepResult],
+        tracker: dict[str, bool] | None = None,
     ) -> tuple[list[StepResult], str | None]:
         partitions = payload.get("partition_info")
         info = partitions if isinstance(partitions, Mapping) else {}
@@ -317,6 +327,8 @@ class WindowsDiskRunner:
             return steps, "任务已取消（未开始写盘）"
 
         try:
+            if tracker is not None:
+                tracker["diskpart_ran"] = True
             code, output = self._run_diskpart(script, log)
         except Exception as exc:  # noqa: BLE001 - 统一翻成步骤失败
             steps.append(
@@ -452,7 +464,12 @@ class WindowsDiskRunner:
         log.block("diskpart 脚本", "\n".join(lines))
         return lines
 
-    def _run_diskpart(self, lines: Sequence[str], log: _CommandLog) -> tuple[int, str]:
+    def _run_diskpart(
+        self,
+        lines: Sequence[str],
+        log: _CommandLog,
+        timeout: float = DISKPART_TIMEOUT,
+    ) -> tuple[int, str]:
         if not self.diskpart:
             raise RunnerError("找不到 diskpart.exe")
         handle, path = tempfile.mkstemp(prefix="sisp-diskpart-", suffix=".txt")
@@ -460,13 +477,39 @@ class WindowsDiskRunner:
         try:
             # diskpart 只认 ANSI 脚本；这里的脚本全是 ASCII。
             Path(path).write_text("\r\n".join(lines) + "\r\n", encoding="ascii")
-            code, output, _elapsed = self._spawn([self.diskpart, "/s", path], DISKPART_TIMEOUT, log)
+            code, output, _elapsed = self._spawn([self.diskpart, "/s", path], timeout, log)
             return code, output
         finally:
             try:
                 os.remove(path)
             except OSError:
                 pass
+
+    def _release_efi_letter(
+        self,
+        disk_number: int,
+        letter: str | None,
+        log: _CommandLog,
+    ) -> None:
+        """任务结束后释放 EFI 盘符。
+
+        EFI 是隐藏卷，`clean` 后它的盘符可能残留成幽灵盘符（DriveInfo 里
+        IsReady=False），下次 assign 会失败；这里主动 remove letter。
+        清理失败只记日志，不影响已经成功的写盘结果。
+        """
+        if not letter:
+            return
+        lines = [f"select volume {letter}", f"remove letter={letter}", "exit"]
+        log.block("释放 EFI 盘符", "\n".join(lines))
+        try:
+            code, _output = self._run_diskpart(lines, log, timeout=LETTER_RELEASE_TIMEOUT)
+        except Exception:  # noqa: BLE001 - 清理失败不能影响任务结果
+            log.write(f"释放 EFI 盘符 {letter} 失败（已忽略）")
+            return
+        if code == 0:
+            log.write(f"已释放 EFI 盘符 {letter}")
+        else:
+            log.write(f"释放 EFI 盘符 {letter} 失败（退出码 {code}），不影响任务结果")
 
     def _apply_image(
         self,

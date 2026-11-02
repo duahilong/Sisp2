@@ -81,8 +81,15 @@ $result | ConvertTo-Json -Depth 6
 
 USED_DRIVE_LETTERS_SCRIPT = r"""
 $letters = @()
+# Win32_LogicalDisk 能看见 Get-Volume/Get-Partition 不报告的遗留（幽灵）盘符。
+$letters += Get-CimInstance Win32_LogicalDisk |
+    Where-Object { $_.DeviceID -match '^[A-Za-z]:' } |
+    ForEach-Object { $_.DeviceID.Substring(0, 1).ToUpper() }
+# DriveInfo.GetDrives() 包含 IsReady=False 的驱动器（已删除卷残留的盘符）。
+$letters += [System.IO.DriveInfo]::GetDrives() |
+    ForEach-Object { $_.Name.Substring(0, 1).ToUpper() }
 $letters += Get-Volume | Where-Object { $_.DriveLetter } | ForEach-Object { $_.DriveLetter.ToString().ToUpper() }
-$letters += Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Name -match '^[A-Z]$' } | ForEach-Object { $_.Name.ToUpper() }
+$letters += Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Name -match '^[A-Za-z]$' } | ForEach-Object { $_.Name.ToUpper() }
 $letters | Select-Object -Unique | Sort-Object
 """.strip()
 

@@ -316,6 +316,21 @@ class SispService:
         if system_letter:
             used_letters.add(system_letter)
 
+        # 摘要只能看到 Get-Partition 报告的盘符；EFI 等隐藏卷或已删除卷留下的
+        # 幽灵盘符（DriveInfo IsReady=False）会被漏掉，导致 assign letter 失败。
+        try:
+            from app.modules.disk_info.service import scan_used_drive_letters
+        except ImportError:
+            _LOGGER.debug("disk_info 模块不可用，跳过系统盘符扫描")
+        else:
+            try:
+                for letter in scan_used_drive_letters():
+                    text = str(letter).strip().upper()
+                    if text:
+                        used_letters.add(text)
+            except Exception as exc:  # noqa: BLE001 - 扫描失败不阻断建计划
+                _LOGGER.warning("扫描系统已用盘符失败，仅使用磁盘摘要中的盘符: %s", exc)
+
         if resource_resolver is not None:
             for number in disk_numbers:
                 try:

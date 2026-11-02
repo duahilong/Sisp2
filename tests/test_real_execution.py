@@ -504,3 +504,63 @@ def test_prepare_does_not_accumulate_implicit_allowlist():
     # 开新会话同样清空隐式授权。
     controller.start(None, dry_run=False)
     assert service.allowed_disk_numbers == frozenset()
+
+
+# ---------------------------------------------------------------- EFI 盘符释放
+def test_release_efi_letter_builds_diskpart_script():
+    runner = WindowsDiskRunner()
+    seen: list[list[str]] = []
+
+    def fake_diskpart(lines, log, timeout=600.0):
+        seen.append(list(lines))
+        return 0, "ok"
+
+    runner._run_diskpart = fake_diskpart  # type: ignore[method-assign]
+    runner._release_efi_letter(2, "E", _CommandLog(None))
+
+    assert seen == [["select volume E", "remove letter=E", "exit"]]
+
+
+def test_release_efi_letter_skips_without_letter():
+    runner = WindowsDiskRunner()
+    seen: list[list[str]] = []
+    runner._run_diskpart = lambda lines, log, timeout=600.0: (seen.append(list(lines)) or (0, "ok"))
+
+    runner._release_efi_letter(2, None, _CommandLog(None))
+
+    assert seen == []
+
+
+def test_runner_releases_efi_letter_even_when_image_fails(tmp_path):
+    image = tmp_path / "tiny.wim"
+    image.write_bytes(b"x")
+    runner = WindowsDiskRunner(
+        diskpart="diskpart.exe",
+        dism="dism.exe",
+        bcdboot="bcdboot.exe",
+        powershell="powershell.exe",
+    )
+    scripts: list[list[str]] = []
+
+    def fake_diskpart(lines, log, timeout=600.0):
+        scripts.append(list(lines))
+        return 0, "ok"
+
+    runner._run_diskpart = fake_diskpart  # type: ignore[method-assign]
+    runner._apply_image = lambda image_path, index, target, log: (87, "bad image", 0.1)
+
+    spec = SimpleNamespace(
+        disk_number=2,
+        config_payload={
+            "partition_info": {"efi_size_mb": 100, "c_size_gb": 3, "data_size_gb": "auto"},
+            "image_info": {"image_path": str(image), "image_index": 1},
+        },
+        drive_letters={"efi": "E", "windows": "F", "data": "G"},
+    )
+
+    result = runner.run(spec, threading.Event())
+
+    assert result.success is False
+    assert "应用镜像失败" in (result.error or "")
+    assert scripts[0][:2] == ["select disk 2", "clean"]
+    assert ["select volume E", "remove letter=E", "exit"] in scripts
