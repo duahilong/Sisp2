@@ -9,7 +9,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.cli import Reporter, _print_jobs, _print_step_records, _result_log_path
+from app.cli import (
+    Reporter,
+    _print_jobs,
+    _print_step_records,
+    _result_log_path,
+    create_controller,
+)
 from app.models import STEP_FAILED, STEP_OK, STEP_SKIPPED, StepResult, WorkerResult
 
 
@@ -65,3 +71,14 @@ def test_print_jobs_reports_log_path_and_error(capsys) -> None:
     out = capsys.readouterr().out
     assert "日志：C:\\logs\\disk-runner.log" in out
     assert "原因：diskpart 失败" in out
+
+
+def test_create_controller_passes_log_dir(tmp_path) -> None:
+    controller = create_controller(
+        dry_run=True,
+        test_mode=False,
+        allow_disks=None,
+        log_dir=str(tmp_path),
+    )
+
+    assert controller._log_dir == str(tmp_path)

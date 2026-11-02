@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 from app.application.contracts import DiskInfo
-from app.application.jobs import ExecutionPlan, JobManager, JobSpec
+from app.application.jobs import ExecutionPlan, JobManager, JobSpec, JobStatus
 from app.application.real_runner import (
     WindowsDiskRunner,
     _CommandLog,
@@ -564,3 +564,17 @@ def test_runner_releases_efi_letter_even_when_image_fails(tmp_path):
     assert "应用镜像失败" in (result.error or "")
     assert scripts[0][:2] == ["select disk 2", "clean"]
     assert ["select volume E", "remove letter=E", "exit"] in scripts
+
+
+def test_cancelled_job_reports_cancelled_even_if_executor_fails():
+    def executor(spec, cancel_event):
+        cancel_event.set()
+        return WorkerResult.failure(spec.disk_number, "任务已取消（镜像未写入）")
+
+    manager = JobManager(executor=executor)
+    job = manager.submit(JobSpec(disk_number=1, dry_run=True), ExecutionPlan(disk_number=1))
+    manager.confirm_batch([job.id])
+    manager.wait_all(2)
+
+    assert job.status == JobStatus.CANCELLED
+    assert job.result is not None and "已取消" in (job.result.error or "")

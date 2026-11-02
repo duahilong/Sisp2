@@ -403,8 +403,9 @@ class JobManager:
                 return
 
             status = JobStatus.OK if result.success else JobStatus.FAILED
-            if job.cancel_event.is_set() and status == JobStatus.OK:
-                # 收尾阶段被取消：结果仍然记录，但状态标为已取消。
+            if job.cancel_event.is_set():
+                # 用户已请求取消：即使执行器返回失败（例如“任务已取消（镜像未写入）”），
+                # 任务状态也应是 cancelled；失败详情仍保留在 result 中。
                 status = JobStatus.CANCELLED
             self._finish(job, status, result=result, error=result.error)
         finally:

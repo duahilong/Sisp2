@@ -188,12 +188,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="测试模式：只允许操作虚拟磁盘（同时设置 SISP_TEST_MODE=1 并传给下游）",
     )
-    parser.add_argument(
-        "--allow-disks",
+    parser.add_argument("--allow-disks",
         metavar="1,2",
         default=None,
         type=parse_disk_list,
         help="盘号白名单，逗号分隔（例如 1,2）；真实写盘必须提供",
+    )
+    parser.add_argument(
+        "--log-dir",
+        metavar="<dir>",
+        default=None,
+        help="真实执行器命令日志目录；不传则不落盘（GUI 使用设置中的 logDir）",
     )
     parser.add_argument(
         "--json",
@@ -281,6 +286,7 @@ def create_controller(
     dry_run: bool,
     test_mode: bool,
     allow_disks: Sequence[int] | None,
+    log_dir: str | None = None,
 ) -> Any:
     """构造 ``WorkflowController``，并把两个新开关尽力传下去。"""
     workflow_module = _workflow_module()
@@ -297,6 +303,8 @@ def create_controller(
     # 白名单必须走构造参数，否则真实写盘会在安全闸门处被拒绝。
     if allow_disks and _supports_keyword(controller_class.__init__, "allowed_disk_numbers"):
         kwargs["allowed_disk_numbers"] = list(allow_disks)
+    if log_dir and _supports_keyword(controller_class.__init__, "log_dir"):
+        kwargs["log_dir"] = str(log_dir)
 
     controller = controller_class(**kwargs)
     inject_policy_flags(controller, test_mode=test_mode, allow_disks=allow_disks)
@@ -525,6 +533,7 @@ def _run(
         dry_run=bool(args.dry_run),
         test_mode=bool(args.test_mode),
         allow_disks=args.allow_disks,
+        log_dir=args.log_dir,
     )
     try:
         session = controller.start(args.config, dry_run=bool(args.dry_run))
@@ -735,6 +744,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "dry_run": bool(args.dry_run),
         "test_mode": bool(args.test_mode),
         "allow_disks": list(args.allow_disks) if args.allow_disks else None,
+        "log_dir": args.log_dir,
         "targets": [],
         "disks": [],
         "checks": [],

@@ -21,6 +21,8 @@ python -m app.cli --list
 python -m app.cli --dry-run
 # CLI：真实执行示例；须明确限定盘号并使用管理员权限
 python -m app.cli --allow-disks 1
+# CLI：真实执行并把命令日志写入指定目录（可选）
+python -m app.cli --allow-disks 1 --log-dir D:\logs
 
 # GUI 桌面窗口
 python -m app.gui_web.main
