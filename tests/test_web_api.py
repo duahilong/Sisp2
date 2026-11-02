@@ -149,6 +149,16 @@ def test_session_and_disks(client: TestClient) -> None:
     assert {disk["disk_number"] for disk in disks} == {1, 2}
 
 
+def test_session_cannot_upgrade_forced_dry_run(tmp_path: Path) -> None:
+    """控制器以 dry-run 启动后，API 传 dry_run=false 也不能升级为真实模式。"""
+    client, wf = _build_client(tmp_path)
+
+    session = _unwrap(client.post("/api/session", json={"config_path": None, "dry_run": False}))
+
+    assert session["dry_run"] is True
+    assert wf.service.dry_run is True
+
+
 def test_check_config(client: TestClient) -> None:
     data = _unwrap(client.post("/api/config/check", json={"config_path": None}))
     assert data["passed"] is True
@@ -185,6 +195,16 @@ def test_full_job_flow_over_rest(client: TestClient, tmp_path: Path) -> None:
     assert "job.created" in types
     assert "job.finished" in types
     assert any(j["id"] == job_id for j in polled["jobs"])
+
+
+def test_duplicate_submit_is_rejected(client: TestClient) -> None:
+    _unwrap(client.post("/api/prepare", json={"selection": [1], "dry_run": True}))
+    _unwrap(client.post("/api/submit"))
+
+    body = client.post("/api/submit").json()
+
+    assert body["ok"] is False
+    assert body["error"]["code"] == "E_SUBMIT"
 
 
 def test_prepare_rejects_unknown_disk(client: TestClient) -> None:

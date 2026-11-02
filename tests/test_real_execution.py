@@ -16,11 +16,14 @@ import threading
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from app.application.contracts import DiskInfo
-from app.application.jobs import JobManager
+from app.application.jobs import ExecutionPlan, JobManager, JobSpec
 from app.application.real_runner import WindowsDiskRunner, _CommandLog, build_real_runner
 from app.application.service import SispService
 from app.application.workflow import WorkflowController
+from app.models import WorkerResult
 
 _GIB = 1024**3
 _PAYLOAD: dict[str, Any] = {
@@ -299,3 +302,102 @@ def test_runner_honours_pre_cancelled_event(tmp_path):
 
     assert result.success is False
     assert "已取消" in (result.error or "")
+
+
+# ---------------------------------------------------------------- P0 回归
+def test_forced_dry_run_cannot_be_upgraded():
+    """构造时 dry_run=True 是硬上限，start/prepare 不能把它升级为真实写盘。"""
+    seen: list[bool] = []
+
+    def preflight(config_path=None, *, dry_run: bool = False) -> dict[str, Any]:
+        seen.append(dry_run)
+        return {"results": [], "config_payload": _PAYLOAD}
+
+    controller = WorkflowController(
+        service=_FakeService([_disk(1)], dry_run=True),
+        dry_run=True,
+        preflight_runner=preflight,
+    )
+
+    session = controller.start(None, dry_run=False)
+
+    assert session.dry_run is True
+    assert seen == [True]
+
+    prepared = controller.prepare([1], dry_run=False)
+    assert prepared[0].spec.dry_run is True
+    assert prepared[0].plan.dry_run is True
+
+
+def test_preflight_receives_effective_dry_run():
+    """非强制模式也要把当前 dry-run 传给预检，dry-run 不要求管理员。"""
+    seen: list[bool] = []
+
+    def preflight(config_path=None, *, dry_run: bool = False) -> dict[str, Any]:
+        seen.append(dry_run)
+        return {"results": [], "config_payload": _PAYLOAD}
+
+    controller = WorkflowController(
+        service=_FakeService([_disk(1)], dry_run=False),
+        dry_run=False,
+        preflight_runner=preflight,
+    )
+
+    controller.start(None, dry_run=False)
+
+    assert seen == [False]
+
+
+def test_concurrent_confirm_only_runs_once():
+    """两个并发的 confirm 请求只能启动一个执行器，避免重复清盘。"""
+    calls: list[int] = []
+    release = threading.Event()
+    barrier = threading.Barrier(3)
+    errors: list[str] = []
+
+    def executor(spec: Any, cancel_event: threading.Event) -> WorkerResult:
+        calls.append(spec.disk_number)
+        release.wait(2)
+        return WorkerResult(
+            disk_number=spec.disk_number,
+            success=True,
+            message="ok",
+            dry_run=True,
+        )
+
+    manager = JobManager(executor=executor)
+    job = manager.submit(
+        JobSpec(disk_number=1, dry_run=True),
+        ExecutionPlan(disk_number=1),
+    )
+
+    def confirm() -> None:
+        barrier.wait()
+        try:
+            manager.confirm_batch([job.id])
+        except ValueError as exc:
+            errors.append(str(exc))
+
+    workers = [threading.Thread(target=confirm) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    barrier.wait()
+    for worker in workers:
+        worker.join(2)
+
+    release.set()
+    manager.wait_all(2)
+
+    assert calls == [1]
+    assert len(errors) == 1
+
+
+def test_duplicate_submit_for_same_disk_is_rejected():
+    """同一块盘已有未结束任务时，第二次 submit 不能创建并发任务。"""
+    manager = JobManager()
+    spec = JobSpec(disk_number=1, dry_run=True)
+    plan = ExecutionPlan(disk_number=1)
+    manager.submit(spec, plan)
+
+    with pytest.raises(ValueError, match="已有未结束任务"):
+        manager.submit(spec, plan)

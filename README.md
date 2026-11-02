@@ -30,7 +30,7 @@ python -m app.gui_web.main --serve
 python -m app.gui_web.main --dry-run
 ```
 
-CLI 默认 `--dry-run` 为关闭状态；省略 `--dry-run` 的 CLI 可进入真实执行路径，但仍要求白名单、管理员权限、身份复核等条件。GUI 的实际模式由命令行 `--dry-run` 与设置 `dryRunByDefault` 共同决定：任一为真即演练，二者都为假时可能进入真实模式。启动 GUI 不等同于安全演练，请显式传 `--dry-run`。
+CLI 默认 `--dry-run` 为关闭状态；省略 `--dry-run` 的 CLI 可进入真实执行路径，但仍要求白名单、管理员权限、身份复核等条件。GUI 的实际模式由命令行 `--dry-run` 与设置 `dryRunByDefault` 共同决定：任一为真即演练，且该演练状态是硬上限，启动后的界面操作或 Web API 不能把它升级为真实执行。二者都为假时可能进入真实模式；启动 GUI 不等同于安全演练，请显式传 `--dry-run`。
 
 GUI 默认监听 `127.0.0.1:8765`；可用 `--host`、`--port` 改变监听参数。接口文档默认在 `/docs`。非 loopback 监听没有鉴权，属于高风险配置，详见[安全边界](Docs/security.md)及[Web API](Docs/web-api.md)。
 

@@ -20,7 +20,9 @@
 - **取消是协作式的**：``cancel()`` 只把 ``cancel_event`` 置位并立刻返回，
   正在执行的步骤跑完后才停（与界面提示的“当前步骤完成后才会停止”一致）；
 - **事件是旁路**：``subscribe()`` 的回调在 ``jobs_lock`` 之外调用，
-  回调抛异常只记日志，不影响任务状态。
+  回调抛异常只记日志，不影响任务状态；
+- **提交/确认幂等**：同一块盘同时只允许一个未结束任务，``confirm_batch()``
+  会在锁内认领任务，重复的 ``submit`` / ``confirm`` 请求被拒绝。
 """
 
 from __future__ import annotations
@@ -147,6 +149,8 @@ class Job:
         self.finished_at: str | None = None
         self.cancel_reason: str | None = None
         self.cancel_event = threading.Event()
+        # 同一任务只允许被 confirm_batch 认领一次，防止双击/重试导致重复写同一块盘。
+        self.scheduled = False
 
     @property
     def disk_number(self) -> int:
@@ -290,6 +294,17 @@ class JobManager:
             JobStatus.WAITING_CONFIRMATION if require_confirmation else JobStatus.PENDING
         )
         with self._lock:
+            # 同一块盘同时只允许一个未结束任务，避免重复点击/重复调用 submit
+            # 产生两个任务，后续 confirm 时并发清同一块盘。
+            for existing in self._jobs.values():
+                if (
+                    existing.disk_number == spec.disk_number
+                    and not existing.status.is_finished
+                ):
+                    raise ValueError(
+                        f"硬盘 {spec.disk_number} 已有未结束任务（{existing.id}），"
+                        "拒绝重复提交"
+                    )
             self._jobs[job_id] = job
         self._emit("job.created", job, status=job.status.value, disk_number=spec.disk_number)
         return job
@@ -318,9 +333,15 @@ class JobManager:
                     raise ValueError(f"任务不存在: {job_id}")
                 if not job.status.is_waiting:
                     raise ValueError(f"任务 {job_id} 当前状态不允许确认: {job.status.value}")
+                if job.scheduled:
+                    raise ValueError(f"任务 {job_id} 已确认，不能重复确认")
                 selected.append(job)
             if not selected:
                 raise ValueError("没有可确认的任务")
+            # 在锁内一次性认领，后续重复的 confirm 请求会在上面的检查处失败。
+            for job in selected:
+                job.scheduled = True
+                job.updated_at = _now()
             schedulable = list(selected)
 
         dispatcher = threading.Thread(
@@ -329,7 +350,13 @@ class JobManager:
             name="job-dispatcher",
             daemon=True,
         )
-        dispatcher.start()
+        try:
+            dispatcher.start()
+        except BaseException:
+            with self._lock:
+                for job in schedulable:
+                    job.scheduled = False
+            raise
         return selected
 
     def _dispatch(self, jobs: list[Job], interval: float, max_parallel: int) -> None:

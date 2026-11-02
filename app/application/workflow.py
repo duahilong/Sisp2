@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -233,6 +234,9 @@ class WorkflowController:
         real_runner: Callable[[Any, threading.Event], WorkerResult] | None = None,
     ) -> None:
         self._dry_run = bool(dry_run)
+        # 构造时的 True 是硬上限：--dry-run / dryRunByDefault 启动后，
+        # UI 或 API 只能把会话降级为演练，不能反过来升级为真实写盘。
+        self._forced_dry_run = bool(dry_run)
         self._worker_interval = max(float(worker_interval), 0.0)
         self._max_parallel = max(int(max_parallel), 1)
         self._log_dir = log_dir
@@ -284,13 +288,40 @@ class WorkflowController:
             return frozenset(int(number) for number in attribute)
         return None
 
+    def _resolve_dry_run(self, dry_run: bool | None = None) -> bool:
+        """计算本次操作的有效模式；``_forced_dry_run`` 为真时永远是演练。"""
+        if self._forced_dry_run:
+            return True
+        if dry_run is None:
+            return bool(self._dry_run)
+        return bool(dry_run)
+
     def _sync_service_policy(self, *, dry_run: bool | None = None) -> None:
         """把控制器的当前开关同步给服务；外部注入的 service 只同步白名单。"""
         if dry_run is not None and not self._service_injected:
-            self._service.dry_run = bool(dry_run)
+            # 即使调用方误传 False，构造时锁定的演练上限也不能被突破。
+            self._service.dry_run = self._resolve_dry_run(dry_run)
         allowlist = self._explicit_allowlist()
         if allowlist is not None:
             self._service.allowed_disk_numbers = frozenset(allowlist)
+
+    def _run_preflight(self, config_path: str | None) -> dict[str, Any]:
+        """调用预检；兼容只接受 config_path 的测试替身。"""
+        try:
+            signature = inspect.signature(self._preflight_runner)
+        except (TypeError, ValueError):
+            accepts_dry_run = False
+        else:
+            accepts_dry_run = (
+                "dry_run" in signature.parameters
+                or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in signature.parameters.values()
+                )
+            )
+        if accepts_dry_run:
+            return self._preflight_runner(config_path, dry_run=self._dry_run)
+        return self._preflight_runner(config_path)
 
     # ------------------------------------------------------------------ 查询
     @property
@@ -330,10 +361,10 @@ class WorkflowController:
     ) -> SessionState:
         """执行运行前检查、读取配置并扫描硬盘。"""
         if dry_run is not None:
-            self._dry_run = bool(dry_run)
+            self._dry_run = self._resolve_dry_run(dry_run)
 
         try:
-            report = self._preflight_runner(config_path)
+            report = self._run_preflight(config_path)
         except Exception as exc:
             report = {
                 "all_passed": False,
@@ -451,7 +482,7 @@ class WorkflowController:
         if not selected:
             raise WorkflowError("尚未选择任何硬盘")
 
-        active_dry_run = self._dry_run if dry_run is None else bool(dry_run)
+        active_dry_run = self._resolve_dry_run(dry_run)
         # 真实模式下先把服务的 dry_run 与白名单对齐。
         # 没有显式白名单时（GUI 走这条），把“本次选中的硬盘”加入白名单——
         # 用户在界面上勾选 + 后续确认本身就是授权动作，与 CLI 的
@@ -640,6 +671,21 @@ class WorkflowController:
         )
         if not items:
             raise WorkflowError("没有可提交的任务，请先生成执行计划")
+
+        numbers = [item.spec.disk_number for item in items]
+        if len(set(numbers)) != len(numbers):
+            raise WorkflowError("同一次提交中不能包含重复的硬盘任务")
+        active = {
+            job.disk_number
+            for job in self._manager.jobs()
+            if not job.status.is_finished
+        }
+        conflicts = sorted(set(numbers) & active)
+        if conflicts:
+            raise WorkflowError(
+                "以下硬盘已有未结束任务，拒绝重复提交："
+                + "、".join(str(number) for number in conflicts)
+            )
 
         if not require_confirmation:
             blocked = [item for item in items if item.plan.blockers]

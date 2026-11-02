@@ -12,7 +12,7 @@ python -m app.gui_web.main --serve --port 8765
 
 参数：`-j/--config`、`--dry-run`、`--mock`、`--elevate`、`--debug`、`--serve`、`--port`（默认 8765）、`--host`（默认 `127.0.0.1`）、`--settings`、`--width`、`--height`。桌面模式需要 pywebview；`--serve` 不依赖它。`--mock` 提供无后端界面。
 
-有效 GUI dry-run 是 `--dry-run OR settings.dryRunByDefault`；两者默认均为 false。服务必须单进程单 worker，因为任务和缓冲状态保存在内存。端口被占用入口返回 4；`--docs` 自动文档地址默认为 `http://127.0.0.1:8765/docs`（地址随 host/port 改变）。
+有效 GUI dry-run 是 `--dry-run OR settings.dryRunByDefault`；两者默认均为 false。该值在启动时锁定为硬上限，`POST /api/session` 传 `dry_run:false` 或 `POST /api/prepare` 传 `dry_run:false` 都不能升级为真实执行。服务必须单进程单 worker，因为任务和缓冲状态保存在内存。端口被占用入口返回 4；`--docs` 自动文档地址默认为 `http://127.0.0.1:8765/docs`（地址随 host/port 改变）。
 
 ## 路由
 

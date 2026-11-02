@@ -18,7 +18,7 @@
 
 ## CLI 与 GUI 的模式差异
 
-`SispService` 构造默认 `dry_run=True`，但入口会覆盖其策略。CLI 只有传 `--dry-run` 才在演练分支停止提交；不传时意图进入真实执行，还要求 `--allow-disks`、管理员权限及其他检查。GUI `main.py` 的有效 dry-run 为命令行 `--dry-run` 与 `dryRunByDefault` 的逻辑或。GUI 无显式白名单时，真实模式下 `prepare()` 会把所选盘加入服务白名单。见[安全说明](security.md)。
+`SispService` 构造默认 `dry_run=True`，但入口会覆盖其策略。CLI 只有传 `--dry-run` 才在演练分支停止提交；不传时意图进入真实执行，还要求 `--allow-disks`、管理员权限及其他检查。GUI `main.py` 的有效 dry-run 为命令行 `--dry-run` 与 `dryRunByDefault` 的逻辑或；`WorkflowController` 会把构造时的 dry-run 锁定为硬上限，后续 `start()` / `prepare()` 只能降级为演练，不能升级为真实执行。GUI 无显式白名单时，真实模式下 `prepare()` 会把所选盘加入服务白名单。见[安全说明](security.md)。
 
 ## 状态与部署
 

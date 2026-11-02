@@ -6,9 +6,11 @@ Sisp2 的真实写盘会清空目标盘。以下描述的是当前代码行为�
 
 `SispService.execute_spec()` 对真实任务要求：任务不是 dry-run、服务自身不是 dry-run、盘号在 `allowed_disk_numbers` 中、任务身份含 UniqueId 或 SerialNumber 且执行前重扫匹配、并且注入真实执行器。`WorkflowController` 默认装配 `WindowsDiskRunner`，但服务构造本身不等于用户确认。
 
-CLI 默认 `dry_run=False`（参数默认关闭），但仅当显式 `--dry-run` 时会停止任务提交；真实路径要求 `--allow-disks`，另有管理员权限、预检、受保护盘和身份检查。GUI 默认 dry-run 也是关闭的；其有效模式由 CLI `--dry-run` 与 `dryRunByDefault` 取逻辑或决定。GUI 没有显式白名单时，真实模式的 `prepare()` 会将本次选中的盘加入服务白名单。因此 GUI 选盘不是独立于该策略的额外白名单来源，使用者必须特别核对盘号与身份。
+CLI 默认 `dry_run=False`（参数默认关闭），但仅当显式 `--dry-run` 时会停止任务提交；真实路径要求 `--allow-disks`，另有管理员权限、预检、受保护盘和身份检查。GUI 默认 dry-run 也是关闭的；其有效模式由 CLI `--dry-run` 与 `dryRunByDefault` 取逻辑或决定，并且构造时的 dry-run 是硬上限：后续界面或 API 的 `start_session(dry_run=false)`、`prepare(dry_run=false)` 不能关闭它。GUI 没有显式白名单时，真实模式的 `prepare()` 会将本次选中的盘加入服务白名单。因此 GUI 选盘不是独立于该策略的额外白名单来源，使用者必须特别核对盘号与身份。
 
 系统/启动盘、离线盘、只读盘、含系统盘符的盘及型号命中 `excluded_disk_names` 的盘会被标为不可选。保护判断和执行前身份复核不能替代备份、人工核盘或隔离测试。
+
+同一块盘同时只允许一个未结束任务：重复 `submit` 会被拒绝；`confirm_batch()` 在锁内唯一认领任务，重复确认不会再次启动执行器。这用于防止双击、HTTP 重试或并发调用导致同一块盘被并发清空。
 
 ## Web 暴露面（高风险）
 
