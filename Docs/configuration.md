@@ -43,15 +43,18 @@ Sisp2 有两类配置：业务配置描述装机输入；界面设置保存 GUI 
 | `rememberWindow` | `true` | 布尔值；业务接入待核实 |
 | `confirmBeforeStart` | `true` | 布尔值；workflow 本身默认提交需确认，但此字段是否控制 UI 行为待核实 |
 | `typeToConfirm` | `true` | 布尔值；是否接入执行确认流程待核实 |
-| `sysDefaultGb` | `120` | 整数 60–2000；`partition_info()` 可转换为 C 盘默认大小 |
-| `dataDefaultGb` | `auto` | `auto` 或整数 20–100000；可转换为数据分区默认值 |
-| `extDiskpart`、`extDism`、`extWimlib`、`extVentoy`、`ext7z` | 空字符串 | 路径型字段；部分空值可探测 PATH 内置命令。各项是否被真实 runner 使用待核实。 |
+| `sysDefaultGb` | `120` | 整数 60–2000；作为 `partition_info.c_size_gb` 的默认值，仅在业务 JSON 未提供该字段时生效 |
+| `dataDefaultGb` | `auto` | `auto` 或整数 20–100000；作为 `partition_info.data_size_gb` 的默认值，仅补缺失字段，`auto` 不写入固定值 |
+| `extDiskpart`、`extDism` | 空字符串 | 路径型字段；作为真实执行器的程序路径，空值回退 PATH / System32 探测 |
+| `extWimlib`、`extVentoy`、`ext7z` | 空字符串 | 路径型字段；当前只做路径探测，未接入执行流程 |
 | `sysIsoDir`、`sysWim`、`sysBoot`、`sysUnattend`、`sysDrivers`、`sysTemp` | 空字符串 | 文件/目录路径与探测；对装机流程的接入待核实。 |
 | `protectSystemDisk` | `true` | 布尔值；当前服务确有系统盘保护，但该设置是否控制保护逻辑待核实。 |
 | `dryRunByDefault` | `false` | 布尔值；GUI 启动时与 `--dry-run` 取逻辑或，影响会话模式。 |
 | `blockUnverified` | `true` | 布尔值；具体业务接入待核实，不应视为已启用额外门禁。 |
-| `logRetentionDays` | `30` | 整数 1–3650；清理行为是否接入待核实。 |
-| `logDir` | 空字符串 | 目录路径；真实执行日志位置当前 runner 的注入/默认值需按调用装配确认，不能仅凭设置存在推断生效。 |
-| `logLevel` | `info` | `debug` / `info` / `warn` / `error`；业务接入待核实。 |
+| `logRetentionDays` | `30` | 整数 1–3650；GUI 启动时清理 `logDir` 下超过该天数的 `disk-runner-*.log` |
+| `logDir` | 空字符串 | 真实执行器命令日志目录；GUI 启动时按 `logRetentionDays` 清理其中的本工具日志 |
+| `logLevel` | `info` | `debug` / `info` / `warn` / `error`；设置 `app` logger 级别，当前未配置文件 handler，GUI 进程日志不落盘 |
+
+已接入运行时的字段（其余字段只做持久化与路径探测）：`theme`、`dryRunByDefault`、`sysDefaultGb`、`dataDefaultGb`、`extDiskpart`、`extDism`、`logDir`、`logRetentionDays`、`logLevel`。
 
 `sysDefaultGb + dataDefaultGb` 若两者为数字且总和不大于 60 会被拒绝；`sysTemp` 与 `logDir` 相同也会被拒绝。路径探测只报告存在状态或系统内置命令，不会验证业务兼容性。设置项存在不代表功能已接入。

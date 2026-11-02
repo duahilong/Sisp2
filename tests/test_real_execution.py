@@ -20,7 +20,12 @@ import pytest
 
 from app.application.contracts import DiskInfo
 from app.application.jobs import ExecutionPlan, JobManager, JobSpec
-from app.application.real_runner import WindowsDiskRunner, _CommandLog, build_real_runner
+from app.application.real_runner import (
+    WindowsDiskRunner,
+    _CommandLog,
+    build_real_runner,
+    prune_runner_logs,
+)
 from app.application.service import SispService
 from app.application.workflow import WorkflowController
 from app.models import WorkerResult
@@ -181,6 +186,22 @@ def test_real_plan_blocks_disk_outside_allowlist():
 # ---------------------------------------------------------------- 执行器（P0-2）
 def test_build_real_runner_returns_windows_runner():
     assert isinstance(build_real_runner(), WindowsDiskRunner)
+
+
+def test_prune_runner_logs_removes_only_expired_runner_logs(tmp_path):
+    old = tmp_path / "disk-runner-old.log"
+    recent = tmp_path / "disk-runner-new.log"
+    unrelated = tmp_path / "other.log"
+    old.write_text("old")
+    recent.write_text("new")
+    unrelated.write_text("keep")
+    import os
+    import time
+    os.utime(old, (time.time() - 3 * 86400, time.time() - 3 * 86400))
+
+    assert prune_runner_logs(tmp_path, 2) == 1
+    assert not old.exists()
+    assert recent.exists() and unrelated.exists()
 
 
 def test_diskpart_script_layout():
@@ -401,3 +422,85 @@ def test_duplicate_submit_for_same_disk_is_rejected():
 
     with pytest.raises(ValueError, match="已有未结束任务"):
         manager.submit(spec, plan)
+
+
+# ---------------------------------------------------------------- 界面设置接线
+def test_partition_defaults_fill_only_missing_keys():
+    def preflight(config_path=None):
+        return {
+            "results": [],
+            "config_payload": {
+                "partition_info": {"efi_size_mb": 300, "data_size_gb": "auto"},
+                "image_info": {},
+            },
+        }
+
+    controller = WorkflowController(
+        service=_FakeService([_disk(1)]),
+        dry_run=True,
+        preflight_runner=preflight,
+        partition_defaults={"efi_size_mb": 100, "c_size_gb": 20, "data_size_gb": 50},
+    )
+    controller.start(None, dry_run=True)
+
+    info = controller.prepare([1])[0].spec.config_payload["partition_info"]
+
+    assert info["efi_size_mb"] == 300      # 业务配置优先
+    assert info["c_size_gb"] == 20         # 缺失字段用设置默认值
+    assert info["data_size_gb"] == "auto"  # auto 不被默认值覆盖
+
+
+def test_partition_defaults_apply_when_config_has_no_partition_info():
+    def preflight(config_path=None):
+        return {"results": [], "config_payload": {"image_info": {}}}
+
+    controller = WorkflowController(
+        service=_FakeService([_disk(1)]),
+        dry_run=True,
+        preflight_runner=preflight,
+        partition_defaults={"efi_size_mb": 100, "c_size_gb": 20, "data_size_gb": None},
+    )
+    controller.start(None, dry_run=True)
+
+    info = controller.prepare([1])[0].spec.config_payload["partition_info"]
+
+    assert info == {"efi_size_mb": 100, "c_size_gb": 20}
+
+
+def test_tool_paths_reach_default_real_runner():
+    controller = WorkflowController(
+        dry_run=False,
+        tool_paths={"diskpart": r"C:\tools\diskpart.exe", "dism": r"C:\tools\dism.exe", "": ""},
+    )
+
+    runner = controller.service._real_runner
+
+    assert runner.diskpart == r"C:\tools\diskpart.exe"
+    assert runner.dism == r"C:\tools\dism.exe"
+
+
+def test_build_real_runner_accepts_tool_paths():
+    runner = build_real_runner(diskpart=r"C:\d\diskpart.exe", dism=r"C:\d\dism.exe")
+
+    assert (runner.diskpart, runner.dism) == (r"C:\d\diskpart.exe", r"C:\d\dism.exe")
+
+
+def test_prepare_does_not_accumulate_implicit_allowlist():
+    service = _FakeService([_disk(1), _disk(2)])
+    controller = WorkflowController(
+        service=service,
+        dry_run=False,
+        preflight_runner=_preflight,
+    )
+    controller.start(None, dry_run=False)
+
+    controller.prepare([1])
+    assert service.allowed_disk_numbers == frozenset({1})
+
+    # 第二次只选 2：上一次隐式加入的 1 必须撤出，不能累积。
+    controller.prepare([2])
+    assert service.allowed_disk_numbers == frozenset({2})
+
+    # 开新会话同样清空隐式授权。
+    controller.start(None, dry_run=False)
+    assert service.allowed_disk_numbers == frozenset()

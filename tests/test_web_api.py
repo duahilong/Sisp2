@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 import time
@@ -19,7 +20,8 @@ from typing import Any
 import pytest
 
 pytest.importorskip("fastapi")
-pytest.importorskip("httpx")
+httpx = pytest.importorskip("httpx")
+uvicorn = pytest.importorskip("uvicorn")
 
 from fastapi.testclient import TestClient
 
@@ -234,35 +236,84 @@ def test_settings_roundtrip(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------- SSE
-def test_sse_streams_snapshot_and_events(client: TestClient, tmp_path: Path) -> None:
+@contextlib.contextmanager
+def _live_server(app: Any):
+    """在后台线程起真实 uvicorn，返回基地址。
+
+    starlette 1.x 的 ``TestClient`` 会等整个 ASGI 应用跑完才返回，无法读取
+    无限 SSE 响应；因此 SSE 测试必须走真实网络栈。服务使用 ``port=0`` 让系统
+    分配空闲端口，避免与开发中的 8765 冲突。
+    """
+    config = uvicorn.Config(
+        app,
+        host="127.0.0.1",
+        port=0,
+        log_level="warning",
+        access_log=False,
+    )
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, name="test-uvicorn", daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not server.started:
+            if time.monotonic() > deadline:
+                raise RuntimeError("uvicorn 未能在 10 秒内启动")
+            if not thread.is_alive():
+                raise RuntimeError("uvicorn 启动线程已退出")
+            time.sleep(0.02)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+def test_sse_streams_snapshot_and_events(tmp_path: Path) -> None:
+    client, _wf = _build_client(tmp_path)
     frames: list[dict[str, Any]] = []
 
-    def produce_event() -> None:
-        # 连接建立后制造一个任务事件，让 SSE 推出第二帧
-        time.sleep(0.3)
-        try:
-            client.post("/api/prepare", json={"selection": [1], "dry_run": True})
-            client.post("/api/submit")
-        except Exception:  # noqa: BLE001 - 测试里失败由帧断言兜底
-            pass
+    try:
+        with _live_server(client.app) as base:
+            def produce_event() -> None:
+                # 连接建立后制造一个任务事件，让 SSE 推出第二帧
+                time.sleep(0.4)
+                try:
+                    with httpx.Client(timeout=5.0, trust_env=False) as producer:
+                        producer.post(
+                            base + "/api/prepare",
+                            json={"selection": [1], "dry_run": True},
+                        )
+                        producer.post(base + "/api/submit")
+                except Exception:  # noqa: BLE001 - 测试里失败由帧断言兜底
+                    pass
 
-    thread = threading.Thread(target=produce_event, daemon=True)
-    thread.start()
+            producer = threading.Thread(target=produce_event, daemon=True)
+            producer.start()
 
-    with client.stream("GET", "/api/events?cursor=0") as response:
-        assert response.status_code == 200
-        assert response.headers["content-type"].startswith("text/event-stream")
-        buffer = ""
-        for chunk in response.iter_text():
-            buffer += chunk
-            while "\n\n" in buffer:
-                raw, buffer = buffer.split("\n\n", 1)
-                for line in raw.splitlines():
-                    if line.startswith("data: "):
-                        frames.append(json.loads(line[len("data: "):]))
-            if len(frames) >= 2:
-                break
+            deadline = time.monotonic() + 10
+            buffer = ""
+            with httpx.Client(timeout=httpx.Timeout(5.0, read=10.0), trust_env=False) as http:
+                try:
+                    with http.stream("GET", base + "/api/events?cursor=0") as response:
+                        assert response.status_code == 200
+                        assert response.headers["content-type"].startswith("text/event-stream")
+                        for chunk in response.iter_text():
+                            buffer += chunk
+                            while "\n\n" in buffer:
+                                raw, buffer = buffer.split("\n\n", 1)
+                                for line in raw.splitlines():
+                                    if line.startswith("data: "):
+                                        frames.append(json.loads(line[len("data: "):]))
+                            if len(frames) >= 2 or time.monotonic() > deadline:
+                                break
+                except httpx.HTTPError as exc:  # 超时必须报断言，不能挂住测试套件
+                    raise AssertionError(f"读取 SSE 失败：{exc}；已收到帧={frames}") from exc
+            producer.join(timeout=5)
+    finally:
+        client.close()
 
+    assert frames, "没有收到任何 SSE 帧"
     assert frames[0]["type"] == "snapshot"
     assert "jobs" in frames[0]
     # 第二帧：submit 产生的任务事件，带 jobs 快照与游标

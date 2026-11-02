@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import logging
 import socket
 import subprocess
 import sys
@@ -55,10 +56,31 @@ def build_api(config_path: str | None, dry_run: bool, settings_path: str | None 
     from app.gui_web.api import WebApi
 
     store = build_store(settings_path)
+    settings = store.get()
     # 界面里的「演练模式」开关优先于命令行参数
-    effective_dry_run = bool(dry_run) or bool(store.get().get("dryRunByDefault"))
+    effective_dry_run = bool(dry_run) or bool(settings.get("dryRunByDefault"))
 
-    wf = WorkflowController(dry_run=effective_dry_run)
+    log_dir = str(settings.get("logDir") or "").strip() or None
+    level = {
+        "debug": logging.DEBUG,
+        "info": logging.INFO,
+        "warn": logging.WARNING,
+        "error": logging.ERROR,
+    }.get(str(settings.get("logLevel", "info")).lower(), logging.INFO)
+    logging.getLogger("app").setLevel(level)
+    if log_dir:
+        from app.application.real_runner import prune_runner_logs
+
+        prune_runner_logs(log_dir, int(settings.get("logRetentionDays", 30)))
+    wf = WorkflowController(
+        dry_run=effective_dry_run,
+        log_dir=log_dir,
+        partition_defaults=store.partition_info(),
+        tool_paths={
+            "diskpart": settings.get("extDiskpart"),
+            "dism": settings.get("extDism"),
+        },
+    )
     wf.start(config_path, dry_run=effective_dry_run)
     return WebApi(wf, settings=store), wf
 
@@ -126,7 +148,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Sisp2 Web 界面")
     parser.add_argument("-j", "--config", default=None, help="配置文件路径，默认 json/win11.json")
     parser.add_argument("--dry-run", action="store_true", help="演练：不真正分区/写盘")
-    parser.add_argument("--mock", action="store_true", help="只显示界面，不连后端（用原型自带数据）")
     parser.add_argument("--elevate", action="store_true", help="需要时通过 UAC 提权重启")
     parser.add_argument("--debug", action="store_true", help="打开 devtools")
     parser.add_argument("--serve", action="store_true", help="浏览器模式：前台起本机 HTTP 服务，用 Edge/Chromium 打开界面（不依赖 pywebview）")
@@ -146,10 +167,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         print("提权被取消，继续以普通权限运行（写盘会失败）", file=sys.stderr)
 
-    api = None
-    wf = None
-    if not args.mock:
-        api, wf = build_api(args.config, args.dry_run, args.settings)
+    api, wf = build_api(args.config, args.dry_run, args.settings)
 
     # ---------------------------------------------------------- 服务装配
     from app.gui_web.server import create_app
@@ -167,8 +185,7 @@ def main(argv: list[str] | None = None) -> int:
     port_error = _check_port_free(args.host, args.port)
     if port_error:
         print(port_error, file=sys.stderr)
-        if api is not None:
-            api.close()
+        api.close()
         return 4
 
     # ---------------------------------------------------------- 浏览器模式
@@ -176,31 +193,23 @@ def main(argv: list[str] | None = None) -> int:
         try:
             return _serve(app, args.host, args.port)
         finally:
-            if api is not None:
-                api.close()
+            api.close()
 
     # ---------------------------------------------------------- 桌面模式
     try:
         import webview  # type: ignore
     except ImportError:
         print("缺少依赖：pip install -r requirements-web.txt", file=sys.stderr)
-        if api is not None:
-            api.close()
+        api.close()
         return 3
 
-    if args.mock:
-        # mock：没有后端，直接加载本地文件，界面走原型自带数据。
-        url = str(UI_FILE)
-        server = None
-    else:
-        server, _thread = _serve_in_thread(app, args.host, args.port)
-        if not _wait_until_ready(f"http://{args.host}:{args.port}/health", server):
-            print("本机 HTTP 服务启动超时，无法打开窗口。", file=sys.stderr)
-            server.should_exit = True
-            if api is not None:
-                api.close()
-            return 1
-        url = f"http://{args.host}:{args.port}/"
+    server, _thread = _serve_in_thread(app, args.host, args.port)
+    if not _wait_until_ready(f"http://{args.host}:{args.port}/health", server):
+        print("本机 HTTP 服务启动超时，无法打开窗口。", file=sys.stderr)
+        server.should_exit = True
+        api.close()
+        return 1
+    url = f"http://{args.host}:{args.port}/"
 
     webview.create_window(
         "硬盘工具箱",
@@ -212,10 +221,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         webview.start(debug=args.debug)
     finally:
-        if server is not None:
-            server.should_exit = True
-        if api is not None:
-            api.close()
+        server.should_exit = True
+        api.close()
     return 0
 
 

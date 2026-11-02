@@ -79,49 +79,6 @@ foreach ($disk in $disks) {
 $result | ConvertTo-Json -Depth 6
 """.strip()
 
-SUMMARY_POWERSHELL_SCRIPT = r"""
-$disks = Get-Disk | Sort-Object Number
-$partitionsByDisk = @{}
-
-Get-Partition -ErrorAction SilentlyContinue | ForEach-Object {
-    $diskNumber = $_.DiskNumber
-    if (-not $partitionsByDisk.ContainsKey($diskNumber)) {
-        $partitionsByDisk[$diskNumber] = @()
-    }
-    $partitionsByDisk[$diskNumber] += $_
-}
-
-$result = @()
-
-foreach ($disk in $disks) {
-    $partitions = @($partitionsByDisk[$disk.Number])
-    $partitionList = @()
-
-    foreach ($partition in $partitions) {
-        $partitionList += [PSCustomObject]@{
-            drive_letter = $partition.DriveLetter
-        }
-    }
-
-    $result += [PSCustomObject]@{
-        disk_number = $disk.Number
-        friendly_name = $disk.FriendlyName
-        serial_number = $disk.SerialNumber
-        unique_id = $disk.UniqueId
-        partition_style = $disk.PartitionStyle
-        size_bytes = $disk.Size
-        bus_type = $disk.BusType
-        is_boot = $disk.IsBoot
-        is_system = $disk.IsSystem
-        is_offline = $disk.IsOffline
-        is_read_only = $disk.IsReadOnly
-        partitions = $partitionList
-    }
-}
-
-$result | ConvertTo-Json -Depth 4
-""".strip()
-
 USED_DRIVE_LETTERS_SCRIPT = r"""
 $letters = @()
 $letters += Get-Volume | Where-Object { $_.DriveLetter } | ForEach-Object { $_.DriveLetter.ToString().ToUpper() }
@@ -288,7 +245,13 @@ def scan_disks() -> list[dict[str, Any]]:
 
 
 def scan_disk_summaries() -> list[dict[str, Any]]:
-    return [summarize_disk(disk) for disk in run_powershell_json(SUMMARY_POWERSHELL_SCRIPT)]
+    """扫描并把每块盘归一化成界面契约（含分区明细）。
+
+    直接复用完整扫描脚本：分区大小、文件系统、类型都来自同一次
+    ``Get-Partition`` / ``Get-Volume`` 查询，避免摘要脚本只带盘符、
+    导致界面上的分区表全是“未知”。
+    """
+    return [summarize_disk(disk) for disk in scan_disks()]
 
 
 def scan_used_drive_letters() -> list[str]:

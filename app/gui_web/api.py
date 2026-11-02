@@ -1,11 +1,13 @@
-"""pywebview 的 ``js_api`` 对象。
+"""REST 与 SSE 背后的应用门面。
 
 职责只有四件：
 1. 把 ``WorkflowController`` 的方法转发出去；
 2. 用统一信封 ``{"ok": True, "data": ...}`` / ``{"ok": False, "error": ...}`` 包装；
-3. 缓冲 ``JobEvent``，供前端按游标轮询；
+3. 缓冲 ``JobEvent``，供 SSE 首帧与 ``/api/events/poll`` 按游标补发；
 4. 转发界面设置（``SettingsStore``）与原生文件选择框。
 
+本层由 ``app/gui_web/server.py`` 调用，不直接接触 pywebview；只有
+``pick_path`` 在桌面窗口模式下会惰性导入 pywebview 弹出原生选择框。
 禁止在此层写任何磁盘、PowerShell 或业务判断逻辑；
 也不 import 除 ``workflow`` 之外的模块，避免把重依赖带进界面进程。
 

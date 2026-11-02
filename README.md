@@ -54,10 +54,11 @@ GUI 默认监听 `127.0.0.1:8765`；可用 `--host`、`--port` 改变监听参�
 ## 测试
 
 ```powershell
+python -m pip install -r requirements-web.txt -r requirements-dev.txt
 python -m pytest tests/ -q
 ```
 
-测试主要依赖替身与注入实现，目标是验证逻辑而非真实设备写盘；不能据此声称 Windows 实际写盘流程已端到端验证。测试可能需要安装 `httpx`（Web API 测试）。不要在真实磁盘环境中尝试写盘测试。
+测试主要依赖替身与注入实现，目标是验证逻辑而非真实设备写盘；不能据此声称 Windows 实际写盘流程已端到端验证。Web API 测试需要 `httpx`；SSE 测试会在后台线程启动真实 uvicorn（随机空闲端口），因此需要 `uvicorn`。不要在真实磁盘环境中尝试写盘测试。
 
 ## 设计原型
 

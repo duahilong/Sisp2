@@ -49,13 +49,6 @@ _SSE_HEARTBEAT_SECONDS = 15.0
 _SSE_BACKLOG_LIMIT = 1000
 
 
-def _no_backend() -> dict[str, Any]:
-    return {
-        "ok": False,
-        "error": {"code": "E_NO_BACKEND", "message": "当前以 --mock 启动，没有后端会话"},
-    }
-
-
 def _sse_frame(data: dict[str, Any], *, event_id: int | None = None) -> str:
     """把一份载荷编码成 SSE 帧；``id`` 供浏览器重连时回传 Last-Event-ID。"""
     prefix = f"id: {event_id}\n" if event_id is not None else ""
@@ -70,9 +63,8 @@ def create_app(
 ) -> FastAPI:
     """装配 FastAPI 应用。
 
-    ``api`` 是 ``WebApi`` 实例（``--mock`` 时为 None），``wf`` 是对应的
-    ``WorkflowController``；``host_check`` 为 True 时拒绝非 loopback 的
-    Host 头（TestClient 等场景应传 False）。
+    ``api`` 是 ``WebApi`` 实例，``wf`` 是对应的 ``WorkflowController``；
+    ``host_check`` 为 True 时拒绝非 loopback 的 Host 头（TestClient 等场景应传 False）。
     """
     app = FastAPI(title="Sisp2 Web API", docs_url="/docs", redoc_url=None)
 
@@ -103,59 +95,47 @@ def create_app(
 
     @app.get("/api/info")
     def app_info() -> dict[str, Any]:
-        return api.app_info() if api is not None else _no_backend()
+        return api.app_info()
 
     # ------------------------------------------------------------- 会话与磁盘
     @app.post("/api/session")
     def start_session(body: dict[str, Any] | None = None) -> dict[str, Any]:
-        if api is None:
-            return _no_backend()
         body = body or {}
         return api.start_session(body.get("config_path"), bool(body.get("dry_run")))
 
     @app.get("/api/disks")
     def refresh_disks() -> dict[str, Any]:
-        return api.refresh_disks() if api is not None else _no_backend()
+        return api.refresh_disks()
 
     @app.post("/api/config/check")
     def check_config(body: dict[str, Any] | None = None) -> dict[str, Any]:
-        if api is None:
-            return _no_backend()
         return api.check_config((body or {}).get("config_path"))
 
     # ------------------------------------------------------------- 计划与任务
     @app.post("/api/prepare")
     def prepare(body: dict[str, Any] | None = None) -> dict[str, Any]:
-        if api is None:
-            return _no_backend()
         body = body or {}
         return api.prepare(body.get("selection"), body.get("dry_run"))
 
     @app.post("/api/submit")
     def submit() -> dict[str, Any]:
-        return api.submit() if api is not None else _no_backend()
+        return api.submit()
 
     @app.post("/api/confirm")
     def confirm(body: dict[str, Any] | None = None) -> dict[str, Any]:
-        if api is None:
-            return _no_backend()
         return api.confirm((body or {}).get("job_ids"))
 
     @app.post("/api/cancel")
     def cancel(body: dict[str, Any] | None = None) -> dict[str, Any]:
-        if api is None:
-            return _no_backend()
         return api.cancel((body or {}).get("job_id"))
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str) -> dict[str, Any]:
-        return api.get_job(job_id) if api is not None else _no_backend()
+        return api.get_job(job_id)
 
     # ------------------------------------------------------------- 事件：轮询兜底
     @app.post("/api/events/poll")
     def poll_events(body: dict[str, Any] | None = None) -> dict[str, Any]:
-        if api is None:
-            return _no_backend()
         body = body or {}
         return api.poll_events(int(body.get("cursor") or 0), int(body.get("limit") or 300))
 
@@ -172,11 +152,8 @@ def create_app(
         浏览器自动重连时带 ``Last-Event-ID``（上一帧的 seq），服务端据此
         从游标缓冲补发断线期间的事件。空闲时每 15 秒发一行 ``: ping`` 心跳。
         """
-        if api is None or wf is None:
-            async def unavailable():  # noqa: ANN202
-                yield _sse_frame({"error": _no_backend()["error"]})
-
-            return StreamingResponse(unavailable(), media_type="text/event-stream")
+        if wf is None:
+            raise ValueError("create_app() 需要 WorkflowController 实例")
 
         last_event_id = request.headers.get("last-event-id") or ""
         if last_event_id.strip().isdigit():
@@ -243,36 +220,30 @@ def create_app(
     # ------------------------------------------------------------- 设置
     @app.get("/api/settings")
     def get_settings() -> dict[str, Any]:
-        return api.get_settings() if api is not None else _no_backend()
+        return api.get_settings()
 
     @app.put("/api/settings")
     def update_settings(body: dict[str, Any] | None = None) -> dict[str, Any]:
-        if api is None:
-            return _no_backend()
         return api.update_settings(body or {})
 
     @app.delete("/api/settings")
     def reset_settings() -> dict[str, Any]:
-        return api.reset_settings() if api is not None else _no_backend()
+        return api.reset_settings()
 
     @app.post("/api/settings/probe")
     def probe_path(body: dict[str, Any] | None = None) -> dict[str, Any]:
-        if api is None:
-            return _no_backend()
         return api.probe_path(str((body or {}).get("key") or ""))
 
     @app.post("/api/settings/probe_all")
     def probe_all_paths() -> dict[str, Any]:
-        return api.probe_all_paths() if api is not None else _no_backend()
+        return api.probe_all_paths()
 
     @app.post("/api/settings/open_folder")
     def open_settings_folder() -> dict[str, Any]:
-        return api.open_settings_folder() if api is not None else _no_backend()
+        return api.open_settings_folder()
 
     @app.post("/api/dialog/pick")
     def pick_path(body: dict[str, Any] | None = None) -> dict[str, Any]:
-        if api is None:
-            return _no_backend()
         body = body or {}
         return api.pick_path(str(body.get("key") or ""), str(body.get("kind") or "file"))
 

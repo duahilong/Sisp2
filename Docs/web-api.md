@@ -10,9 +10,9 @@ python -m app.gui_web.main --serve          # 前台服务
 python -m app.gui_web.main --serve --port 8765
 ```
 
-参数：`-j/--config`、`--dry-run`、`--mock`、`--elevate`、`--debug`、`--serve`、`--port`（默认 8765）、`--host`（默认 `127.0.0.1`）、`--settings`、`--width`、`--height`。桌面模式需要 pywebview；`--serve` 不依赖它。`--mock` 提供无后端界面。
+参数：`-j/--config`、`--dry-run`、`--elevate`、`--debug`、`--serve`、`--port`（默认 8765）、`--host`（默认 `127.0.0.1`）、`--settings`、`--width`、`--height`。桌面模式需要 pywebview；`--serve` 不依赖它。两种模式都加载同一个本机 HTTP 服务。
 
-有效 GUI dry-run 是 `--dry-run OR settings.dryRunByDefault`；两者默认均为 false。该值在启动时锁定为硬上限，`POST /api/session` 传 `dry_run:false` 或 `POST /api/prepare` 传 `dry_run:false` 都不能升级为真实执行。服务必须单进程单 worker，因为任务和缓冲状态保存在内存。端口被占用入口返回 4；`--docs` 自动文档地址默认为 `http://127.0.0.1:8765/docs`（地址随 host/port 改变）。
+有效 GUI dry-run 是 `--dry-run OR settings.dryRunByDefault`；两者默认均为 false。该值在启动时锁定为硬上限，`POST /api/session` 传 `dry_run:false` 或 `POST /api/prepare` 传 `dry_run:false` 都不能升级为真实执行。服务必须单进程单 worker，因为任务和缓冲状态保存在内存。端口被占用入口返回 4；FastAPI 自动文档地址默认为 `http://127.0.0.1:8765/docs`（地址随 host/port 改变）。
 
 ## 路由
 
@@ -37,7 +37,7 @@ python -m app.gui_web.main --serve --port 8765
 | `POST /api/settings/open_folder` | 打开设置文件夹（Windows） |
 | `POST /api/dialog/pick` | `{key, kind}` 原生文件/目录选择；需有 pywebview 窗口 |
 
-业务路由以同步 `def` 实现，由 FastAPI 在线程池运行。`--mock` 下业务端点返回 `E_NO_BACKEND`。
+业务路由以同步 `def` 实现，由 FastAPI 在线程池运行。
 
 ## Host 校验与安全
 

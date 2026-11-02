@@ -443,19 +443,41 @@ def _print_plans(reporter: Reporter, prepared: Sequence[Any]) -> None:
 
 
 def _print_step_records(reporter: Reporter, result: Any) -> None:
-    """打印 ``WorkerResult.steps``（若后端提供）。"""
+    """打印 ``WorkerResult.steps``；兼容 ``StepResult`` 与旧字典式步骤。"""
     steps = getattr(result, "steps", None)
     if not steps:
         return
     for index, step in enumerate(steps, start=1):
-        name = getattr(step, "name", None) or getattr(step, "title", None) or f"第 {index} 步"
-        passed = getattr(step, "passed", None)
-        if isinstance(passed, bool):
-            mark = "通过" if passed else "失败"
+        if isinstance(step, dict):
+            title = step.get("title") or step.get("name")
+            status = str(step.get("status") or "")
+            passed = step.get("passed")
+            message = step.get("message") or ""
+        else:
+            title = getattr(step, "title", None) or getattr(step, "name", None)
+            status = str(getattr(step, "status", "") or "")
+            passed = getattr(step, "passed", None)
+            message = getattr(step, "message", "") or ""
+
+        name = title or f"第 {index} 步"
+        if status == "failed" or passed is False:
+            mark = "失败"
+        elif status == "skipped":
+            mark = "跳过"
         else:
             mark = "完成"
-        message = getattr(step, "message", "") or ""
         reporter.info(f"  步骤 {index} [{mark}] {name}" + (f"：{message}" if message else ""))
+
+
+def _result_log_path(result: Any) -> str | None:
+    """执行器把日志路径挂在最后一个步骤的 ``details`` 里；兼容旧字段。"""
+    steps = getattr(result, "steps", None) or ()
+    for step in reversed(steps):
+        details = step.get("details") if isinstance(step, dict) else getattr(step, "details", None)
+        if isinstance(details, dict) and details.get("log_path"):
+            return str(details["log_path"])
+    log_path = getattr(result, "log_path", None)
+    return str(log_path) if log_path else None
 
 
 def _print_jobs(reporter: Reporter, jobs: Sequence[Any]) -> None:
@@ -468,7 +490,7 @@ def _print_jobs(reporter: Reporter, jobs: Sequence[Any]) -> None:
         result = getattr(job, "result", None)
         if result is not None:
             _print_step_records(reporter, result)
-            log_path = getattr(result, "log_path", None)
+            log_path = _result_log_path(result)
             if log_path:
                 reporter.info(f"  日志：{log_path}")
             error = getattr(result, "error", None) or getattr(result, "message", None)
@@ -522,13 +544,6 @@ def _run(
     for warning in getattr(session, "warnings", ()) or ():
         reporter.warn(str(warning))
 
-    if getattr(session, "config_payload", None) is None:
-        for blocker in getattr(session, "blockers", ()) or ():
-            reporter.error(str(blocker))
-        reporter.error("配置不可用，无法生成执行计划。")
-        report["blockers"] = list(getattr(session, "blockers", ()) or ())
-        return EXIT_PREFLIGHT
-
     # ------------------------------------------------------------ [2/5]
     reporter.step(2, "扫描硬盘")
     disks = list(getattr(session, "disks", ()) or ())
@@ -546,6 +561,7 @@ def _run(
         report["blockers"] = scan_blockers
         return EXIT_PREFLIGHT
 
+    # --list 是只读操作：配置不可用也应能列出磁盘，不进入计划阶段。
     if args.list_only:
         if not disks:
             reporter.error("未检测到任何硬盘。")
@@ -553,6 +569,12 @@ def _run(
         report["targets"] = [disk.disk_number for disk in disks]
         reporter.info("列表模式：已列出硬盘并退出，未生成计划、未写盘。")
         return EXIT_OK
+
+    if getattr(session, "config_payload", None) is None:
+        for blocker in dict.fromkeys(str(item) for item in (getattr(session, "blockers", ()) or ())):
+            reporter.error(blocker)
+        report["blockers"] = list(getattr(session, "blockers", ()) or ())
+        return EXIT_PREFLIGHT
 
     # ------------------------------------------------------------ [3/5]
     reporter.step(3, "选择目标盘并生成执行计划")

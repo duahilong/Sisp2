@@ -187,6 +187,31 @@ def _merge_payload(
     return payload
 
 
+def _apply_partition_defaults(
+    payload: dict[str, Any],
+    defaults: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """用界面设置补足业务配置里缺失的分区字段；配置已有的值优先。
+
+    ``data_size_gb=None`` 表示“用剩余空间”，与配置缺省等价，因此不写入。
+    """
+    if not defaults:
+        return payload
+
+    partition_info = payload.get("partition_info")
+    if not isinstance(partition_info, dict):
+        partition_info = {}
+        payload["partition_info"] = partition_info
+
+    for key in ("efi_size_mb", "c_size_gb", "data_size_gb"):
+        value = defaults.get(key)
+        if value in (None, ""):
+            continue
+        if partition_info.get(key) in (None, ""):
+            partition_info[key] = value
+    return payload
+
+
 def _check_partition_fit(disk: DiskInfo, payload: dict[str, Any]) -> list[str]:
     """检查三个分区是否放得下（不依赖 PowerShell，纯算术）。"""
     if not isinstance(disk.size_bytes, int) or disk.size_bytes <= 0:
@@ -232,6 +257,8 @@ class WorkflowController:
         event_dir: str | None = None,
         allowed_disk_numbers: Iterable[int] | None = None,
         real_runner: Callable[[Any, threading.Event], WorkerResult] | None = None,
+        partition_defaults: Mapping[str, Any] | None = None,
+        tool_paths: Mapping[str, str] | None = None,
     ) -> None:
         self._dry_run = bool(dry_run)
         # 构造时的 True 是硬上限：--dry-run / dryRunByDefault 启动后，
@@ -248,6 +275,16 @@ class WorkflowController:
             else None
         )
         self._real_runner = real_runner
+        # 界面设置的默认分区参数：只补业务配置没写的字段，不覆盖配置。
+        self._partition_defaults = dict(partition_defaults or {})
+        # 外部工具路径（extDiskpart / extDism）；空值交给 runner 自身探测。
+        self._tool_paths = {
+            str(key): str(value).strip()
+            for key, value in (tool_paths or {}).items()
+            if str(value).strip()
+        }
+        # 上一次 prepare() 因“无显式白名单”而隐式加入的盘号；下次 prepare/start 时撤销。
+        self._implicit_allowlist: set[int] = set()
         # 服务必须跟着控制器的开关走——dry-run、写盘白名单、执行器
         # 三者由控制器统一装配，不各自取默认值。
         self._service_injected = service is not None
@@ -267,7 +304,11 @@ class WorkflowController:
         """按当前开关构造应用服务；真实模式的执行器默认是 ``WindowsDiskRunner``。"""
         runner = self._real_runner
         if runner is None:
-            runner = build_real_runner(log_dir=self._log_dir)
+            runner = build_real_runner(
+                log_dir=self._log_dir,
+                diskpart=self._tool_paths.get("diskpart"),
+                dism=self._tool_paths.get("dism"),
+            )
         return SispService(
             dry_run=bool(self._dry_run),
             allowed_disk_numbers=self._allowed_disk_numbers or (),
@@ -322,6 +363,14 @@ class WorkflowController:
         if accepts_dry_run:
             return self._preflight_runner(config_path, dry_run=self._dry_run)
         return self._preflight_runner(config_path)
+
+    def _drop_implicit_allowlist(self) -> None:
+        """撤销上一次 prepare() 隐式加入的盘号，避免会话间累积授权。"""
+        if not self._implicit_allowlist:
+            return
+        remaining = set(self._service.allowed_disk_numbers) - self._implicit_allowlist
+        self._service.allowed_disk_numbers = frozenset(remaining)
+        self._implicit_allowlist.clear()
 
     # ------------------------------------------------------------------ 查询
     @property
@@ -416,6 +465,7 @@ class WorkflowController:
         self._session = session
         self._prepared = {}
         # 会话是“这次运行的真实模式”，服务必须立刻跟上（覆盖构造时的默认值）。
+        self._drop_implicit_allowlist()
         self._sync_service_policy(dry_run=self._dry_run)
         return session
 
@@ -487,12 +537,15 @@ class WorkflowController:
         # 没有显式白名单时（GUI 走这条），把“本次选中的硬盘”加入白名单——
         # 用户在界面上勾选 + 后续确认本身就是授权动作，与 CLI 的
         # --allow-disks 等价，但只对本会话选过的盘放行。
+        self._drop_implicit_allowlist()
         self._sync_service_policy(dry_run=active_dry_run)
         implicit_allowlist = False
         if not active_dry_run and self._explicit_allowlist() is None:
-            merged = set(self._service.allowed_disk_numbers)
-            merged.update(int(number) for number in selected)
-            self._service.allowed_disk_numbers = frozenset(merged)
+            before = set(self._service.allowed_disk_numbers)
+            added = {int(number) for number in selected} - before
+            if added:
+                self._service.allowed_disk_numbers = frozenset(before | added)
+                self._implicit_allowlist |= added
             implicit_allowlist = True
 
         summaries = [disk.to_dict() for disk in session.disks]
@@ -517,6 +570,7 @@ class WorkflowController:
                 raise WorkflowError(f"硬盘编号不存在: {disk_number}")
             drive_letters = selection.drive_letter_allocations.get(disk_number) or {}
             payload = _merge_payload(session.config_payload, overrides.get(disk_number))
+            payload = _apply_partition_defaults(payload, self._partition_defaults)
             for message in _check_partition_fit(disk, payload):
                 raise WorkflowError(message)
             prepared.append(

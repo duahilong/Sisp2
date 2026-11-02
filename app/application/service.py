@@ -534,7 +534,7 @@ class SispService:
             "clean",
             "convert gpt",
             f"create partition efi size={int(efi_mb)}",
-            f'format quick fs=fat32 label="EFI"',
+            'format quick fs=fat32 label="EFI"',
         ]
         if letters.get("efi"):
             lines.append(f"assign letter={letters['efi']}")

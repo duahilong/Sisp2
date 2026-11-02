@@ -670,7 +670,7 @@ input[type="radio"] { accent-color: var(--accent); }
         <ul class="hint" style="padding-left:18px;line-height:1.9">
           <li>本页面是单文件、完全离线页面，不引用任何 CDN、外部字体或图片。</li>
           <li>所有调用都返回统一信封 <code>{ok, data}</code> / <code>{ok, error}</code>，失败会在顶部显示红色提示。</li>
-          <li>pywebview 就绪前按钮仍可点，但会提示「后端尚未就绪」，不会静默失败。</li>
+          <li>后端未就绪时按钮仍可点，但会提示「后端尚未就绪」，不会静默失败。</li>
         </ul>
       </div>
     </section>
@@ -717,10 +717,12 @@ input[type="radio"] { accent-color: var(--accent); }
 
   var FIELD_HINTS = {
     theme: '选择「跟随系统」时按操作系统的深浅色自动切换。',
-    dataDefaultGb: '填 auto 表示使用硬盘剩余空间。',
+    dataDefaultGb: '业务配置未指定 D 盘大小时使用；auto 表示使用硬盘剩余空间。',
     dryRunByDefault: '开启后即使不勾选演练，启动时也强制 dry-run。',
     sysTemp: '临时目录不能与日志目录相同。',
-    sysDefaultGb: '允许 60–2000 GB。',
+    sysDefaultGb: '业务配置未指定 C 盘大小时使用；允许 60–2000 GB。',
+    extDiskpart: '留空则使用系统自带 diskpart；仅影响真实执行。',
+    extDism: '留空则使用系统自带 dism；仅影响真实执行。',
     logRetentionDays: '允许 1–3650 天。'
   };
 
@@ -749,7 +751,7 @@ input[type="radio"] { accent-color: var(--accent); }
 
   var API_DOC = [
     ['GET /api/events（SSE）', '是', '任务事件实时推送 + 任务列表快照；断线按游标补发'],
-    ['poll_events(cursor, limit)', '是', '轮询兜底端点（POST /api/events/poll），确认任务后补拉一次'],
+    ['poll_events(cursor, limit)', '是', '游标补发端点（POST /api/events/poll）；界面在确认后补拉一次任务快照'],
     ['start_session(config_path, dry_run)', '是', '运行前检查、读配置、扫描磁盘（「运行预检」）'],
     ['refresh_disks()', '是', '重新扫描磁盘（「重新扫描」与启动时）'],
     ['prepare(selection, dry_run)', '是', '生成执行计划，selection 为磁盘号数组'],
@@ -772,7 +774,6 @@ input[type="radio"] { accent-color: var(--accent); }
   /* ============================================================== 状态 */
   var state = {
     ready: false,
-    retryTimer: null,
     info: null,
     session: null,
     disks: [],
@@ -782,9 +783,6 @@ input[type="radio"] { accent-color: var(--accent); }
     jobs: [],
     pendingJobIds: [],
     cursor: 0,
-    polling: false,
-    pollErrors: 0,
-    pollTimer: null,
     settings: null,
     settingsMeta: { warnings: [], sections: [], pathKeys: [] },
     probes: {},
@@ -871,13 +869,7 @@ input[type="radio"] { accent-color: var(--accent); }
   }
 
   /* ============================================================== API 封装 */
-  /* 与 app/gui_web/server.py 的路由一一对应；调用点仍用 call(name, ...args)，
-     传输层对业务代码透明。非 HTTP 环境（旧 pywebview js_api 模式）走原有桥。 */
-  function httpMode() {
-    return location.protocol === 'http:' || location.protocol === 'https:';
-  }
-
-  var HTTP_MARKER = {};
+  /* 与 app/gui_web/server.py 的路由一一对应；调用点仍用 call(name, ...args)。 */
 
   var API_ROUTES = {
     start_session:       { method: 'POST',   url: '/api/session', body: function (a) { return { config_path: a[0] || null, dry_run: !!a[1] }; } },
@@ -915,29 +907,9 @@ input[type="radio"] { accent-color: var(--accent); }
     });
   }
 
-  function apiObject() {
-    if (httpMode()) { return HTTP_MARKER; }
-    return (window.pywebview && window.pywebview.api) ? window.pywebview.api : null;
-  }
-
   function call(name) {
     var args = Array.prototype.slice.call(arguments, 1);
-    if (!apiObject()) {
-      return Promise.reject(new Error('后端尚未就绪，无法调用 ' + name));
-    }
-    var invoke;
-    if (httpMode()) {
-      invoke = httpCall(name, args);
-    } else {
-      invoke = Promise.resolve().then(function () {
-        var api = apiObject();
-        if (typeof api[name] !== 'function') {
-          throw new Error('后端未提供方法：' + name);
-        }
-        return api[name].apply(api, args);
-      });
-    }
-    return Promise.resolve(invoke)
+    return Promise.resolve(httpCall(name, args))
       .then(function (res) {
         if (res && typeof res === 'object' && 'ok' in res) {
           if (!res.ok) {
@@ -1005,12 +977,10 @@ input[type="radio"] { accent-color: var(--accent); }
 
   function boot() {
     if (state.ready) { return; }
-    if (!apiObject()) { return; }
     state.ready = true;
-    if (state.retryTimer) { clearInterval(state.retryTimer); state.retryTimer = null; }
     setConn('已连接后端', 'ok');
     bootLog('后端已连接，开始初始化。', 'ok');
-    startPolling();
+    startEventStream();
     run('初始化', function () {
       return Promise.resolve()
         .then(function () { return guard('读取程序信息', loadInfo()); })
@@ -1018,28 +988,6 @@ input[type="radio"] { accent-color: var(--accent); }
         .then(function () { return guard('探测路径', probeAll(true)); })
         .then(function () { return initialDisks(); });
     });
-  }
-
-  function waitForBridge() {
-    // HTTP 模式（--serve / 桌面窗口加载本机服务）没有桥接等待，直接初始化。
-    if (httpMode()) { boot(); return; }
-    var attempts = 0;
-    state.retryTimer = setInterval(function () {
-      attempts += 1;
-      if (apiObject()) {
-        clearInterval(state.retryTimer);
-        state.retryTimer = null;
-        boot();
-        return;
-      }
-      if (attempts > 80) { // 约 20 秒
-        clearInterval(state.retryTimer);
-        state.retryTimer = null;
-        setConn('后端未连接', 'bad');
-        bootLog('未检测到 window.pywebview.api。若使用 --mock 启动，界面只能查看；否则请确认 pywebview 已安装。', 'bad');
-        notify('warn', '未检测到 pywebview 后端接口：界面可浏览，但磁盘/设置操作不可用。');
-      }
-    }, 250);
   }
 
   /* ============================================================== 磁盘列表 */
@@ -1651,31 +1599,6 @@ input[type="radio"] { accent-color: var(--accent); }
     appendLog(list.map(describeEvent));
   }
 
-  function startPolling() {
-    // HTTP 模式：SSE 实时推送，断线由浏览器自动重连（Last-Event-ID 补发）；
-    // 非 HTTP 环境退回 1.2 秒游标轮询。
-    if (httpMode()) { startEventStream(); return; }
-    if (state.pollTimer) { return; }
-    state.pollTimer = setInterval(function () {
-      if (!state.ready || state.polling) { return; }
-      state.polling = true;
-      call('poll_events', state.cursor, 300).then(function (data) {
-        if (!data || typeof data !== 'object') { return; }
-        if (typeof data.cursor === 'number' && data.cursor >= state.cursor) {
-          state.cursor = data.cursor;
-        }
-        consumeEvents(data.events);
-        if (Array.isArray(data.jobs)) { applyJobs(data.jobs); }
-        state.pollErrors = 0;
-      }).catch(function (err) {
-        state.pollErrors += 1;
-        if (state.pollErrors === 1) { showError('轮询事件', err); }
-      }).then(function () {
-        state.polling = false;
-      });
-    }, 1200);
-  }
-
   function startEventStream() {
     if (state.eventSource) { return; }
     var es;
@@ -1687,7 +1610,6 @@ input[type="radio"] { accent-color: var(--accent); }
     }
     state.eventSource = es;
     es.onopen = function () {
-      state.pollErrors = 0;
       setConn('已连接后端', 'ok');
     };
     es.onmessage = function (message) {
@@ -1747,7 +1669,7 @@ input[type="radio"] { accent-color: var(--accent); }
         if (data && Array.isArray(data.jobs)) { applyJobs(data.jobs); }
         if (data && typeof data.cursor === 'number') { state.cursor = data.cursor; }
         consumeEvents(data && data.events);
-      }).catch(function () { /* 下一轮轮询会重试 */ });
+      }).catch(function () { /* 失败不影响后续 SSE 帧推送 */ });
     }, 400);
   }
 
@@ -2009,7 +1931,7 @@ input[type="radio"] { accent-color: var(--accent); }
       var info = state.info || {};
       var session = state.session || {};
       var rows = [
-        ['后端连接', state.ready ? '已连接 window.pywebview.api' : '未连接'],
+        ['后端连接', state.ready ? '已连接本机服务' : '未连接'],
         ['程序版本', info.version || '—'],
         ['Python', info.python || '—'],
         ['平台', info.platform || '—'],
@@ -2103,8 +2025,12 @@ input[type="radio"] { accent-color: var(--accent); }
     if (reconnect) {
       reconnect.addEventListener('click', function () {
         setConn('正在检测后端…', '');
-        if (apiObject()) { state.ready = false; boot(); }
-        else { setConn('后端未连接', 'bad'); waitForBridge(); }
+        if (state.eventSource) {
+          state.eventSource.close();
+          state.eventSource = null;
+        }
+        state.ready = false;
+        boot();
       });
     }
 
@@ -2276,11 +2202,8 @@ input[type="radio"] { accent-color: var(--accent); }
     renderPlans();
     renderJobs();
     updateFlowButtons();
-    appendLog([{ text: '界面已加载，等待 pywebview 就绪…', tag: 'ui', kind: '' }]);
-
-    window.addEventListener('pywebviewready', boot);
-    if (apiObject()) { boot(); }
-    else { waitForBridge(); }
+    appendLog([{ text: '界面已加载，正在连接本机服务…', tag: 'ui', kind: '' }]);
+    boot();
   }
 
   if (document.readyState === 'loading') {

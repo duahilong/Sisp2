@@ -127,6 +127,23 @@ def _tail(text: str, limit: int = 4000) -> str:
     return "…（前略）\n" + text[-limit:]
 
 
+def prune_runner_logs(log_dir: str | os.PathLike[str], retention_days: int) -> int:
+    """Remove only this runner's log files older than the configured retention."""
+    directory = Path(log_dir)
+    if not directory.is_dir():
+        return 0
+    cutoff = datetime.now().timestamp() - max(1, int(retention_days)) * 86400
+    removed = 0
+    for path in directory.glob("disk-runner-*.log"):
+        try:
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:
+            _LOGGER.warning("无法清理过期执行日志: %s", path, exc_info=True)
+    return removed
+
+
 class _CommandLog:
     """把命令、退出码、输出写进日志文件；没有 ``log_dir`` 时只留内存。"""
 
@@ -596,6 +613,12 @@ class WindowsDiskRunner:
 def build_real_runner(
     *,
     log_dir: str | os.PathLike[str] | None = None,
+    diskpart: str | None = None,
+    dism: str | None = None,
 ) -> WindowsDiskRunner:
-    """工厂函数；``WorkflowController`` 用它给未注入服务的会话配默认执行器。"""
-    return WindowsDiskRunner(log_dir=log_dir)
+    """工厂函数；``WorkflowController`` 用它给未注入服务的会话配默认执行器。
+
+    ``diskpart`` / ``dism`` 由界面设置（``extDiskpart`` / ``extDism``）传入；
+    空值或 ``None`` 时回退到 PATH / System32 探测。
+    """
+    return WindowsDiskRunner(log_dir=log_dir, diskpart=diskpart, dism=dism)

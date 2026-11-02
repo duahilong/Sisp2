@@ -1,0 +1,14 @@
+# Sisp2 开发与测试依赖
+#
+# 运行时依赖见 requirements.txt（CLI）与 requirements-web.txt（GUI）。
+# 安装：
+#   python -m pip install -r requirements-web.txt -r requirements-dev.txt
+#
+# 说明：
+#   - pytest / pytest-cov 用于跑测试与覆盖率；
+#   - httpx 用于 Web API 测试；
+#   - SSE 测试会在后台线程启动真实 uvicorn（随机空闲端口），因此需要 uvicorn。
+pytest>=8
+pytest-cov>=5
+httpx>=0.27
+uvicorn>=0.29
