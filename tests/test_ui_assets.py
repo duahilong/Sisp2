@@ -111,7 +111,7 @@ def test_every_field_has_section_and_kind() -> None:
     text = SETTINGS_JS.read_text(encoding="utf-8")
     rows = _FIELD_RE.findall(text)
     assert len(rows) == len(DEFAULTS)
-    known = {"bool", "enum", "int", "auto-int", "path", "text"}
+    known = {"bool", "enum", "int", "auto-int", "path", "text", "list"}
     for section, key, kind in rows:
         assert section in {"general", "install", "external", "system_files", "safety", "logging"}, key
         assert kind in known, f"{key} 的控件类型 {kind} 不认识"

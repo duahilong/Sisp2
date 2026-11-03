@@ -291,3 +291,87 @@ def test_diskpart_script_written_into_configured_temp_dir(tmp_path) -> None:
     assert seen["existed"] is True
     # 脚本是临时的，跑完要删掉
     assert list(tmp_path.glob("sisp-diskpart-*.txt")) == []
+
+
+# ------------------------------------------------------------------ 默认值接线
+def _controller(settings: dict[str, Any], payload: dict[str, Any] | None = None) -> WorkflowController:
+    return WorkflowController(
+        service=SimpleNamespace(
+            allowed_disk_numbers=frozenset({1}), dry_run=True, scan_protected_disks=lambda names: []
+        ),
+        dry_run=True,
+        preflight_runner=lambda path, **kwargs: {
+            "results": [],
+            "config_payload": dict(payload if payload is not None else {}),
+        },
+        settings_provider=lambda: dict(settings),
+        worker_interval=0.0,
+    )
+
+
+def test_live_partition_defaults_follow_settings() -> None:
+    """设置页改完 EFI / 分区大小 / 文件系统后，下一次建计划就用新值。"""
+    wf = _controller({"efiDefaultMb": 300, "sysDefaultGb": 200, "dataDefaultGb": 800, "defaultFs": "exFAT"})
+    defaults = wf._live_partition_defaults()
+    assert defaults == {
+        "efi_size_mb": 300,
+        "c_size_gb": 200,
+        "data_size_gb": 800,
+        "data_fs": "exFAT",
+    }
+
+
+def test_live_partition_defaults_keeps_auto_for_data() -> None:
+    wf = _controller({"dataDefaultGb": "auto"})
+    assert wf._live_partition_defaults()["data_size_gb"] is None
+
+
+def test_merged_excluded_names_unions_settings_and_config() -> None:
+    wf = _controller({"excludedDiskNames": ["From Settings"]})
+    merged = wf._merged_excluded_names({"excluded_disk_names": ["From Config", "from settings"]})
+    # 先出现的那份拼写胜出（配置优先于设置），但重复项不会重复计入
+    assert merged == ["From Config", "from settings"]
+
+
+def test_settings_excluded_names_hide_disks_at_start() -> None:
+    """设置里的排除名单必须真的让开盘扫描时置灰。"""
+    seen: list[Any] = []
+
+    def scan(names: Any = None) -> list[Any]:
+        seen.append(list(names or []))
+        return []
+
+    wf = WorkflowController(
+        service=SimpleNamespace(allowed_disk_numbers=frozenset({1}), dry_run=True, scan_protected_disks=scan),
+        dry_run=True,
+        preflight_runner=lambda path, **kwargs: {"results": [], "config_payload": {}},
+        settings_provider=lambda: {"excludedDiskNames": ["Samsung SSD"]},
+        worker_interval=0.0,
+    )
+    wf.start(None, dry_run=True)
+    assert seen and seen[0] == ["Samsung SSD"]
+
+
+def test_default_system_image_from_settings() -> None:
+    wf = _controller({"sysWim": r"D:\images\win11.wim", "imageDefaultIndex": 3})
+    wf.start(None, dry_run=True)
+    payload = wf.session.config_payload
+    assert payload["image_info"]["image_path"] == r"D:\images\win11.wim"
+    assert payload["image_info"]["image_index"] == 3
+
+
+def test_config_image_wins_over_settings_default() -> None:
+    wf = _controller(
+        {"sysWim": r"D:\imagesallback.wim", "imageDefaultIndex": 3},
+        payload={"image_info": {"image_path": r"D:\images\config.wim", "image_index": 1}},
+    )
+    wf.start(None, dry_run=True)
+    info = wf.session.config_payload["image_info"]
+    assert info["image_path"] == r"D:\images\config.wim"
+    assert info["image_index"] == 1
+
+
+def test_image_default_index_zero_keeps_dism_default() -> None:
+    wf = _controller({"sysWim": r"D:\images\win11.wim", "imageDefaultIndex": 0})
+    wf.start(None, dry_run=True)
+    assert "image_index" not in wf.session.config_payload["image_info"]

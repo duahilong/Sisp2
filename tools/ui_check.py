@@ -92,11 +92,22 @@ def _run(cmd: list[str], cwd: Path) -> tuple[int, str]:
 
 
 def check_syntax(node: str) -> list[str]:
+    """逐个模块做语法检查。
+
+    **必须复制成 ``.mjs`` 再检查**：``node --check foo.js`` 对 ESM 语法是宽容
+    的（解析失败就当作别的模式，返回码仍是 0），于是模板字符串里写了真实换行、
+    漏了括号这类错误会被静默放过——浏览器里才炸。改成 ``.mjs`` 后 node 按模块
+    解析，失败就返回非 0。
+    """
     failures: list[str] = []
-    for path in sorted(JS.glob("*.js")):
-        code, output = _run([node, "--check", str(path)], ROOT)
-        if code != 0:
-            failures.append(f"语法错误 {path.name}: {output.strip()[:400]}")
+    with tempfile.TemporaryDirectory(prefix="sisp-ui-check-") as tmp:
+        scratch = Path(tmp)
+        for path in sorted(JS.glob("*.js")):
+            target = scratch / (path.stem + ".mjs")
+            shutil.copyfile(path, target)
+            code, output = _run([node, "--check", str(target)], ROOT)
+            if code != 0:
+                failures.append(f"语法错误 {path.name}: {output.strip()[:400]}")
     return failures
 
 

@@ -45,8 +45,10 @@ DEFAULTS: dict[str, Any] = {
     "typeToConfirm": True,
     "confirmDelete": True,
     "sysDefaultGb": 120,
+    "efiDefaultMb": 100,
     "dataDefaultGb": "auto",
     "defaultFs": "NTFS",
+    "imageDefaultIndex": 0,
     # 外部程序（空 = 用系统自带或 PATH 里的）
     "extEnabled": True,
     "extConfirm": False,
@@ -66,6 +68,7 @@ DEFAULTS: dict[str, Any] = {
     "protectSystemDisk": True,
     "dryRunByDefault": False,
     "blockUnverified": True,
+    "excludedDiskNames": [],
     "logRetentionDays": 30,
     # 日志
     "logDir": "",
@@ -121,7 +124,15 @@ _ENUM_KEYS: dict[str, tuple[str, ...]] = {
 
 _INT_RANGES: dict[str, tuple[int, int]] = {
     "sysDefaultGb": (60, 2000),
+    "efiDefaultMb": (64, 1024),
+    "imageDefaultIndex": (0, 99),
     "logRetentionDays": (1, 3650),
+}
+
+# 列表型设置：每项是一个字符串，用于“怎么输都能收敛”的清洗
+_LIST_LIMITS: dict[str, tuple[int, int]] = {
+    # key: (最多多少条, 单条最长字符)
+    "excludedDiskNames": (50, 120),
 }
 
 
@@ -207,7 +218,45 @@ def coerce_value(key: str, raw: Any) -> Any:
             return ""
         return _expand(str(raw))
 
+    if key in _LIST_LIMITS:
+        return _coerce_name_list(key, raw)
+
     raise SettingsError(key, "未知设置项")
+
+
+def _coerce_name_list(key: str, raw: Any) -> list[str]:
+    """把“列表或整段文本”收敛成干净的字符串列表。
+
+    界面上的控件是一个多行输入框（一行一条），API 调用方也可能直接给数组，
+    所以两种形态都要接：字符串按换行切分，数组逐项转字符串。
+    规则：丢空项、按不区分大小写去重（保留首次出现的原始写法）、限制条数与单条长度。
+    """
+    limit, item_max = _LIST_LIMITS[key]
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        items: list[Any] = raw.splitlines()
+    elif isinstance(raw, (list, tuple)):
+        items = list(raw)
+    else:
+        raise SettingsError(key, "需要字符串列表")
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = " ".join(str(item or "").split())
+        if not text:
+            continue
+        if len(text) > item_max:
+            raise SettingsError(key, f"单条不能超过 {item_max} 个字符")
+        marker = text.casefold()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        cleaned.append(text)
+    if len(cleaned) > limit:
+        raise SettingsError(key, f"最多 {limit} 条")
+    return cleaned
 
 
 class SettingsStore:
@@ -355,8 +404,9 @@ class SettingsStore:
         sys_gb = int(self._data.get("sysDefaultGb") or 120)
         data_default = self._data.get("dataDefaultGb")
         data_size = None if data_default == "auto" else int(data_default)
+        efi_mb = int(self._data.get("efiDefaultMb") or 100)
         return {
-            "efi_size_mb": 100,
+            "efi_size_mb": efi_mb,
             "c_size_gb": sys_gb,
             "data_size_gb": data_size,
             # 数据分区的文件系统：diskpart ``format quick fs=`` 直接用它。

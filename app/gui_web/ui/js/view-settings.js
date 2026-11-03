@@ -46,8 +46,10 @@ const FIELDS = [
   { section: 'install', key: 'typeToConfirm', kind: 'bool', effect: '立即生效', hint: '输入盘号或型号才允许开始，后端同样校验。' },
   { section: 'install', key: 'confirmDelete', kind: 'bool', effect: '立即生效', hint: '分区/格式化等删除类操作也要输入确认。' },
   { section: 'install', key: 'sysDefaultGb', kind: 'int', effect: '下次生成计划生效', hint: '向导第 2 步的初始值，可以在那一步改。' },
+  { section: 'install', key: 'efiDefaultMb', kind: 'int', effect: '下次生成计划生效', hint: 'EFI（ESP）分区大小，最小 64 MB；向导第 2 步只显示不可改。' },
   { section: 'install', key: 'dataDefaultGb', kind: 'auto-int', effect: '下次生成计划生效', hint: '“自动”= 剩余空间全给数据分区。' },
   { section: 'install', key: 'defaultFs', kind: 'enum', effect: '下次生成计划生效', hint: '数据分区格式化用的文件系统（系统分区始终 NTFS）。' },
+  { section: 'install', key: 'imageDefaultIndex', kind: 'int', effect: '下次生成计划生效', hint: '默认镜像里的第几个版本；0 = 用第一个。向导第 3 步可逐盘覆盖。' },
 
   { section: 'external', key: 'extEnabled', kind: 'bool', effect: '立即生效', hint: '关掉后一律用系统自带命令。' },
   { section: 'external', key: 'extConfirm', kind: 'bool', effect: '立即生效', hint: '调用外部程序前先确认路径。' },
@@ -67,6 +69,7 @@ const FIELDS = [
   { section: 'safety', key: 'protectSystemDisk', kind: 'bool', effect: '立即生效', hint: '系统盘/引导盘一律拒绝写。' },
   { section: 'safety', key: 'dryRunByDefault', kind: 'bool', effect: '下次启动生效', hint: '打开后启动就是演练模式，重启程序才换回真实模式。' },
   { section: 'safety', key: 'blockUnverified', kind: 'bool', effect: '立即生效', hint: '拿不到 UniqueId/序列号就拒绝写盘。' },
+  { section: 'safety', key: 'excludedDiskNames', kind: 'list', effect: '立即生效', hint: '一行一个硬盘型号（子串匹配，不区分大小写）；命中的盘禁止安装、分区和修复引导。' },
   { section: 'safety', key: 'logRetentionDays', kind: 'int', effect: '下次清理生效', hint: '超过天数的任务日志会被删。' },
 
   { section: 'logging', key: 'logDir', kind: 'path', pick: 'dir', effect: '重启后生效', hint: '空 = 用户目录下的 Sisp 日志目录。' },
@@ -86,6 +89,8 @@ const LABELS = {
   typeToConfirm: '危险操作需输入确认',
   confirmDelete: '删除/格式化前需输入确认',
   sysDefaultGb: '系统分区默认大小',
+  efiDefaultMb: 'EFI 分区大小',
+  imageDefaultIndex: '默认镜像版本',
   dataDefaultGb: '数据分区默认大小',
   defaultFs: '数据分区文件系统',
   extEnabled: '允许调用外部程序',
@@ -104,6 +109,7 @@ const LABELS = {
   protectSystemDisk: '保护系统盘',
   dryRunByDefault: '默认演练模式',
   blockUnverified: '身份不明的磁盘禁止写入',
+  excludedDiskNames: '禁止操作的硬盘型号',
   logRetentionDays: '日志保留天数',
   logDir: '日志目录',
   logLevel: '日志级别',
@@ -156,6 +162,7 @@ function renderRow(field, settings) {
 function defaultDesc(field) {
   if (field.kind === 'bool') return '开关类设置，保存后立即按新值判断。';
   if (field.kind === 'path') return `路径类设置，可以点“检测”确认是否存在（${field.pick === 'dir' ? '目录' : '文件'}）。`;
+  if (field.kind === 'list') return '列表类设置，一行一条；保存时自动去掉空行和重复项。';
   return '';
 }
 
@@ -181,6 +188,11 @@ function renderControl(field, value) {
   if (field.kind === 'path') {
     return `<button class="tbtn" data-act="pick" data-key="${esc(key)}">浏览…</button>
       <button class="tbtn" data-act="probe" data-key="${esc(key)}">检测</button>`;
+  }
+  if (field.kind === 'list') {
+    const items = Array.isArray(value) ? value : [];
+    return `<textarea class="txtin" rows="4" spellcheck="false" data-key="${esc(key)}"
+      placeholder="一行一个型号，例如：Samsung SSD 980 PRO 1TB">${esc(items.join('\n'))}</textarea>`;
   }
   return `<input class="numin" style="width:200px;text-align:left" data-key="${esc(key)}" value="${esc(value)}">`;
 }
@@ -236,6 +248,18 @@ function bindSettings() {
       let value = input.value === '' ? '' : Number(input.value);
       if (field && field.kind === 'int' && Number.isFinite(value)) value = Math.round(value);
       setDraft(key, value === '' && key === 'dataDefaultGb' ? 'auto' : value);
+      markDirty();
+    });
+  });
+
+  // 列表类（一行一条）：先拆行存成数组，清洗交给后端 coerce_value 做，
+  // 这样“界面输入 → API → 落盘”只有一套归一化规则。
+  $$('#settingsBody textarea[data-key]').forEach((area) => {
+    area.addEventListener('input', () => {
+      setDraft(
+        area.dataset.key,
+        area.value.split('\n').map((line) => line.trim()).filter(Boolean),
+      );
       markDirty();
     });
   });

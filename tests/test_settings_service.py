@@ -192,3 +192,57 @@ def test_load_tolerates_utf8_bom(tmp_path: Path) -> None:
     assert loaded.get()["sysDefaultGb"] == 300
     assert loaded.get()["logDir"] == r"D:\logs"
     assert loaded.get()["logLevel"] == "debug"
+
+
+# ------------------------------------------------------------------ 列表型设置
+def test_excluded_disk_names_accepts_lines_and_dedupes(store: SettingsStore) -> None:
+    saved = store.update({"excludedDiskNames": "Samsung  SSD\n\nsamsung ssd\nWD Blue"})
+    assert saved["excludedDiskNames"] == ["Samsung SSD", "WD Blue"]
+    reloaded = SettingsStore(store.path, which=lambda _name: None).get()
+    assert reloaded["excludedDiskNames"] == ["Samsung SSD", "WD Blue"]
+
+
+def test_excluded_disk_names_accepts_list_and_keeps_order(store: SettingsStore) -> None:
+    saved = store.update({"excludedDiskNames": ["B disk", "A disk", "b disk"]})
+    assert saved["excludedDiskNames"] == ["B disk", "A disk"]
+
+
+def test_excluded_disk_names_rejects_wrong_type(store: SettingsStore) -> None:
+    with pytest.raises(SettingsError) as excinfo:
+        store.update({"excludedDiskNames": {"a": 1}})
+    assert excinfo.value.field == "excludedDiskNames"
+
+
+def test_excluded_disk_names_limits(store: SettingsStore) -> None:
+    with pytest.raises(SettingsError):
+        store.update({"excludedDiskNames": [f"disk-{index}" for index in range(51)]})
+    with pytest.raises(SettingsError):
+        store.update({"excludedDiskNames": ["x" * 121]})
+
+
+def test_excluded_disk_names_empty_clears(store: SettingsStore) -> None:
+    store.update({"excludedDiskNames": ["A"]})
+    assert store.update({"excludedDiskNames": ""})["excludedDiskNames"] == []
+
+
+# ------------------------------------------------------------------ EFI / 镜像版本
+def test_efi_default_range(store: SettingsStore) -> None:
+    for bad in (63, 1025, "abc"):
+        with pytest.raises(SettingsError):
+            coerce_value("efiDefaultMb", bad)
+    assert coerce_value("efiDefaultMb", 64) == 64
+    assert coerce_value("efiDefaultMb", "512") == 512
+
+
+def test_partition_info_uses_efi_default(store: SettingsStore) -> None:
+    assert store.partition_info()["efi_size_mb"] == 100
+    store.update({"efiDefaultMb": 300})
+    assert store.partition_info()["efi_size_mb"] == 300
+
+
+def test_image_default_index_range(store: SettingsStore) -> None:
+    assert store.get()["imageDefaultIndex"] == 0
+    for bad in (-1, 100):
+        with pytest.raises(SettingsError):
+            coerce_value("imageDefaultIndex", bad)
+    assert coerce_value("imageDefaultIndex", 3) == 3

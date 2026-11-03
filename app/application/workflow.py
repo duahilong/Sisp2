@@ -252,6 +252,36 @@ def _apply_partition_defaults(
     return payload
 
 
+def _apply_image_defaults(
+    payload: dict[str, Any],
+    settings: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """配置/向导都没给镜像时，用设置里的“系统镜像文件 + 默认版本”兜底。
+
+    设置页的 ``sysWim`` 原本只参与运行前检查（填了就必须存在），从这里开始它
+    真正成为默认镜像；``imageDefaultIndex`` 为 0 表示“交给 dism 用第一个版本”。
+    """
+    if not settings:
+        return payload
+    info = payload.get("image_info")
+    if not isinstance(info, dict):
+        info = {}
+        payload["image_info"] = info
+    if str(info.get("image_path") or "").strip():
+        return payload
+    wim = str(settings.get("sysWim") or "").strip()
+    if not wim:
+        return payload
+    info["image_path"] = wim
+    try:
+        index = int(settings.get("imageDefaultIndex") or 0)
+    except (TypeError, ValueError):
+        index = 0
+    if index > 0:
+        info["image_index"] = index
+    return payload
+
+
 def _check_partition_fit(disk: DiskInfo, payload: dict[str, Any]) -> list[str]:
     """检查三个分区是否放得下（不依赖 PowerShell，纯算术）。"""
     if not isinstance(disk.size_bytes, int) or disk.size_bytes <= 0:
@@ -475,13 +505,54 @@ class WorkflowController:
         return dict(data) if isinstance(data, Mapping) else {}
 
     def _live_partition_defaults(self) -> dict[str, Any]:
-        """构造时的默认值 + 设置里最新的文件系统选择（改设置立刻生效）。"""
+        """构造时的默认值 + 设置里的最新值（改完设置不必重启）。
+
+        设置页里 EFI / 系统分区 / 数据分区 / 文件系统这四项都是“下次生成计划生效”，
+        所以这里每次现读，而不是只用构造时抓的快照。
+        """
         defaults = dict(self._partition_defaults)
         settings = self._settings()
         fs = str(settings.get("defaultFs") or "").strip()
         if fs:
             defaults["data_fs"] = fs
+        for key, source in (
+            ("efi_size_mb", "efiDefaultMb"),
+            ("c_size_gb", "sysDefaultGb"),
+        ):
+            value = settings.get(source)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                defaults[key] = value
+        data_size = settings.get("dataDefaultGb")
+        if data_size == "auto":
+            defaults["data_size_gb"] = None
+        elif isinstance(data_size, (int, float)) and not isinstance(data_size, bool):
+            defaults["data_size_gb"] = data_size
         return defaults
+
+    def _merged_excluded_names(self, payload: Mapping[str, Any] | None) -> list[str]:
+        """禁止操作的硬盘型号：设置页的名单 ∪ 业务配置里的名单。
+
+        两处都要认：设置页是普通用户的入口（改了立即生效），业务配置是给
+        ``-j`` 指定预设文件的高级用法。
+        """
+        names: list[str] = []
+        seen: set[str] = set()
+        for source in (
+            (payload or {}).get("excluded_disk_names"),
+            self._settings().get("excludedDiskNames"),
+        ):
+            if not isinstance(source, (list, tuple)):
+                continue
+            for item in source:
+                text = str(item).strip()
+                # 匹配本身是 casefold 的，重复项也按 casefold 判断，避免同一块盘
+                # 在两处名单里写法不同就出现两条“命中排除名单”。
+                marker = text.casefold()
+                if not text or marker in seen:
+                    continue
+                seen.add(marker)
+                names.append(text)
+        return names
 
     def _runner_options(self) -> dict[str, Any]:
         """把界面设置里的执行器可选项挑出来，随任务一起下发。"""
@@ -596,9 +667,11 @@ class WorkflowController:
         warnings: list[str] = []
         disks: tuple[DiskInfo, ...] = ()
 
-        if payload is None:
-            warnings.append("配置不可用，硬盘列表未应用配置中的排除规则")
-        excluded_names = payload.get("excluded_disk_names") if payload else None
+        if payload is not None:
+            payload = _apply_image_defaults(payload, self._settings())
+        elif self._settings().get("excludedDiskNames"):
+            warnings.append("配置不可用，硬盘列表只应用了界面设置里的排除名单")
+        excluded_names = self._merged_excluded_names(payload)
         try:
             disks = tuple(self._service.scan_protected_disks(excluded_names))
         except Exception as exc:
@@ -637,7 +710,7 @@ class WorkflowController:
         try:
             disks = tuple(
                 self._service.scan_protected_disks(
-                    session.config_payload.get("excluded_disk_names")
+                    self._merged_excluded_names(session.config_payload)
                 )
             )
         except Exception as exc:
@@ -738,6 +811,7 @@ class WorkflowController:
             drive_letters = selection.drive_letter_allocations.get(disk_number) or {}
             payload = _merge_payload(session.config_payload, overrides.get(disk_number))
             payload = _apply_partition_defaults(payload, self._live_partition_defaults())
+            payload = _apply_image_defaults(payload, self._settings())
             for message in _check_partition_fit(disk, payload):
                 raise WorkflowError(message)
             prepared.append(
