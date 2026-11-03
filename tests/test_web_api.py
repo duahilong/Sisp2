@@ -462,3 +462,65 @@ def test_session_without_dry_run_keeps_process_mode(tmp_path: Path) -> None:
     session = _unwrap(client.post("/api/session", json={}))
     assert session["dry_run"] is True
     assert wf.service.dry_run is True
+
+
+# ------------------------------------------------- 分区/引导：真实操作的强身份
+def test_resolve_identity_prefers_caller_then_scans(tmp_path: Path, monkeypatch) -> None:
+    """界面只传盘号时，闸门也要拿到这块盘的 UniqueId/序列号。
+
+    ``blockUnverified`` 默认打开，闸门要求期望身份里有强标识。以前这里是
+    ``identity or {}``，于是**真实分区操作和修复引导全部被拒**——在打包好的
+    exe 上实测才会发现（演练模式不拦，所以本地测不出来）。
+    """
+    client, wf = _build_client(tmp_path)  # noqa: F841 - 只是为了拿到 wf
+    api = WebApi(wf, settings=build_store(tmp_path / "settings.json"))
+
+    # 调用方显式给了身份：原样返回，不再扫盘
+    assert api._resolve_identity(1, {"unique_id": "abc"}) == {"unique_id": "abc"}
+
+    # 没给：现场扫一次，把强标识补齐
+    monkeypatch.setattr(
+        "app.gui_web.api._scan_summary",
+        lambda number: {
+            "disk_number": number,
+            "unique_id": f"eui-{number}",
+            "serial_number": "SN-1",
+            "model": "Test Disk",
+            "size_bytes": 1024,
+            "size_display": "1 KB",
+        },
+    )
+    resolved = api._resolve_identity(1, None)
+    assert resolved["unique_id"] == "eui-1"
+    assert resolved["serial_number"] == "SN-1"
+    assert resolved["model"] == "Test Disk"
+
+    # 盘不存在（扫描抛错）时退回空身份，由闸门自己报原因
+    def boom(number):
+        raise PermissionError(f"硬盘 {number} 当前不存在")
+
+    monkeypatch.setattr("app.gui_web.api._scan_summary", boom)
+    assert api._resolve_identity(9, None) == {}
+
+
+def test_partition_execute_passes_resolved_identity_to_gate(tmp_path: Path, monkeypatch) -> None:
+    """真实分区执行要把补齐后的身份交给写盘闸门，而不是空字典。"""
+    client, wf = _build_client(tmp_path)  # noqa: F841
+    api = WebApi(wf, settings=build_store(tmp_path / "settings.json"))
+    seen: dict[str, Any] = {}
+
+    class _Runner:
+        def run(self, number, actions, *, identity=None, dry_run=False):
+            seen["identity"] = identity
+            return {"disk_number": number, "dry_run": True, "exit": 0, "script": [], "message": "ok"}
+
+    monkeypatch.setattr(
+        "app.gui_web.api._scan_summary",
+        lambda number: {"disk_number": number, "unique_id": "eui-1", "serial_number": "SN"},
+    )
+    api._partition_runner = lambda: _Runner()  # type: ignore[method-assign]
+
+    body = api.partition_execute(1, [{"kind": "format", "partition_number": 2}], confirm_text="1")
+    assert body["ok"] is True, body
+    # 闸门由 PartitionRunner 在真实模式下调用，identity 从这里传进去
+    assert seen["identity"]["unique_id"] == "eui-1"

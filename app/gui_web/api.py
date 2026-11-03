@@ -282,7 +282,9 @@ class WebApi:
         except (TypeError, ValueError):
             return err("E_BOOT", "硬盘编号不合法")
         try:
-            result = self._boot_repairer().repair(number, identity=identity or {}, dry_run=dry_run)
+            result = self._boot_repairer().repair(
+                number, identity=self._resolve_identity(number, identity), dry_run=dry_run
+            )
         except PermissionError as exc:
             return err("E_CONFIRM", str(exc))
         except Exception as exc:  # noqa: BLE001
@@ -326,13 +328,14 @@ class WebApi:
             number = int(disk_number)
         except (TypeError, ValueError):
             return err("E_PARTITION", "硬盘编号不合法")
-        if not self._delete_confirmed(number, identity or {}, confirm_text):
+        resolved = self._resolve_identity(number, identity)
+        if not self._delete_confirmed(number, resolved, confirm_text):
             return err(
                 "E_CONFIRM",
                 "已开启“删除/格式化前需输入确认”：请输入盘号或磁盘型号后再执行。",
             )
         try:
-            result = self._partition_runner().run(number, actions, identity=identity or {})
+            result = self._partition_runner().run(number, actions, identity=resolved)
         except PermissionError as exc:
             return err("E_CONFIRM", str(exc))
         except Exception as exc:  # noqa: BLE001
@@ -375,6 +378,31 @@ class WebApi:
             dry_run=self._service_dry_run(),
             used_letters=_scan_used_letters,
         )
+
+    def _resolve_identity(
+        self, disk_number: int, identity: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """取这块盘的强身份：调用方给了就用，没给就现场扫一次。
+
+        ``blockUnverified`` 默认是打开的，写盘闸门要求“期望身份”里有 UniqueId 或
+        序列号；而界面上的分区/修复引导只传盘号。如果不在这里补齐身份，真实操作
+        会一律被拒（写入前复核拿不到可比对的东西）——扫描本身是只读的，补这一下
+        比放宽闸门安全得多。
+        """
+        if identity:
+            return dict(identity)
+        try:
+            summary = _scan_summary(disk_number)
+        except Exception:  # noqa: BLE001 - 盘不存在时让闸门自己报错
+            return {}
+        return {
+            "disk_number": disk_number,
+            "unique_id": summary.get("unique_id"),
+            "serial_number": summary.get("serial_number"),
+            "model": summary.get("model"),
+            "size_bytes": summary.get("size_bytes"),
+            "size_display": summary.get("size_display"),
+        }
 
     def _gate(self, disk_number: int, identity: dict[str, Any]) -> Any:
         """分区/引导共用的写盘闸门；dry-run 下由各 runner 自己短路。"""

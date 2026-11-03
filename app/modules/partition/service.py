@@ -242,7 +242,7 @@ def validate(
             continue
         reason = protected_reason(part)
         if reason is not None:
-            blockers.append(f"分区 {action.partition_number} 是{reason}，拒绝操作")
+            blockers.append(f"分区 {action.partition_number} 是 {reason}，拒绝操作")
         if action.kind == "assign":
             if not action.letter:
                 blockers.append("分配盘符必须给出一个盘符")
