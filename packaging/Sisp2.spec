@@ -61,11 +61,16 @@ gui = Analysis(
 
 gui_pyz = PYZ(gui.pure)
 
+# 构建模式：默认 onefile（单个 exe，启动时解包到 %TEMP%）；
+# 设 ``SISP2_BUILD_MODE=onedir`` 则产出目录版（不解包，启动快数倍）。
+# 由 ``packaging/build.py --onedir`` 设置，不直接手改。
+ONEDIR = os.environ.get("SISP2_BUILD_MODE", "").strip().lower() == "onedir"
+
 gui_exe = EXE(
     gui_pyz,
     gui.scripts,
-    gui.binaries,
-    gui.datas,
+    gui.binaries if ONEDIR else [],
+    gui.datas if ONEDIR else [],
     [],
     name="Sisp2",
     debug=False,
@@ -81,4 +86,16 @@ gui_exe = EXE(
     entitlements_file=None,
     icon=ICON,
     version=VERSION_FILE,
+    exclude_binaries=ONEDIR,
 )
+
+if ONEDIR:
+    # onedir：exe 只是引导器，依赖与资源放在 exe 同目录（_internal/）
+    Sisp2 = COLLECT(
+        gui_exe,
+        gui.binaries,
+        gui.datas,
+        strip=False,
+        upx=False,
+        name="Sisp2",
+    )

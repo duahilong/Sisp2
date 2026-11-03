@@ -23,6 +23,8 @@ python packaging/build.py
 ```
 
 - `python packaging/build.py --no-clean`：跳过 PyInstaller `--clean`，快一些；
+- `python packaging/build.py --onedir`：产出目录版 `dist/Sisp2/`（`Sisp2.exe` + `_internal/`），
+  **不解包、启动快数倍**，代价是分发时要整目录带走（可再用 Inno Setup 打成安装包）；
 - `python packaging/build.py --clean-only`：只清理 `dist/` 与 `build/pyinstaller/`；
 - 图标缺失时会自动调用 `packaging/make_icon.py` 生成 `packaging/sisp2.ico`；
 - 版本号只有 `app/version.py` 一个来源，`packaging/version_info.txt` 必须与之
@@ -109,8 +111,11 @@ python packaging/build.py
 
 - **未签名**：会触发 SmartScreen「未知发布者」，也会被杀软按“打包的 Python
   程序”对待。正式分发建议买代码签名证书并对产物签名。
-- **onefile 启动慢**：每次启动都要解包，若在意启动速度可改成 onedir
-  （`EXE(..., exclude_binaries=True)` + `COLLECT`），代价是变成一个文件夹。
+- **onefile 启动慢**：每次启动都要把整包（dll + pyc + datas，约 18 MB）解到
+  `%TEMP%\_MEIxxxx`，再加载解释器与 FastAPI；实测（VM，Win10 22H2 / Python 3.15.2）
+  onefile 冷启约 2.6 s、热启约 2.2 s，同样的代码打成 onedir 是 0.6 s / 0.5 s。
+  要快就 `--onedir`，或把 exe 交给安装器分发；`--runtime-tmpdir` 换到固定 SSD 路径
+  也能省一点，但省不掉解包本身。
 - **`app.log` 是唯一日志出口**：`--windowed` 没有控制台，`print` 的内容会进
   `os.devnull`，排查问题请看设置里 `logDir` 下的 `app.log`。
 - **不能跨平台**：产物含 Windows 专属的 WebView2 / WinForms 组件。
