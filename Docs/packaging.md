@@ -107,15 +107,27 @@ python packaging/build.py
 | `Sisp2.exe --serve` 走 REST 真实整盘安装（2 TB 测试盘） | 六步全绿、`progress` 6/6、分区为 MSR/ESP 300 MB/C 120 GB/D 300 GB，日志 11.8 KB 可读 |
 | 同一 exe 的真实分区操作 | `/api/partition/execute` 建 50 GB NTFS 分区成功，日志含 diskpart 输出，temp 目录无残留 |
 
+## 启动耗时
+
+onefile 与 onedir 的差别只在“要不要解包”，计时方式统一为：
+从进程创建到 `GET /health` 返回 200（`--serve --dry-run`），VM 上跑三次取中位数。
+
+| 模式 | 冷启（首次，缓存空） | 热启（紧接着再启动） |
+| --- | --- | --- |
+| onefile `dist/Sisp2.exe` | 待测 | 待测 |
+| onedir `dist/Sisp2/Sisp2.exe` | 待测 | 待测 |
+
+桌面窗口模式（不带 `--serve`）还要额外付出 pywebview + WebView2 初始化与建窗的时间，
+比上表再慢一档；需要精确数字时用同一套方法量（把探测目标换成窗口出现）。
+
 ## 已知限制
 
 - **未签名**：会触发 SmartScreen「未知发布者」，也会被杀软按“打包的 Python
   程序”对待。正式分发建议买代码签名证书并对产物签名。
 - **onefile 启动慢**：每次启动都要把整包（dll + pyc + datas，约 18 MB）解到
-  `%TEMP%\_MEIxxxx`，再加载解释器与 FastAPI；实测（VM，Win10 22H2 / Python 3.15.2）
-  onefile 冷启约 2.6 s、热启约 2.2 s，同样的代码打成 onedir 是 0.6 s / 0.5 s。
-  要快就 `--onedir`，或把 exe 交给安装器分发；`--runtime-tmpdir` 换到固定 SSD 路径
-  也能省一点，但省不掉解包本身。
+  `%TEMP%\_MEIxxxx`，再加载解释器与 FastAPI，杀软还会扫一遍新写出的文件。
+  要快就 `--onedir`（不解包），或把 exe 交给安装器分发；`--runtime-tmpdir` 换到
+  固定 SSD 路径能省一点，但省不掉解包本身。具体耗时见上面「启动耗时」一节。
 - **`app.log` 是唯一日志出口**：`--windowed` 没有控制台，`print` 的内容会进
   `os.devnull`，排查问题请看设置里 `logDir` 下的 `app.log`。
 - **不能跨平台**：产物含 Windows 专属的 WebView2 / WinForms 组件。
