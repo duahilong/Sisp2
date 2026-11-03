@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 import threading
 from types import SimpleNamespace
@@ -389,3 +390,44 @@ def test_image_default_index_zero_keeps_dism_default() -> None:
     wf = _controller({"sysWim": r"D:\images\win11.wim", "imageDefaultIndex": 0})
     wf.start(None, dry_run=True)
     assert "image_index" not in wf.session.config_payload["image_info"]
+
+
+def _image_check(report: dict[str, Any]) -> dict[str, Any] | None:
+    for item in report["results"]:
+        if item["name"] == "镜像文件存在性检查":
+            return item
+    return None
+
+
+def test_preflight_image_check_prefers_settings_syswim(tmp_path) -> None:
+    """无 -j 时，预检要检查界面设置里的镜像，而不是配置里的占位路径。"""
+    wim = tmp_path / "real.wim"
+    wim.write_bytes(b"wim")
+    report = _preflight({"sysWim": str(wim)}, tmp_path)
+    image = _image_check(report)
+    assert image is not None and image["passed"] is True, image
+    assert "real.wim" in image["message"]
+
+
+def test_preflight_image_check_uses_config_when_explicit(tmp_path) -> None:
+    """显式 -j 时预检看配置里的镜像路径（配置优先），设置只作兜底。"""
+    from app.preflight import run_preflight_checks
+
+    settings_wim = tmp_path / "settings.wim"
+    settings_wim.write_bytes(b"wim")
+    config = tmp_path / "preset.json"
+    config.write_text(
+        json.dumps({"image_info": {"image_path": str(tmp_path / "missing.wim")}}),
+        encoding="utf-8",
+    )
+    report = run_preflight_checks(
+        str(config),
+        dry_run=True,
+        admin_checker=lambda: True,
+        command_lookup=lambda name: f"C:/{name}.exe",
+        disk_usage=lambda root: (0, 0, 10 * 1024**3),
+        settings={"sysWim": str(settings_wim)},
+    )
+    image = _image_check(report)
+    assert image is not None and image["passed"] is False, image
+    assert "missing.wim" in image["message"]

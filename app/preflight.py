@@ -354,11 +354,19 @@ def run_preflight_checks(
         payload = {}
 
     # --------------------------------------------------------------- 镜像
-    image_path = None
+    # 与运行时保持同一套优先级：无 -j 时界面设置的 sysWim 覆盖配置里的
+    # image_path（否则模板占位路径会让“填了真镜像”的用户一直看到阻断）；
+    # 显式 -j 时配置优先，设置只作兜底。
+    config_image = None
     if payload is not None:
         image_info = payload.get("image_info")
         if isinstance(image_info, Mapping):
-            image_path = _text(image_info.get("image_path"))
+            config_image = _text(image_info.get("image_path"))
+    settings_image = _text((settings or {}).get("sysWim"))
+    explicit_config = bool(str(config_path or "").strip() or os.environ.get(CONFIG_ENV_VAR))
+    image_path = (
+        (config_image or settings_image) if explicit_config else (settings_image or config_image)
+    )
     if image_path is not None:
         target = Path(image_path).expanduser()
         if target.is_file():
