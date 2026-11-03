@@ -242,10 +242,13 @@ diskpart /s $env:TEMP\detach.txt
   所以不到 ~81 GB 的盘永远过不了体积校验（第 2 步「下一步」直接禁用）。测整盘安装
   请用 ≥200 GB 的可扩展 VHDX（`create vdisk maximum=204800 type=expandable`，实际占用很小）。
 - **合成 WIM 的 `Windows\System32` 为空时，bcdboot 一定失败**
-  （`BFSVC Error: BCD strings MUI load failure ... bootstr.dll`）。测试盘上的
-  `test.wim` 只带 `Windows\Boot\*`，所以要先把设置里的「引导文件目录」`sysBoot`
-  指向一个真实 Windows 目录（本机 `C:\Windows` 即可），`bcdboot` 才会写出启动文件。
-  这是测试数据的问题，不是流程的问题；失败时也能看到步骤状态、退出码与日志定位。
+  （`BFSVC Error: BCD strings MUI load failure ... bootstr.dll`）。这是 §3.2 那条
+  “源目录至少需要”的清单没抄全时的表现：按清单补上 `Boot`、`System32ootstr.dll`、
+  `bcd.dll`、`config\BCD-Template`、`zh-CNootstr.dll.mui` 重新 capture 后，
+  `test-full.wim`（67 MB 源，30 MB WIM）跑出六步全绿，ESP 里有 1.5 MB 的
+  `EFI\Microsoft\Bootootmgfw.efi`；
+- 临时绕法：把设置里的「引导文件目录」`sysBoot` 指向真实 Windows 目录（`C:\Windows`）
+  也能让 boot 步通过（当时就是靠它把失败步跑成绿的），但那是兜底路径，不是常规用法。
 
 ### 由此修掉的两个产品缺陷
 
