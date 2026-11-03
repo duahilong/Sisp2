@@ -179,6 +179,44 @@ diskpart /s $env:TEMP\detach.txt
 - `.fatal` 的 `display:flex` 盖掉 `[hidden]`，一块空遮罩把整个界面糊成纯背景色；
 - 默认数据分区大小只按“总容量 − 系统分区”算，没给 EFI/对齐留余量，第 4 步一生成计划就容量不足。
 
+### 打包 exe 专项验证（2026-11，2 TB 测试盘）
+
+测试机装了专用于测试的 2 TB NVMe（Disk 1），本轮的**真实写盘全部打在这块盘上**，
+系统盘（Disk 0）只做只读扫描。
+
+- 从 `main` 现打现测（Python 3.15.2 / PyInstaller 6.22.3）：`Sisp2.exe` 18.1 MB、
+  `Sisp2-CLI.exe` 9.5 MB；
+- CLI：`--list` 0、`--json --list` 0、`--dry-run` 0、`--allow-disks 0` 4、`--bogus` 4；
+- `Sisp2.exe --serve`（真机 + 设置文件）：`/api/info` 报 `1.0.0 / 3.15.2 / dry_run=False`，
+  `/static/js/main.js`、`/static/css/app.css` 均 200，设置 31 项、6 个分组、12 个路径键；
+- 浏览器冒烟（`tools/ui_smoke.mjs` → Edge）：`ok=true`，10 张截图 53–105 KB，
+  磁盘树按分区数增长、设置页 31 行、第 4 步计划表 9 行（真实模式显示“真实写盘”）；
+- **真实整盘安装**（走 REST：prepare → submit → confirm，盘号 1、C 120 GB、D 300 GB、
+  镜像用 `D:\sisp-test\test.wim` 索引 1）：六步全绿、`progress` 6/6=100%、
+  `result.steps` 六步 `ok`，完成后分区为 MSR 15.98 MB / ESP 300 MB / C 120 GB NTFS
+  「Windows」/ D 300 GB NTFS「Data」，GPT；
+- 执行日志：`logDir` 下生成 `disk-runner-*.log`（11.8 KB），`/api/jobs/{id}/log?tail=`
+  能取到尾部（含「已释放 EFI 盘符 G」「任务结束：success=True」），`app.log` 记录路径；
+- **真实分区操作**（新增的 partition 模块）：`/api/partition/plan` 只出 5 行脚本、
+  `dry_run=true`；`/api/partition/execute` 真实创建 50 GB NTFS 分区并格式化成功，
+  日志含 diskpart 输出；`/api/partition/plan` 对 ESP 一律拒绝（“分区 2 是 EFI 系统分区”）；
+- 修复引导：`/api/boot/report` 给出 `boot_ok` + `orphan_esp`（合成镜像没有 `Windows` 目录，
+  属预期）；`/api/boot/repair` 对没有 Windows 目录的盘返回明确原因，且不改动任何分区。
+
+### 只有打包后才暴露的问题（已修）
+
+在源码模式下看不到的差异，靠 exe + 真机才浮出来：
+
+- **卷标乱码**：PowerShell 5.1 的重定向输出按 cp936 写字节，而「系统」的 cp936 字节
+  `CF B5 CD B3` 恰好是合法 UTF-8 → 界面里显示成 `ϵͳ`。修法是在脚本前挂
+  `[Console]::OutputEncoding = UTF8`，不是事后猜编码；
+- **真实分区/修复引导被判“缺少 UniqueId”**：界面只传盘号，闸门却要求期望身份里有强标识；
+  现在没传身份时只读补扫一次；
+- **真实分区/修复引导被判“不在白名单”**：`prepare()` 才会授权，单盘操作不经过它；
+  新增 `WorkflowController.authorize_disks()`（界面确认即授权，显式白名单与演练模式不动）；
+- **diskpart 脚本残留在 temp 目录**：`mkstemp` 的 fd 没关，Windows 上 `unlink` 因占用失败；
+- **分区日志没有 diskpart 输出**：攒行日志在写完最后一行后没再 flush。
+
 ## 4. 打包产物（exe）
 
 `Docs/packaging.md` 记录构建方式；验证时按“新打出来的 exe 就是用户手里的东西”

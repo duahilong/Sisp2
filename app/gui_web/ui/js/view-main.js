@@ -257,7 +257,7 @@ function renderMap(disk) {
   legend.innerHTML = Array.from(groups.entries()).map(([cls, group]) => `<span class="lg">
       <i style="background:${fsColor(cls)}"></i>${esc(fsName(cls))} <b>${esc(fmtSize(group.size))}</b>
     </span>`).join('')
-    + `<span class="lg" style="margin-left:auto;color:var(--faint)">共 ${segs.length} 项</span>`;
+    + `<span class="lg" style="margin-left:auto;color:var(--faint)">共 ${segs.filter((seg) => !seg.free).length} 个分区</span>`;
 
   $$('#map .seg-piece').forEach((piece) => {
     piece.addEventListener('click', () => {

@@ -94,7 +94,7 @@ Sisp2-CLI.exe --allow-disks 1 --settings D:\sisp-test\settings-ok.json -j D:\sis
 六步全绿：创建 EFI 100 MB（F:）→ Windows 3 GB（G:）→ 数据分区（H:）→
 应用 `test.wim` → 写 UEFI 引导 → 校验分区（#2=100 MB System、#3(G:)=3.00 GB、
 #4(H:)=4.89 GB）。执行日志落在设置指定的 `D:\sisp-test\gui-logs\`，日志里能看到
-`diskpart.exe /s D:\sisp-test	mp\sisp-diskpart-*.txt`——说明 `sysTemp` 这类设置
+`diskpart.exe /s D:\sisp-test\tmp\sisp-diskpart-*.txt`——说明 `sysTemp` 这类设置
 在打包版里同样生效；跑完 `tmp` 目录为空，EFI 盘符已释放，固件启动项未新增。
 
 **图形界面**
@@ -116,6 +116,8 @@ Sisp2-CLI.exe --allow-disks 1 --settings D:\sisp-test\settings-ok.json -j D:\sis
 | 打包后的界面冒烟（`tools/ui_smoke.mjs` 对 `Sisp2.exe --serve`） | `ok=true`，10 张截图全部 54–105 KB，磁盘树 9 个节点、设置页 31 行、第 4 步计划表 9 行 |
 | `Sisp2-CLI.exe --list` / `--json --list` / `--bogus` | 退出码 0 / 0 / 4 |
 | `Sisp2-CLI.exe --allow-disks 2` 真实写盘 | 8 GB 虚拟盘六步全绿（EFI 100 MB G: → Windows 3 GB H: → 数据 I: → 应用 test.wim → UEFI 引导 → 校验 4 个分区），日志 11.8 KB |
+| `Sisp2.exe --serve` 走 REST 真实整盘安装（2 TB 测试盘） | 六步全绿、`progress` 6/6、分区为 MSR/ESP 300 MB/C 120 GB/D 300 GB，日志 11.8 KB 可读 |
+| 同一 exe 的真实分区操作 | `/api/partition/execute` 建 50 GB NTFS 分区成功，日志含 diskpart 输出，temp 目录无残留 |
 
 ## 已知限制
 
