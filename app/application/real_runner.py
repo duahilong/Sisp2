@@ -109,6 +109,18 @@ def _to_text(value: Any) -> str | None:
     return text or None
 
 
+def _existing_dir(value: Any) -> str | None:
+    """返回可用的临时目录（不存在则尝试创建）；不可用则返回 None。"""
+    text = _to_text(value)
+    if not text:
+        return None
+    try:
+        Path(text).mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    return text if Path(text).is_dir() else None
+
+
 def _decode(data: bytes | None) -> str:
     """dism/diskpart 在中文 Windows 上按 OEM 代码页输出，先 mbcs 再兜底。"""
     if not data:
@@ -257,7 +269,13 @@ class WindowsDiskRunner:
                 )
             finally:
                 if tracker["diskpart_ran"]:
-                    self._release_efi_letter(disk_number, letters.get("efi"), log, env=env)
+                    self._release_efi_letter(
+                        disk_number,
+                        letters.get("efi"),
+                        log,
+                        env=env,
+                        temp_dir=_existing_dir(options.get("temp_dir")),
+                    )
 
         finished = datetime.now()
         duration = (finished - started).total_seconds()
@@ -307,6 +325,7 @@ class WindowsDiskRunner:
         env: Mapping[str, str] | None = None,
     ) -> tuple[list[StepResult], str | None]:
         options = dict(options or {})
+        temp_dir = _existing_dir(options.get("temp_dir"))
         partitions = payload.get("partition_info")
         info = partitions if isinstance(partitions, Mapping) else {}
         efi_mb = max(int(_to_int(info.get("efi_size_mb")) or 100), 64)
@@ -338,7 +357,7 @@ class WindowsDiskRunner:
         try:
             if tracker is not None:
                 tracker["diskpart_ran"] = True
-            code, output = self._run_diskpart(script, log, env=env)
+            code, output = self._run_diskpart(script, log, env=env, temp_dir=temp_dir)
         except Exception as exc:  # noqa: BLE001 - 统一翻成步骤失败
             steps.append(
                 StepResult(
@@ -480,10 +499,11 @@ class WindowsDiskRunner:
         timeout: float = DISKPART_TIMEOUT,
         *,
         env: Mapping[str, str] | None = None,
+        temp_dir: str | None = None,
     ) -> tuple[int, str]:
         if not self.diskpart:
             raise RunnerError("找不到 diskpart.exe")
-        handle, path = tempfile.mkstemp(prefix="sisp-diskpart-", suffix=".txt")
+        handle, path = tempfile.mkstemp(prefix="sisp-diskpart-", suffix=".txt", dir=temp_dir)
         os.close(handle)
         try:
             # diskpart 只认 ANSI 脚本；这里的脚本全是 ASCII。
@@ -503,6 +523,7 @@ class WindowsDiskRunner:
         log: _CommandLog,
         *,
         env: Mapping[str, str] | None = None,
+        temp_dir: str | None = None,
     ) -> None:
         """任务结束后释放 EFI 盘符。
 
@@ -515,7 +536,9 @@ class WindowsDiskRunner:
         lines = [f"select volume {letter}", f"remove letter={letter}", "exit"]
         log.block("释放 EFI 盘符", "\n".join(lines))
         try:
-            code, _output = self._run_diskpart(lines, log, timeout=LETTER_RELEASE_TIMEOUT, env=env)
+            code, _output = self._run_diskpart(
+                lines, log, timeout=LETTER_RELEASE_TIMEOUT, env=env, temp_dir=temp_dir
+            )
         except Exception:  # noqa: BLE001 - 清理失败不能影响任务结果
             log.write(f"释放 EFI 盘符 {letter} 失败（已忽略）")
             return
@@ -584,13 +607,12 @@ class WindowsDiskRunner:
     ) -> dict[str, str]:
         """子进程环境：界面里的临时目录优先生效（TMP/TEMP）。"""
         env = dict(os.environ)
-        temp_dir = _to_text((options or {}).get("temp_dir"))
-        if not temp_dir:
+        configured = _to_text((options or {}).get("temp_dir"))
+        if not configured:
             return env
-        try:
-            Path(temp_dir).mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            log.write(f"临时目录不可用，改用系统默认：{temp_dir}（{exc}）")
+        temp_dir = _existing_dir(configured)
+        if not temp_dir:
+            log.write(f"临时目录不可用，改用系统默认：{configured}")
             return env
         env["TMP"] = temp_dir
         env["TEMP"] = temp_dir

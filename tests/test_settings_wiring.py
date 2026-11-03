@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import pathlib
 import threading
 from types import SimpleNamespace
 from typing import Any
@@ -222,7 +223,7 @@ def test_runner_accepts_runner_options_on_spec(tmp_path, monkeypatch) -> None:
     )
     commands: list[list[str]] = []
 
-    def fake_run_diskpart(lines, log, timeout=600.0, *, env=None):
+    def fake_run_diskpart(lines, log, timeout=600.0, **kwargs):
         commands.append(list(lines))
         return 0, "ok"
 
@@ -262,3 +263,31 @@ def test_workflow_ignores_blank_setting_values(bad: str) -> None:
 
 def _noop(*_args: Any, **_kwargs: Any) -> WorkerResult:
     return WorkerResult.failure(1, "unused", dry_run=True)
+
+
+def test_diskpart_script_written_into_configured_temp_dir(tmp_path) -> None:
+    """sysTemp 不只改子进程 TMP/TEMP：自己的 diskpart 脚本也要放进去。"""
+    runner = WindowsDiskRunner(
+        diskpart="diskpart.exe",
+        dism="dism.exe",
+        bcdboot="bcdboot.exe",
+        powershell="powershell.exe",
+    )
+    from app.application.real_runner import _CommandLog
+
+    log = _CommandLog(None)
+    seen: dict[str, Any] = {}
+
+    def fake_spawn(command, timeout, log, *, env=None):
+        script = pathlib.Path(command[2])
+        seen["parent"] = script.parent
+        seen["existed"] = script.exists()
+        return 0, "", 0.1
+
+    runner._spawn = fake_spawn  # type: ignore[assignment]
+    runner._run_diskpart(["exit"], log, temp_dir=str(tmp_path))
+
+    assert seen["parent"] == tmp_path
+    assert seen["existed"] is True
+    # 脚本是临时的，跑完要删掉
+    assert list(tmp_path.glob("sisp-diskpart-*.txt")) == []
