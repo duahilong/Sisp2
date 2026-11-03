@@ -585,14 +585,17 @@ class WorkflowController:
     # ------------------------------------------------------------------ 计划
     def prepare(
         self,
-        selected_disk_numbers: Sequence[int] | Mapping[int, Mapping[str, Any]],
+        selected_disk_numbers: Sequence[int] | Mapping[int, Mapping[str, Any]] | None = None,
         *,
         dry_run: bool | None = None,
     ) -> list[PreparedJob]:
         """为选中硬盘生成执行计划和任务输入。
 
         ``selected_disk_numbers`` 可以是硬盘编号序列，也可以是
-        ``{硬盘编号: {"c_size": 400, "data_size": 800}}`` 形式的每盘覆盖。
+        ``{硬盘编号: {"c_size": 400, "data_size": 800}}`` 形式的每盘覆盖；
+        省略（``None``）表示用本次扫描结果里**所有可选定**的硬盘——REST 的
+        ``POST /api/prepare`` 不带 ``selection`` 时走这条。显式传空序列仍然
+        报错，避免“什么都没选却真写盘”。
         """
         session = self._require_session()
         if session.config_payload is None:
@@ -600,7 +603,11 @@ class WorkflowController:
         self._apply_live_safety_flags()
 
         overrides: dict[int, dict[str, Any]] = {}
-        if isinstance(selected_disk_numbers, Mapping):
+        if selected_disk_numbers is None:
+            selected = [disk.disk_number for disk in session.disks if disk.is_selectable]
+            if not selected:
+                raise WorkflowError("没有可操作的硬盘：全部被保护或未连接")
+        elif isinstance(selected_disk_numbers, Mapping):
             raw_selection = selected_disk_numbers
             selected = [int(number) for number in raw_selection]
             overrides = {

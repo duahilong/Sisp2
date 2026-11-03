@@ -1,0 +1,13 @@
+# Sisp2 打包依赖（生成 dist/Sisp2.exe 与 dist/Sisp2-CLI.exe）
+#
+# 安装：
+#   python -m pip install -r requirements-build.txt
+#
+# 说明：
+#   - PyInstaller 只负责把源码收进单文件 exe；它必须装在**要打包的那个
+#     Python 解释器**里（onefile 内嵌的是这个解释器的 python3xx.dll）。
+#   - 图形界面后端（pywebview / WebView2）来自 requirements-web.txt，
+#     打包时会一并收进 exe，所以这里直接包含它。
+#   - 只在 Windows 上验证过；构建脚本见 packaging/build.py，说明见 Docs/packaging.md。
+-r requirements-web.txt
+pyinstaller>=6.0

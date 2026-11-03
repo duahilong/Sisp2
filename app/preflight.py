@@ -29,8 +29,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CONFIG_RELATIVE = Path("json") / "win11.json"
+from app import resources
+from app.resources import app_root
+
+REPO_ROOT = app_root()
+DEFAULT_CONFIG_RELATIVE = resources.DEFAULT_CONFIG_RELATIVE
 CONFIG_ENV_VAR = "SISP_CONFIG"
 # 临时目录/日志目录至少要有这么多余量，低于它就先别开工。
 MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024
@@ -117,7 +120,8 @@ def resolve_config_path(config_path: str | os.PathLike[str] | None = None) -> Pa
     """
     candidate = config_path if config_path not in (None, "") else os.environ.get(CONFIG_ENV_VAR)
     if candidate in (None, ""):
-        return REPO_ROOT / DEFAULT_CONFIG_RELATIVE
+        # 冻结版优先用 exe 目录里的配置（用户可改），没有再回退随包模板。
+        return resources.ensure_default_config()
     return Path(str(candidate)).expanduser()
 
 

@@ -24,7 +24,7 @@ python -m app.gui_web.main --serve --port 8765
 | `POST /api/session` | `{config_path, dry_run}`；重启会话并清空 WebApi 事件缓冲 |
 | `GET /api/disks` | 重扫硬盘 |
 | `POST /api/config/check` | `{config_path}` |
-| `POST /api/prepare` | `{selection, dry_run}`；selection 为盘号数组或盘号到覆盖对象的映射 |
+| `POST /api/prepare` | `{selection, dry_run}`；selection 为盘号数组或盘号到覆盖对象的映射；省略 selection 表示「本次扫描里所有可选定的盘」，显式传空数组仍然报错（`E_PREPARE`） |
 | `POST /api/submit` | 登记等待确认任务 |
 | `POST /api/confirm` | `{job_ids, confirm_text?}`；`typeToConfirm` 开启时 `confirm_text` 必须是盘号或磁盘型号 |
 | `POST /api/cancel` | `{job_id}`，协作式取消 |

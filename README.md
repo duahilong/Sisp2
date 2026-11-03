@@ -36,6 +36,18 @@ CLI 默认 `--dry-run` 为关闭状态；省略 `--dry-run` 的 CLI 可进入真
 
 GUI 默认监听 `127.0.0.1:8765`；可用 `--host`、`--port` 改变监听参数。接口文档默认在 `/docs`。非 loopback 监听没有鉴权，属于高风险配置，详见[安全边界](Docs/security.md)及[Web API](Docs/web-api.md)。
 
+## 打包成 exe
+
+不想装 Python 的话，可以直接打成单文件 exe（免安装、双击即用）：
+
+```powershell
+python -m pip install -r requirements-build.txt
+python packaging/build.py
+# → dist/Sisp2.exe（图形界面，约 18 MB）、dist/Sisp2-CLI.exe（命令行，约 9 MB）
+```
+
+exe 的运行参数与源码运行完全一致，`--list` / `--dry-run` / `--allow-disks` / `--serve` / `--settings` 都可用；首次运行会在 exe 同目录生成可编辑的 `json/win11.json`，设置仍保存在 `%APPDATA%\Sisp`。细节（提权、日志位置、体积、未签名等限制）见[打包说明](Docs/packaging.md)。
+
 ## 配置
 
 业务 JSON 默认路径为 `json/win11.json`；可通过 CLI/GUI 的 `-j` 或 `--config` 指定，或使用 `SISP_CONFIG`。文件描述 `partition_info`、`image_info` 和 `excluded_disk_names`。示例中的镜像路径是占位值，应按实际环境调整。
@@ -74,4 +86,5 @@ python -m pytest tests/ -q
 - [业务配置与界面设置](Docs/configuration.md)
 - [Web API、SSE 与部署](Docs/web-api.md)
 - [测试与真实写盘验证](Docs/testing.md)
+- [打包成 exe](Docs/packaging.md)
 - [前端开发说明](app/gui_web/ui/README.md)

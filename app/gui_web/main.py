@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import io
 import json
 import logging
 import logging.handlers
+import os
 import socket
 import subprocess
 import sys
@@ -28,9 +30,10 @@ import urllib.request
 from pathlib import Path
 
 from app.gui.elevation import is_admin
+from app.resources import ui_path
 
 MODULE = "app.gui_web"
-UI_FILE = Path(__file__).resolve().parent / "ui" / "index.html"
+UI_FILE = ui_path()
 SW_SHOWNORMAL = 1
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _LOG_LEVELS = {
@@ -39,6 +42,22 @@ _LOG_LEVELS = {
     "warn": logging.WARNING,
     "error": logging.ERROR,
 }
+
+
+def _ensure_std_streams() -> None:
+    """窗口模式下 ``sys.stdout``/``sys.stderr`` 是 ``None``。
+
+    PyInstaller 的 ``--windowed`` 程序没有控制台，任何 ``print(..., file=sys.stderr)``
+    或 argparse 的出错提示都会直接抛 ``AttributeError``。这里换成空设备，
+    让所有既有代码按“没有控制台”的方式安静工作；真正的诊断信息走 ``app.log``。
+    """
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name, None) is not None:
+            continue
+        try:
+            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
+        except OSError:  # 极端情况下连空设备都打不开
+            setattr(sys, name, io.StringIO())
 
 
 def _level_of(name: object) -> int:
@@ -241,6 +260,7 @@ def _serve_in_thread(app, host: str, port: int):
 
 
 def main(argv: list[str] | None = None) -> int:
+    _ensure_std_streams()
     parser = argparse.ArgumentParser(description="Sisp2 Web 界面")
     parser.add_argument("-j", "--config", default=None, help="配置文件路径，默认 json/win11.json")
     parser.add_argument("--dry-run", action="store_true", help="演练：不真正分区/写盘")

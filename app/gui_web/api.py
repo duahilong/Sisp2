@@ -29,6 +29,9 @@ if TYPE_CHECKING:  # 只为类型标注，避免 import 时拉起整条应用层
     from app.application.workflow import WorkflowController
     from app.modules.settings.service import SettingsStore
 
+# 版本号只有一个来源（app/version.py），打包时的 Windows 版本资源也用它
+from app.version import __version__
+
 MAX_BUFFER = 5000
 
 
@@ -52,7 +55,7 @@ class WebApi:
     def __init__(
         self,
         wf: WorkflowController,
-        app_version: str = "0.0.0",
+        app_version: str = __version__,
         settings: SettingsStore | None = None,
     ) -> None:
         self._wf = wf
@@ -158,7 +161,6 @@ class WebApi:
             return err("E_NOT_FOUND", f"任务不存在: {job_id}")
         return ok(job.to_dict())
 
-    # ------------------------------------------------------------------ 设置
     # ------------------------------------------------------------------ 设置
     def settings_data(self) -> dict[str, Any]:
         """当前设置快照（供 main.py 读 rememberWindow 等行为开关）。"""

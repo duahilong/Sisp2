@@ -265,3 +265,37 @@ def test_refresh_disks_applies_live_protection_setting() -> None:
     settings["protectSystemDisk"] = False
     disks = wf.refresh_disks()
     assert disks[0].is_selectable is True
+
+
+# ------------------------------------------------------------------ 省略选择
+def _controller_multi(disks: list[dict[str, Any]], **kwargs: Any) -> WorkflowController:
+    """多盘控制器：验证“不传 selection”时按可选性自动挑盘。"""
+    service = SispService(disk_scanner=lambda: list(disks), dry_run=False, **kwargs)
+    wf = WorkflowController(
+        service=service,
+        dry_run=False,
+        preflight_runner=_preflight,
+        worker_interval=0.0,
+    )
+    wf.start(None, dry_run=False)
+    return wf
+
+
+def test_prepare_without_selection_uses_selectable_disks() -> None:
+    wf = _controller_multi([_summary(1), _summary(2, is_system=True)])
+    prepared = wf.prepare(dry_run=True)
+    assert [item.disk.disk_number for item in prepared] == [1]
+
+
+def test_prepare_empty_selection_is_still_rejected() -> None:
+    wf = _controller_multi([_summary(1)])
+    with pytest.raises(WorkflowError) as excinfo:
+        wf.prepare([], dry_run=True)
+    assert "尚未选择" in str(excinfo.value)
+
+
+def test_prepare_without_selection_fails_when_all_protected() -> None:
+    wf = _controller_multi([_summary(1, is_system=True)])
+    with pytest.raises(WorkflowError) as excinfo:
+        wf.prepare(dry_run=True)
+    assert "没有可操作" in str(excinfo.value)
