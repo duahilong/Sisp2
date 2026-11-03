@@ -187,7 +187,8 @@ diskpart /s $env:TEMP\detach.txt
 ```powershell
 python packaging/build.py
 .\dist\Sisp2-CLI.exe --list
-.build\smoke.py 8890        # 先起 .\dist\Sisp2.exe --serve --port 8890 --dry-run
+.\build\smoke.py 8890        # 先起 .\dist\Sisp2.exe --serve --port 8890 --dry-run
+node tools/ui_smoke.mjs --url http://127.0.0.1:8890/ --out build/shots-exe   # 打包后的界面冒烟
 ```
 
 - 专用 VM 上用 Python 3.15.2 现打现测：`--list` / `--dry-run` / `--allow-disks 0`
@@ -195,6 +196,9 @@ python packaging/build.py
 - 打出来的 `Sisp2-CLI.exe --allow-disks 1` 在 8 GB 一次性 VHDX 上完成了六步真实写盘，
   日志证明 `sysTemp`、`logDir` 等设置经设置文件传入后照常生效；
 - `Sisp2.exe --serve` 下 `/api/info` 报 `version=1.0.0`，桌面窗口能正常渲染；
+- 界面拆成 ES 模块后，从源码重打并把 `tools/ui_smoke.mjs` 指向 `Sisp2.exe --serve`：
+  `ok=true`、10 张截图全部 50 KB 以上、磁盘树 / 设置页 / 四步向导都能点（说明
+  `ui/css`、`ui/js` 确实进了包）；
 - 冻结后的路径解析由 `tests/test_resources.py` 覆盖（源码 / onefile / onedir、
   exe 旁配置优先、复制失败回退），版本号与 spec 一致性由 `tests/test_packaging.py`
   覆盖。
