@@ -35,7 +35,9 @@ from app.modules.settings.service import build_store
 _GIB = 1024**3
 _PAYLOAD: dict[str, Any] = {
     "partition_info": {"efi_size_mb": 300, "c_size_gb": 30, "data_size_gb": "auto"},
-    "image_info": {"image_path": r"D:\images\win11.wim", "image_index": 1},
+    # 计划会按 payload 重算镜像存在性，所以这里要用一个真实存在的文件
+    # （只校验存在性，不解析内容）。
+    "image_info": {"image_path": str(Path(__file__).resolve()), "image_index": 1},
 }
 
 
@@ -88,7 +90,9 @@ def _preflight(config_path=None) -> dict[str, Any]:
     }
 
 
-def _build_client(tmp_path: Path, *, host_check: bool = False) -> tuple[TestClient, WorkflowController]:
+def _build_client(
+    tmp_path: Path, *, host_check: bool = False, log_dir: Path | None = None
+) -> tuple[TestClient, WorkflowController]:
     wf = WorkflowController(
         service=_FakeService([_disk(1), _disk(2)]),
         dry_run=True,
@@ -96,7 +100,7 @@ def _build_client(tmp_path: Path, *, host_check: bool = False) -> tuple[TestClie
     )
     wf.start(None, dry_run=True)
     store = build_store(tmp_path / "settings.json")
-    api = WebApi(wf, settings=store)
+    api = WebApi(wf, settings=store, log_dir=log_dir)
     app = create_app(api, wf, host_check=host_check)
     return TestClient(app), wf
 
@@ -207,6 +211,25 @@ def test_duplicate_submit_is_rejected(client: TestClient) -> None:
 
     assert body["ok"] is False
     assert body["error"]["code"] == "E_SUBMIT"
+
+
+def test_prepare_accepts_per_disk_override_mapping(client: TestClient) -> None:
+    """第 4 步发的是 ``{盘号: {c_size, data_size}}``，不是数组。
+
+    这条形态是 `WorkflowController.prepare` 的 Mapping 分支：数组只用来报
+    “要装哪几块盘”，覆盖参数必须按盘分开传，否则 ``int(dict)`` 会炸。
+    """
+    prepared = _unwrap(
+        client.post(
+            "/api/prepare",
+            json={"selection": {"1": {"c_size": 20, "data_size": 30}}, "dry_run": True},
+        )
+    )
+    assert len(prepared) == 1
+    info = prepared[0]["spec"]["config_payload"]["partition_info"]
+    assert info["c_size_gb"] == 20
+    assert info["data_size_gb"] == 30
+    assert prepared[0]["spec"]["disk_number"] == 1
 
 
 def test_prepare_rejects_unknown_disk(client: TestClient) -> None:
@@ -322,3 +345,120 @@ def test_sse_streams_snapshot_and_events(tmp_path: Path) -> None:
     assert event_frames[0]["event"]["type"] == "job.created"
     assert event_frames[0]["cursor"] >= 1
     assert isinstance(event_frames[0]["jobs"], list)
+
+
+# ---------------------------------------------------------------- 静态资源
+def test_static_assets_are_served(client: TestClient) -> None:
+    css = client.get("/static/css/app.css")
+    assert css.status_code == 200
+    assert ":root" in css.text
+
+    js = client.get("/static/js/main.js")
+    assert js.status_code == 200
+    assert "import" in js.text
+    # 浏览器按 MIME 判断模块类型，必须是 javascript
+    assert "javascript" in js.headers.get("content-type", "").lower()
+
+
+# ---------------------------------------------------------------- 任务日志
+def _fake_job(job_id: str, log_path: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=job_id,
+        result=SimpleNamespace(
+            steps=[SimpleNamespace(key="verify", status="ok", details={"log_path": log_path})]
+        ),
+    )
+
+
+def test_job_log_unknown_job(tmp_path: Path) -> None:
+    client, _wf = _build_client(tmp_path)
+    body = client.get("/api/jobs/nope/log").json()
+    assert body["ok"] is False
+    assert body["error"]["code"] == "E_NOT_FOUND"
+
+
+def test_job_log_reads_tail_inside_log_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    log_file = logs / "disk-runner-20260101-000000-1.log"
+    log_file.write_text(chr(10).join(f"line {index}" for index in range(20)), encoding="utf-8")
+    client, wf = _build_client(tmp_path, log_dir=logs)
+    monkeypatch.setattr(
+        wf.job_manager, "get", lambda job_id: _fake_job(job_id, str(log_file))
+    )
+
+    data = _unwrap(client.get("/api/jobs/any/log?tail=3"))
+    assert data["path"] == str(log_file.resolve())
+    assert data["total"] == 20
+    assert data["lines"] == ["line 17", "line 18", "line 19"]
+
+
+def test_job_log_refuses_path_outside_log_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    outside = tmp_path / "app.log"
+    outside.write_text("secret", encoding="utf-8")
+    client, wf = _build_client(tmp_path, log_dir=logs)
+    monkeypatch.setattr(
+        wf.job_manager, "get", lambda job_id: _fake_job(job_id, str(outside))
+    )
+
+    body = client.get("/api/jobs/any/log").json()
+    assert body["ok"] is False
+    assert body["error"]["code"] == "E_PATH"
+
+
+def test_job_log_rejects_non_log_suffix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    sneaky = logs / "id_rsa.txt"
+    sneaky.write_text("secret", encoding="utf-8")
+    client, wf = _build_client(tmp_path, log_dir=logs)
+    monkeypatch.setattr(
+        wf.job_manager, "get", lambda job_id: _fake_job(job_id, str(sneaky))
+    )
+
+    body = client.get("/api/jobs/any/log").json()
+    assert body["error"]["code"] == "E_PATH"
+
+
+# ---------------------------------------------------------------- 危险操作确认
+def test_partition_execute_requires_typed_confirmation(tmp_path: Path) -> None:
+    client, _wf = _build_client(tmp_path)
+    body = client.post(
+        "/api/partition/execute",
+        json={"disk_number": 1, "actions": [{"kind": "create", "size_gb": 1}]},
+    ).json()
+    assert body["ok"] is False
+    assert body["error"]["code"] == "E_CONFIRM"
+    assert "确认" in body["error"]["message"]
+
+
+def test_partition_execute_rejects_bad_disk_number(tmp_path: Path) -> None:
+    client, _wf = _build_client(tmp_path)
+    body = client.post("/api/partition/execute", json={"disk_number": "x"}).json()
+    assert body["error"]["code"] == "E_PARTITION"
+
+
+def test_delete_confirmed_accepts_several_spellings(tmp_path: Path) -> None:
+    store = build_store(tmp_path / "settings.json")
+    client, wf = _build_client(tmp_path)
+    api = WebApi(wf, settings=store)
+    identity = {"model": "Samsung SSD 990"}
+    for text in ("1", "disk1", "disk 1", "硬盘1", "硬盘 1", "samsung ssd 990", " SAMSUNG  SSD 990 "):
+        assert api._delete_confirmed(1, identity, text) is True, text
+    assert api._delete_confirmed(1, identity, None) is False
+    assert api._delete_confirmed(1, identity, "2") is False
+
+    store.update({"confirmDelete": False})
+    assert api._delete_confirmed(1, identity, None) is True
+
+
+def test_session_without_dry_run_keeps_process_mode(tmp_path: Path) -> None:
+    """界面刷新会话时不传 dry_run，不能把演练模式的进程切成真实写盘。"""
+    client, wf = _build_client(tmp_path)
+    session = _unwrap(client.post("/api/session", json={}))
+    assert session["dry_run"] is True
+    assert wf.service.dry_run is True

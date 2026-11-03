@@ -27,6 +27,7 @@ import inspect
 import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 from app.application.contracts import CheckItem, DiskInfo
@@ -155,7 +156,7 @@ def _merge_payload(
 
     支持的最小键集（其余键透传）：
     ``efi_size`` / ``efi_size_mb``、``c_size`` / ``c_size_gb``、
-    ``data_size`` / ``data_size_gb``、``win_gho``。
+    ``data_size`` / ``data_size_gb``、``win_gho``、``image_index``。
     """
     payload = copy.deepcopy(dict(base_payload or {}))
     if not overrides:
@@ -188,7 +189,42 @@ def _merge_payload(
         if isinstance(image_info, dict):
             image_info["image_path"] = win_gho.strip()
 
+    # 界面第 3 步：每块盘可以选同一个镜像文件里的不同版本（索引）。
+    image_index = overrides.get("image_index")
+    if image_index not in (None, ""):
+        value = _as_number(image_index)
+        if value is not None and value >= 1:
+            image_info = payload.setdefault("image_info", {})
+            if isinstance(image_info, dict):
+                image_info["image_index"] = int(value)
+
     return payload
+
+
+_IMAGE_CHECK_PREFIX = "镜像文件存在性检查"
+
+
+def _image_blocker(payload: Mapping[str, Any] | None) -> str | None:
+    """按“这块盘实际要用的镜像”重算一次存在性。
+
+    会话级预检只在 ``start()`` 时按配置文件算一次；而向导第 3 步允许每块盘换
+    镜像、换目录，所以计划里的镜像阻断必须按合并后的 payload 重算——否则用户
+    在第 3 步选了一个真实存在的镜像，第 4 步照样挂着“镜像文件不存在”的阻断，
+    永远无法开始。
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    image_info = payload.get("image_info")
+    if not isinstance(image_info, Mapping):
+        return None
+    raw = image_info.get("image_path")
+    text = str(raw).strip() if raw is not None else ""
+    if not text:
+        return None
+    target = Path(text).expanduser()
+    if target.is_file():
+        return None
+    return f"{_IMAGE_CHECK_PREFIX}：镜像文件不存在: {target}"
 
 
 def _apply_partition_defaults(
@@ -207,7 +243,7 @@ def _apply_partition_defaults(
         partition_info = {}
         payload["partition_info"] = partition_info
 
-    for key in ("efi_size_mb", "c_size_gb", "data_size_gb"):
+    for key in ("efi_size_mb", "c_size_gb", "data_size_gb", "data_fs"):
         value = defaults.get(key)
         if value in (None, ""):
             continue
@@ -332,10 +368,22 @@ class WorkflowController:
             block_unverified=self._block_unverified,
         )
 
-    def _execute_spec(self, spec: Any, cancel_event: threading.Event) -> WorkerResult:
+    def _execute_spec(
+        self,
+        spec: Any,
+        cancel_event: threading.Event,
+        on_step: Any = None,
+    ) -> WorkerResult:
         """``JobManager`` 的默认执行器：走本会话的 service，不再另造一个。"""
         self._sync_service_policy(dry_run=bool(getattr(spec, "dry_run", False)))
-        return self._service.execute_spec(spec, cancel_event)
+        execute = self._service.execute_spec
+        try:
+            accepts = "on_step" in inspect.signature(execute).parameters
+        except (TypeError, ValueError):
+            accepts = False
+        if accepts:
+            return execute(spec, cancel_event, on_step)
+        return execute(spec, cancel_event)
 
     def _apply_live_safety_flags(self) -> None:
         """设置页改了安全开关后就生效，不必重启进程。
@@ -425,6 +473,15 @@ class WorkflowController:
         except Exception:  # noqa: BLE001 - 设置读取失败不能拖死执行
             return {}
         return dict(data) if isinstance(data, Mapping) else {}
+
+    def _live_partition_defaults(self) -> dict[str, Any]:
+        """构造时的默认值 + 设置里最新的文件系统选择（改设置立刻生效）。"""
+        defaults = dict(self._partition_defaults)
+        settings = self._settings()
+        fs = str(settings.get("defaultFs") or "").strip()
+        if fs:
+            defaults["data_fs"] = fs
+        return defaults
 
     def _runner_options(self) -> dict[str, Any]:
         """把界面设置里的执行器可选项挑出来，随任务一起下发。"""
@@ -658,7 +715,7 @@ class WorkflowController:
                 raise WorkflowError(f"硬盘编号不存在: {disk_number}")
             drive_letters = selection.drive_letter_allocations.get(disk_number) or {}
             payload = _merge_payload(session.config_payload, overrides.get(disk_number))
-            payload = _apply_partition_defaults(payload, self._partition_defaults)
+            payload = _apply_partition_defaults(payload, self._live_partition_defaults())
             for message in _check_partition_fit(disk, payload):
                 raise WorkflowError(message)
             prepared.append(
@@ -688,7 +745,15 @@ class WorkflowController:
         task_payload = payload if payload is not None else (session.config_payload or {})
         identity = build_worker_disk_identity(disk.to_dict())
         checks: list[CheckItem] = []
-        blockers: list[str] = list(session.blockers)
+        # 会话级阻断项里，“镜像文件存在性检查”是按配置文件算的；这块盘可能在第 3 步
+        # 换了镜像，所以先剔掉旧的，等下面按合并后的 payload 重算再补回去。
+        blockers: list[str] = [
+            item for item in session.blockers
+            if not item.startswith(_IMAGE_CHECK_PREFIX)
+        ]
+        image_blocker = _image_blocker(task_payload)
+        if image_blocker:
+            blockers.append(image_blocker)
         warnings: list[str] = []
 
         checks.append(

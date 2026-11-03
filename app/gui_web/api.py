@@ -45,6 +45,33 @@ def err(code: str, message: str, detail: Any = None) -> dict[str, Any]:
     return {"ok": False, "error": {"code": code, "message": message, "detail": detail}}
 
 
+def _scan_summary(disk_number: int) -> dict[str, Any]:
+    from app.modules.disk_info.service import scan_disk_summaries
+
+    for summary in scan_disk_summaries():
+        if int(summary.get("disk_number") or -1) == int(disk_number):
+            return summary
+    raise PermissionError(f"硬盘 {disk_number} 当前不存在")
+
+
+def _scan_used_letters() -> list[str]:
+    from app.modules.disk_info.service import scan_used_drive_letters
+
+    return scan_used_drive_letters()
+
+
+def _job_log_path(job: Any) -> str | None:
+    """从任务结果最后一步的 details 里找日志路径。"""
+    result = getattr(job, "result", None)
+    steps = getattr(result, "steps", ()) or ()
+    for step in reversed(tuple(steps)):
+        details = getattr(step, "details", None) or {}
+        path = str(details.get("log_path") or "").strip()
+        if path:
+            return path
+    return None
+
+
 class WebApi:
     """暴露给 JavaScript 的接口对象。
 
@@ -57,9 +84,12 @@ class WebApi:
         wf: WorkflowController,
         app_version: str = __version__,
         settings: SettingsStore | None = None,
+        log_dir: str | None = None,
     ) -> None:
         self._wf = wf
         self._version = app_version
+        # 日志读取的白名单根目录：只能读这个目录下的 *.log。
+        self._log_root = log_dir
         self._events: list[dict[str, Any]] = []
         self._base = 0
         self._lock = threading.Lock()
@@ -97,9 +127,21 @@ class WebApi:
         })
 
     # ------------------------------------------------------------------ 会话
-    def start_session(self, config_path: str | None = None, dry_run: bool = False) -> dict[str, Any]:
+    def start_session(
+        self,
+        config_path: str | None = None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """启动会话。
+
+        ``dry_run`` 省略（``None``）表示“保持进程当前的模式”——GUI 的模式在
+        ``gui_web/main.py`` 里已经按 ``--dry-run`` / ``dryRunByDefault`` 定好了，
+        界面不该在每次刷新会话时把它改回真实写盘。
+        """
         try:
-            session = self._wf.start(config_path, dry_run=bool(dry_run))
+            session = self._wf.start(
+                config_path, dry_run=None if dry_run is None else bool(dry_run)
+            )
         except Exception as exc:  # noqa: BLE001 - 任何异常都要变成信封返回给界面
             return err("E_START", str(exc))
         with self._lock:
@@ -155,11 +197,195 @@ class WebApi:
             return err("E_CANCEL", str(exc))
         return ok({"cancelled": cancelled})
 
+    def list_jobs(self) -> dict[str, Any]:
+        """当前所有任务（界面首屏/日志坞在没有 SSE 时的兜底）。"""
+        return ok([job.to_dict() for job in self._wf.jobs()])
+
     def get_job(self, job_id: str) -> dict[str, Any]:
         job = self._wf.job_manager.get(job_id)
         if job is None:
             return err("E_NOT_FOUND", f"任务不存在: {job_id}")
         return ok(job.to_dict())
+
+    def job_log(self, job_id: str, tail: int = 200) -> dict[str, Any]:
+        """读取任务日志尾部；路径必须落在配置的日志目录内。"""
+        job = self._wf.job_manager.get(job_id)
+        if job is None:
+            return err("E_NOT_FOUND", f"任务不存在: {job_id}")
+        path = _job_log_path(job)
+        if path is None:
+            return ok({"path": "", "lines": [], "total": 0, "message": "该任务没有日志文件"})
+        allowed = self._allowed_log_path(path)
+        if allowed is None:
+            return err("E_PATH", "日志路径不在日志目录内，拒绝读取", {"path": str(path)})
+        try:
+            text = allowed.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return err("E_LOG", f"读取日志失败：{exc}")
+        lines = text.splitlines()
+        limit = max(1, min(int(tail or 200), 5000))
+        return ok({"path": str(allowed), "lines": lines[-limit:], "total": len(lines)})
+
+    def _allowed_log_path(self, path: str) -> Path | None:
+        """把日志路径收敛到 ``log_dir`` 内的 ``.log`` 文件；越界返回 None。"""
+        try:
+            resolved = Path(path).resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+        if not resolved.is_file() or resolved.suffix.lower() != ".log":
+            return None
+        if not self._log_root:
+            return resolved
+        try:
+            root = Path(self._log_root).resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+        return resolved if root == resolved.parent or root in resolved.parents else None
+
+    # ------------------------------------------------------------------ 镜像
+    def probe_images(self, directory: str | None = None, path: str | None = None) -> dict[str, Any]:
+        """列镜像目录，或读取某个 WIM/ISO 的索引列表。"""
+        try:
+            probe = self._image_probe()
+            target_dir = directory
+            if path is None and not target_dir:
+                target_dir = str(self._settings.get().get("sysIsoDir") or "")
+            data = probe.probe(path, directory=target_dir)
+        except Exception as exc:  # noqa: BLE001
+            return err("E_IMAGE", str(exc))
+        return ok(data)
+
+    def _image_probe(self) -> Any:
+        from app.modules.image.service import ImageProbe
+
+        settings = self._settings.get()
+        return ImageProbe(dism=str(settings.get("extDism") or "") or None)
+
+    # ------------------------------------------------------------------ 引导
+    def boot_report(self) -> dict[str, Any]:
+        """扫描全部硬盘的 Windows 目录与 EFI 引导文件。"""
+        try:
+            report = self._boot_repairer().report()
+        except Exception as exc:  # noqa: BLE001
+            return err("E_BOOT", str(exc))
+        return ok(report)
+
+    def boot_repair(
+        self,
+        disk_number: Any,
+        identity: dict[str, Any] | None = None,
+        dry_run: bool | None = None,
+    ) -> dict[str, Any]:
+        """重写指定硬盘的 UEFI 引导；写盘前过同一套闸门。"""
+        try:
+            number = int(disk_number)
+        except (TypeError, ValueError):
+            return err("E_BOOT", "硬盘编号不合法")
+        try:
+            result = self._boot_repairer().repair(number, identity=identity or {}, dry_run=dry_run)
+        except PermissionError as exc:
+            return err("E_CONFIRM", str(exc))
+        except Exception as exc:  # noqa: BLE001
+            return err("E_BOOT", str(exc))
+        return ok(result)
+
+    def _boot_repairer(self) -> Any:
+        from app.modules.boot.service import BootRepairer
+
+        settings = self._settings.get()
+        return BootRepairer(
+            self._gate,
+            diskpart=str(settings.get("extDiskpart") or "") or None,
+            temp_dir=str(settings.get("sysTemp") or "") or None,
+            log_dir=self._log_root,
+            dry_run=self._service_dry_run(),
+        )
+
+    # ------------------------------------------------------------------ 分区
+    def partition_plan(self, disk_number: Any, actions: Any) -> dict[str, Any]:
+        """只校验并生成 diskpart 脚本，不动磁盘。"""
+        try:
+            number = int(disk_number)
+        except (TypeError, ValueError):
+            return err("E_PARTITION", "硬盘编号不合法")
+        try:
+            result = self._partition_runner().run(number, actions, dry_run=True)
+        except Exception as exc:  # noqa: BLE001
+            return err("E_PARTITION", str(exc))
+        return ok(result)
+
+    def partition_execute(
+        self,
+        disk_number: Any,
+        actions: Any,
+        identity: dict[str, Any] | None = None,
+        confirm_text: str | None = None,
+    ) -> dict[str, Any]:
+        """执行分区操作；``confirmDelete`` 打开时必须回填盘号或型号。"""
+        try:
+            number = int(disk_number)
+        except (TypeError, ValueError):
+            return err("E_PARTITION", "硬盘编号不合法")
+        if not self._delete_confirmed(number, identity or {}, confirm_text):
+            return err(
+                "E_CONFIRM",
+                "已开启“删除/格式化前需输入确认”：请输入盘号或磁盘型号后再执行。",
+            )
+        try:
+            result = self._partition_runner().run(number, actions, identity=identity or {})
+        except PermissionError as exc:
+            return err("E_CONFIRM", str(exc))
+        except Exception as exc:  # noqa: BLE001
+            return err("E_PARTITION", str(exc))
+        return ok(result)
+
+    def _delete_confirmed(
+        self,
+        disk_number: int,
+        identity: dict[str, Any],
+        confirm_text: str | None,
+    ) -> bool:
+        settings = self._settings.get()
+        if not bool(settings.get("confirmDelete", True)):
+            return True
+        text = " ".join(str(confirm_text or "").split()).casefold()
+        if not text:
+            return False
+        accepted = {
+            str(disk_number),
+            f"disk{disk_number}",
+            f"disk {disk_number}",
+            f"硬盘{disk_number}",
+            f"硬盘 {disk_number}",
+        }
+        model = " ".join(str(identity.get("model") or "").split()).casefold()
+        if model:
+            accepted.add(model)
+        return text in {" ".join(item.split()).casefold() for item in accepted}
+
+    def _partition_runner(self) -> Any:
+        from app.modules.partition.service import PartitionRunner
+
+        settings = self._settings.get()
+        return PartitionRunner(
+            self._gate,
+            diskpart=str(settings.get("extDiskpart") or "") or None,
+            temp_dir=str(settings.get("sysTemp") or "") or None,
+            log_dir=self._log_root,
+            dry_run=self._service_dry_run(),
+            used_letters=_scan_used_letters,
+        )
+
+    def _gate(self, disk_number: int, identity: dict[str, Any]) -> Any:
+        """分区/引导共用的写盘闸门；dry-run 下由各 runner 自己短路。"""
+        service = self._wf.service
+        gate = getattr(service, "require_disk_writable", None)
+        if gate is None:  # 测试替身没有该方法时退回“只读扫描”
+            return _scan_summary(disk_number)
+        return gate(disk_number, identity)
+
+    def _service_dry_run(self) -> bool:
+        return bool(getattr(self._wf.service, "dry_run", True))
 
     # ------------------------------------------------------------------ 设置
     def settings_data(self) -> dict[str, Any]:

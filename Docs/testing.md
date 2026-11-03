@@ -12,7 +12,32 @@ python -m pytest tests/ -q
 - 测试使用替身扫描器/执行器和注入依赖，不碰真实磁盘；
 - SSE 测试会在后台线程启动真实 uvicorn（随机空闲端口），因此依赖 `uvicorn`；
 - 覆盖重点：任务状态机、重复提交、取消、演练硬上限、盘符规划、设置校验与 BOM、CLI 输出、SSE 帧。
-- 当前基线：106 passed（本机 Python 3.14；专用 VM 上 Python 3.15.2 同为 106 passed）。
+- 当前基线：170 passed（本机 Python 3.14；专用 VM 上 Python 3.15.2 同口径）。其中前端相关三组：
+  `tests/test_ui_assets.py`（资源引用、薄壳、设置页字段对账、CSS 与纯函数约定）、
+  `tests/test_partition_boot_image.py`（分区/引导/镜像三个模块的纯逻辑）、
+  `tests/test_web_api.py` 新增的静态托管、日志尾部、分区确认、会话模式等用例。
+
+## 1.1 前端：静态检查与浏览器冒烟
+
+前端没有构建步骤，所以检查也分两层：
+
+```powershell
+python tools/ui_check.py                                               # node --check + 引用 + derive.js 行为
+node tools/ui_smoke.mjs --url http://127.0.0.1:8765/ --out build/shots  # headless Chrome 走一遍
+```
+
+- `tools/ui_check.py`：每个 `ui/js/*.js` 过 `node --check`；`index.html` 里的 `/static/...`
+  引用必须存在；相对 `import` 必须能解析；把 `derive.js` 复制成 `.mjs` 在 node 里真实跑
+  一遍，断言容量格式化、分区切片、盘符建议、大小校验（含 EFI 预留）。
+  `tests/test_ui_assets.py::test_frontend_static_check` 会代调它。
+- `tools/ui_smoke.mjs`：CDP 直连 headless Chrome（不依赖 Playwright），依次走主页面、
+  四步向导、设置页、操作菜单和修复引导弹窗，收集 `Runtime.exceptionThrown` /
+  `Log.entryAdded`，截图 10 张，并对 `.dsel`/`.tgt`/`select[data-image]`/计划行数/
+  `#startBtn`/`.set-row` 做计数断言；**截图小于 20 KB 视为空白直接判失败**（曾经因为
+  `.fatal` 的 `display:flex` 盖掉了 `[hidden]`，整块遮罩把界面糊成纯背景色，十张截图
+  全是空白而且脚本还“通过”了）。
+- 两项都需要 PATH 里有 `node`；没有时 `ui_check.py` 打印跳过并以 0 退出，
+  `test_frontend_static_check` 用 `skipif` 跳过。
 
 ## 2. 专用 VM：只读与 dry-run
 
@@ -124,11 +149,35 @@ diskpart /s $env:TEMP\detach.txt
 - 窗口记忆：关窗后 `window.json` 写入 `{"width":1280,"height":860,"x":182,"y":182}`；预先写入 1024×700 @ (300,240) 后重启，窗口按该位置恢复；`rememberWindow=false` 时既不恢复也不写文件；
 - 连续多次真实执行后盘符池稳定；EFI 盘符在任务结束后自动释放，无幽灵盘符。
 
+### 界面重构验证（ui-rebuild 分支）
+
+- 本机与专用 VM（Python 3.15.2）`pytest -q` 均 **170 passed**；
+- `tools/ui_check.py` 通过：10 个 ES 模块语法正常、`/static` 引用全部落地、
+  `derive.js` 在 node 里跑通（含 EFI 预留的容量校验）；
+- VM 上没有 Chrome，`tools/ui_smoke.mjs` 自动改用 Edge 跑通：10 张截图都在 50 KB 以上，
+  主页面 `tree=9`、设置页 31 行、第 4 步计划表 9 行、修复引导弹窗有 1 条 finding；
+- 新增接口在 VM 上用真实数据验证：`/api/images` 读出 `test.wim` 的索引 1（SispTest）、
+  `/api/boot/report` 给出 `boot_ok` + ESP 分区 1、`/api/partition/plan` 在“未分配空间为 0”
+  时回明确中文原因、格式化演练只生成 5 行 diskpart 脚本、
+  `/api/partition/execute` 不带确认文本时 `E_CONFIRM`、盘号不存在时 `E_PARTITION`、
+  `/api/jobs/{id}/log` 在没配 `logDir` 时回 `message` 而不是报错；
+- **真实写盘走了新代码路径**：新建 8 GB 动态 VHDX → Disk 2，`prepare(dry_run=false)`
+  给出 `executable=true`，`confirm(confirm_text="2")` 后六步全绿，
+  `progress` 为 `6/6 = 100%`、`result.steps` 六步 `ok`，分区为
+  MSR 15.98 MB / ESP 300 MB / C 4 GB NTFS / D 3 GB NTFS（GPT）；跑完 detach 并删除 VHDX，
+  Disk 0/1 的分区与卷（C 150 GB、D/E 390.7 GB、F 1863 GB）完全没变；
+- 演练流程（`--serve --dry-run` + 2 TB 数据盘，完整走 prepare→submit→confirm）：`completed` 恰为六个阶段，
+  演练附加的 `diskpart_preview` 只发事件、不计入进度。
+
 ### 由此修复的问题
 
 - 设置文件 UTF-8 BOM 导致整份设置被忽略（`logDir` 看似保存却不生效）；
 - EFI 隐藏卷盘符在 `clean` 后残留，下一次 `assign letter` 失败（现已释放 + 规划阶段避开）；
-- CLI 无法指定执行日志目录；取消中的任务被执行器失败结果覆盖为 failed。
+- CLI 无法指定执行日志目录；取消中的任务被执行器失败结果覆盖为 failed；
+- 向导第 3 步换了镜像后，计划仍挂着会话级的「镜像文件不存在」阻断，永远无法开始；
+- 演练只上报 4 个阶段，`diskpart_preview` 还会被算进进度（显示成 7/6）。
+- `.fatal` 的 `display:flex` 盖掉 `[hidden]`，一块空遮罩把整个界面糊成纯背景色；
+- 默认数据分区大小只按“总容量 − 系统分区”算，没给 EFI/对齐留余量，第 4 步一生成计划就容量不足。
 
 ## 4. 打包产物（exe）
 
@@ -138,7 +187,8 @@ diskpart /s $env:TEMP\detach.txt
 ```powershell
 python packaging/build.py
 .\dist\Sisp2-CLI.exe --list
-.uild\smoke.py 8890        # 先起 .\dist\Sisp2.exe --serve --port 8890 --dry-run
+.\build\smoke.py 8890        # 先起 .\dist\Sisp2.exe --serve --port 8890 --dry-run
+node tools/ui_smoke.mjs --url http://127.0.0.1:8890/ --out build/shots-exe   # 打包后的界面冒烟
 ```
 
 - 专用 VM 上用 Python 3.15.2 现打现测：`--list` / `--dry-run` / `--allow-disks 0`
@@ -146,6 +196,9 @@ python packaging/build.py
 - 打出来的 `Sisp2-CLI.exe --allow-disks 1` 在 8 GB 一次性 VHDX 上完成了六步真实写盘，
   日志证明 `sysTemp`、`logDir` 等设置经设置文件传入后照常生效；
 - `Sisp2.exe --serve` 下 `/api/info` 报 `version=1.0.0`，桌面窗口能正常渲染；
+- 界面拆成 ES 模块后，从源码重打并把 `tools/ui_smoke.mjs` 指向 `Sisp2.exe --serve`：
+  `ok=true`、10 张截图全部 50 KB 以上、磁盘树 / 设置页 / 四步向导都能点（说明
+  `ui/css`、`ui/js` 确实进了包）；
 - 冻结后的路径解析由 `tests/test_resources.py` 覆盖（源码 / onefile / onedir、
   exe 旁配置优先、复制失败回退），版本号与 spec 一致性由 `tests/test_packaging.py`
   覆盖。

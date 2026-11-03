@@ -23,8 +23,14 @@ ROOT = os.path.abspath(os.path.join(SPECPATH, os.pardir))
 ICON = os.path.join(SPECPATH, "sisp2.ico")
 VERSION_FILE = os.path.join(SPECPATH, "version_info.txt")
 
+UI_ROOT = os.path.join(ROOT, "app", "gui_web", "ui")
+UI_DEST = os.path.join("app", "gui_web", "ui")
+
 DATAS = [
-    (os.path.join(ROOT, "app", "gui_web", "ui", "index.html"), os.path.join("app", "gui_web", "ui")),
+    (os.path.join(UI_ROOT, "index.html"), UI_DEST),
+    # 界面是 ES 模块：样式和脚本都必须进包，否则 exe 里只剩一个空壳。
+    (os.path.join(UI_ROOT, "css"), os.path.join(UI_DEST, "css")),
+    (os.path.join(UI_ROOT, "js"), os.path.join(UI_DEST, "js")),
     (os.path.join(ROOT, "json", "win11.json"), "json"),
 ]
 

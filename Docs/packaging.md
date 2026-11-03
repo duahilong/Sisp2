@@ -35,7 +35,7 @@ python packaging/build.py
 
 | 内容 | 位置 | 说明 |
 | --- | --- | --- |
-| 界面 `index.html`、默认配置模板 | exe 内部资源 | 只读，随包发布 |
+| 界面 `ui/index.html` + `ui/css` + `ui/js`、默认配置模板 | exe 内部资源 | 只读，随包发布（spec 的 `DATAS` 必须整目录带上，否则 exe 只剩空壳） |
 | 业务配置 `json/win11.json` | **exe 同目录** | 首次运行自动从模板复制一份，之后可随意编辑 |
 | 设置 `settings.json` | `%APPDATA%\Sisp\` | 与源码运行完全一致，exe 升级不会丢 |
 | 窗口位置 `window.json` | `%APPDATA%\Sisp\` | 受 `rememberWindow` 控制 |
@@ -101,10 +101,21 @@ Sisp2-CLI.exe --allow-disks 1 --settings D:\sisp-test\settings-ok.json -j D:\sis
 
 | 检查 | 结果 |
 | --- | --- |
-| `Sisp2.exe --serve --port 8890 --dry-run` | `/health` 200、`/api/info` 版本 1.0.0、会话 8 项预检、设置 25 个键、系统盘按保护规则不可选 |
+| `Sisp2.exe --serve --port 8890 --dry-run` | `/health` 200、`/api/info` 版本 1.0.0、会话 8 项预检、设置 31 个键、系统盘按保护规则不可选 |
 | `Sisp2.exe` 桌面窗口（开发机） | 窗口标题「硬盘工具箱」，磁盘列表完整渲染，右上角「已连接后端」 |
 | 首次运行 | 自动在 exe 同目录生成可编辑的 `json/win11.json` |
-| `pytest tests/ -q` | 测试机 120 passed（含 `test_resources` / `test_packaging`） |
+| `pytest tests/ -q` | 测试机 170 passed（含 `test_resources` / `test_packaging`） |
+
+界面拆成 ES 模块之后，spec 的 `DATAS` 必须把 `ui/css`、`ui/js` 整目录带上，
+否则打出来的 exe 只会显示一个没有样式、也没有脚本的空壳。`tests/test_packaging.py`
+里钉了这条（`test_spec_bundles_static_assets`），打包后也用浏览器引擎实测过：
+
+| 检查 | 结果 |
+| --- | --- |
+| `GET /static/js/main.js`、`/static/css/app.css` | 都返回 200（证明资源真的进了包） |
+| 打包后的界面冒烟（`tools/ui_smoke.mjs` 对 `Sisp2.exe --serve`） | `ok=true`，10 张截图全部 54–105 KB，磁盘树 9 个节点、设置页 31 行、第 4 步计划表 9 行 |
+| `Sisp2-CLI.exe --list` / `--json --list` / `--bogus` | 退出码 0 / 0 / 4 |
+| `Sisp2-CLI.exe --allow-disks 2` 真实写盘 | 8 GB 虚拟盘六步全绿（EFI 100 MB G: → Windows 3 GB H: → 数据 I: → 应用 test.wim → UEFI 引导 → 校验 4 个分区），日志 11.8 KB |
 
 ## 已知限制
 

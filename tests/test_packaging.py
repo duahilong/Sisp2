@@ -56,6 +56,26 @@ def test_spec_resources_exist() -> None:
     assert (PACKAGING / "version_info.txt").is_file()
 
 
+def test_spec_bundles_static_assets() -> None:
+    """界面拆成 ES 模块之后，css/js 必须一起进包。
+
+    只打 `index.html` 的旧 spec 会让 exe 打开一个没有样式、也不执行任何脚本的空壳，
+    而源码模式一切正常——这种差异只有打了包才看得出来。
+    """
+    text = (PACKAGING / "Sisp2.spec").read_text(encoding="utf-8")
+    assert '"css"' in text, "spec 没有把 ui/css 打进包"
+    assert '"js"' in text, "spec 没有把 ui/js 打进包"
+
+    ui = resources.ui_path().parent
+    assert (ui / "css" / "app.css").is_file()
+    assert (ui / "js" / "main.js").is_file()
+    html = resources.ui_path().read_text(encoding="utf-8")
+    refs = re.findall(r'(?:href|src)="(/static/[^"]+)"', html)
+    assert refs, "index.html 没有引用任何 /static 资源"
+    for ref in refs:
+        assert (ui / ref[len("/static/"):]).is_file(), ref
+
+
 def test_build_script_targets_match_spec() -> None:
     text = (PACKAGING / "build.py").read_text(encoding="utf-8")
     assert "Sisp2.exe" in text

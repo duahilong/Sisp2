@@ -197,7 +197,7 @@ def build_api(config_path: str | None, dry_run: bool, settings_path: str | None 
         settings_provider=store.get,
     )
     wf.start(config_path, dry_run=effective_dry_run)
-    return WebApi(wf, settings=store), wf
+    return WebApi(wf, settings=store, log_dir=log_dir), wf
 
 
 def _check_port_free(host: str, port: int) -> str | None:
