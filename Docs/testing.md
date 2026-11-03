@@ -6,13 +6,20 @@
 
 ```powershell
 python -m pip install -r requirements-web.txt -r requirements-dev.txt
+python -m ruff check .          # 静态检查（规则与豁免见 pyproject.toml）
+python -m compileall -q app tests tools packaging
 python -m pytest tests/ -q
 ```
 
+- `ruff check` 目前是 **All checks passed**；规则集在 `pyproject.toml` 里显式声明，
+  中文注释里的全角标点（`RUF001`/`RUF002`/`RUF003`）与长错误文案（`TRY003`）
+  是有意豁免的；
+- `ruff format --check` 尚未纳入门禁（存量格式差异较多），需要时单独跑，不要与
+  `ruff check` 混为一谈；
 - 测试使用替身扫描器/执行器和注入依赖，不碰真实磁盘；
 - SSE 测试会在后台线程启动真实 uvicorn（随机空闲端口），因此依赖 `uvicorn`；
 - 覆盖重点：任务状态机、重复提交、取消、演练硬上限、盘符规划、设置校验与 BOM、写盘闸门、SSE 帧。
-- 当前基线：189 passed（本机 Python 3.13 / Windows 11）。其中前端相关三组：
+- 当前基线：194 passed（专用 VM Windows 10 22H2 + Python 3.15.2 同口径）。其中前端相关三组：
   `tests/test_ui_assets.py`（资源引用、薄壳、设置页字段对账、CSS 与纯函数约定）、
   `tests/test_partition_boot_image.py`（分区/引导/镜像三个模块的纯逻辑）、
   `tests/test_web_api.py` 新增的静态托管、日志尾部、分区确认、会话模式等用例。
