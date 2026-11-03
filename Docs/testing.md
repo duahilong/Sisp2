@@ -12,7 +12,7 @@ python -m pytest tests/ -q
 - 测试使用替身扫描器/执行器和注入依赖，不碰真实磁盘；
 - SSE 测试会在后台线程启动真实 uvicorn（随机空闲端口），因此依赖 `uvicorn`；
 - 覆盖重点：任务状态机、重复提交、取消、演练硬上限、盘符规划、设置校验与 BOM、CLI 输出、SSE 帧。
-- 当前基线：67 passed（Python 3.14 + starlette 1.10 也通过）。
+- 当前基线：106 passed（本机 Python 3.14；专用 VM 上 Python 3.15.2 同为 106 passed）。
 
 ## 2. 专用 VM：只读与 dry-run
 
@@ -113,7 +113,7 @@ diskpart /s $env:TEMP\detach.txt
 
 ## 已通过的真实 VM 验证（2026-11）
 
-- Windows 10 22H2 + Python 3.15.2：`pytest tests/ -q` → 103 passed；
+- Windows 10 22H2 + Python 3.15.2：`pytest tests/ -q` → 106 passed；
 - CLI/GUI 真实执行在 8GB VHDX 上六步全部成功，`bcdboot` 写入 EFI，`verify` 识别 GPT/分区；
 - 失败路径：错误镜像索引（dism 87）→ image 失败、boot/verify 跳过、退出码 3；缺镜像 → 预检阻断、退出码 2；容量不足 → 计划阶段阻断、退出码 2；受保护系统盘 → 退出码 4；
 - 安全闸门：真实身份通过；错误 UniqueId / 白名单外 / 服务 dry-run / 弱身份全部 `PermissionError`；受保护盘的计划会带阻断项，`confirm` 拒绝执行；

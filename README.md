@@ -40,13 +40,14 @@ GUI 默认监听 `127.0.0.1:8765`；可用 `--host`、`--port` 改变监听参�
 
 业务 JSON 默认路径为 `json/win11.json`；可通过 CLI/GUI 的 `-j` 或 `--config` 指定，或使用 `SISP_CONFIG`。文件描述 `partition_info`、`image_info` 和 `excluded_disk_names`。示例中的镜像路径是占位值，应按实际环境调整。
 
-界面设置与业务配置分离，默认保存于 `%APPDATA%\Sisp\settings.json`（无 `APPDATA` 时为用户目录下 `.config/Sisp/settings.json`）；GUI 可用 `--settings` 指定位置。配置项存在不代表已接入业务流程，已确认的生效范围及待核实项列于[配置说明](Docs/configuration.md)。
+界面设置与业务配置分离，默认保存于 `%APPDATA%\Sisp\settings.json`（无 `APPDATA` 时为用户目录下 `.config/Sisp/settings.json`）；GUI 可用 `--settings` 指定位置。表内字段均已接入运行时，每个字段的真实行为、生效时机以及仍需说明的边界（例如 `language` 只影响页面 `lang`、外部工具类路径只参与预检）列于[配置说明](Docs/configuration.md)。
 
 ## 当前安全行为与限制
 
 - `SispService` 默认 dry-run；CLI 和 GUI 入口策略不同，参见上方说明。
 - CLI 真实执行必须有 `--allow-disks`。GUI 若没有显式白名单，真实模式下当前工作流会将本次选择的硬盘加入服务白名单；这不应被误读为 CLI 同等的显式授权约束。
-- 写盘还要求强身份信息（UniqueId 或 SerialNumber）并在执行前重扫比对，以及真实执行器；受保护硬盘不能操作。
+- 写盘要过五道闸门：非 dry-run、白名单、强身份（UniqueId 或 SerialNumber）、执行前重扫比对、执行瞬间仍可选；受保护硬盘不能操作。
+- 界面默认开启 `typeToConfirm`（真实执行须手输盘号或型号）与 `confirmBeforeStart`（须勾选已核对目标磁盘）；两者可在设置里关闭，关闭后只剩白名单与身份校验。
 - Web 默认 loopback。Host 校验仅校验 Host 名称、不是身份认证；改为非 loopback 监听时没有鉴权，网络可达的写盘接口具有高风险。
 - SSE 重放依赖进程内有限缓冲；队列满会丢弃新事件，缓冲淘汰也会使旧事件无法补发，不能保证完整事件历史。
 - 预检仅在配置提供镜像路径时检查镜像文件是否存在；未提供路径不保证在预检阶段报出，真实执行器仍会拒绝缺少镜像路径。
