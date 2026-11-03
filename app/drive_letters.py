@@ -32,6 +32,6 @@ def build_drive_letter_allocations(
                 f"被占用: {occupied}"
             )
         letters = pool[index:index + LETTERS_PER_DISK]
-        allocations[disk_number] = dict(zip(DRIVE_LETTER_ROLES, letters))
+        allocations[disk_number] = dict(zip(DRIVE_LETTER_ROLES, letters, strict=False))
         index += LETTERS_PER_DISK
     return allocations

@@ -33,7 +33,7 @@ def test_plan_avoids_os_level_drive_letters(monkeypatch) -> None:
 def test_plan_keeps_summary_letters_forbidden(monkeypatch) -> None:
     import app.modules.disk_info.service as disk_info
 
-    monkeypatch.setattr(disk_info, "scan_used_drive_letters", lambda: [])
+    monkeypatch.setattr(disk_info, "scan_used_drive_letters", list)
 
     service = SispService(disk_scanner=lambda: [_summary(letters=("E",))])
     plan = service.build_selection_plan({}, [_summary(letters=("E",))], [1])

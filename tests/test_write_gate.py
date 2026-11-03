@@ -10,8 +10,8 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -58,7 +58,7 @@ def _no_letter_scan(monkeypatch: pytest.MonkeyPatch) -> None:
     """盘符扫描会调用 PowerShell；测试里固定成空列表。"""
     import app.modules.disk_info.service as disk_info
 
-    monkeypatch.setattr(disk_info, "scan_used_drive_letters", lambda: [])
+    monkeypatch.setattr(disk_info, "scan_used_drive_letters", list)
 
 
 # ------------------------------------------------------------------ 可选性
@@ -319,7 +319,7 @@ def _gate_api(
     from app.gui_web.api import WebApi
     from app.modules.settings.service import build_store
 
-    def preflight(config_path=None, **kwargs):  # noqa: ANN001, ANN003
+    def preflight(config_path=None, **kwargs):
         return {
             "results": [{"name": "运行前检查", "passed": True, "message": "ok"}],
             "config_payload": payload if payload is not None else {},

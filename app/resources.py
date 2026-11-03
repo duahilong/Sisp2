@@ -76,9 +76,9 @@ def ensure_default_config() -> Path:
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(template, target)
-            return target
         except OSError:
             # 装在只读目录（例如 Program Files）时用随包模板，至少能起来。
             return template
+        return target
     bundled = bundle_root() / DEFAULT_CONFIG_RELATIVE
     return bundled if bundled.is_file() else target

@@ -121,7 +121,7 @@ def parse_actions(raw: Any) -> list[Action]:
             size_gb = item.get("size_gb")
             if size_gb not in (None, ""):
                 try:
-                    size_mb = int(round(float(size_gb) * 1024))
+                    size_mb = round(float(size_gb) * 1024)
                 except (TypeError, ValueError) as exc:
                     raise PartitionError(f"第 {index} 条操作的大小不是数字") from exc
 
@@ -411,7 +411,7 @@ class PartitionRunner:
             return set()
 
     def _run_diskpart(self, lines: Sequence[str]) -> tuple[int, str]:
-        assert self.diskpart
+        assert self.diskpart  # noqa: S101 - 构造期与调用方都保证过
         handle, script_path = tempfile.mkstemp(
             prefix="sisp-partition-", suffix=".txt", dir=self.temp_dir
         )
@@ -430,10 +430,6 @@ class PartitionRunner:
                 check=False,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0,
             )
-            output = (completed.stdout or b"").decode("mbcs", errors="replace") + (
-                completed.stderr or b""
-            ).decode("mbcs", errors="replace")
-            return completed.returncode, output
         except subprocess.TimeoutExpired as exc:
             raise PartitionError(f"diskpart 超时（{DISKPART_TIMEOUT:.0f} 秒），已终止") from exc
         except OSError as exc:
@@ -443,6 +439,10 @@ class PartitionRunner:
                 Path(script_path).unlink()
             except OSError:
                 pass
+        output = (completed.stdout or b"").decode("mbcs", errors="replace") + (
+            completed.stderr or b""
+        ).decode("mbcs", errors="replace")
+        return completed.returncode, output
 
     def _open_log(self, disk_number: int) -> _RunLog:
         return _RunLog(self.log_dir, f"partition-disk{disk_number}")

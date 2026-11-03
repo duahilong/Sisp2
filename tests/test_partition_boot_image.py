@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -112,7 +111,7 @@ def test_partition_runner_dry_run_never_shells_out(monkeypatch: pytest.MonkeyPat
     runner = partition.PartitionRunner(diskpart=None, which=lambda _name: None)
     monkeypatch.setattr(runner, "_scan", lambda number: _disk().__dict__ | {"disk_number": number})
 
-    def explode(*args, **kwargs):  # noqa: ANN002, ANN003
+    def explode(*args, **kwargs):
         raise AssertionError("演练模式不该调用 diskpart")
 
     monkeypatch.setattr(runner, "_run_diskpart", explode)
@@ -281,7 +280,7 @@ def test_iso_inspection_always_unmounts(tmp_path: Path, monkeypatch: pytest.Monk
         dism="dism.exe",
         run=lambda command, timeout: (0, "Index : 1\nName : Win11\n"),
         mount=lambda path: {"drive": str(mount_root)},
-        unmount=lambda path: unmounted.append(path),
+        unmount=unmounted.append,
     )
     result = probe.inspect(str(target))
     assert result["mounted"] is True
@@ -296,7 +295,7 @@ def test_iso_inspection_unmounts_even_on_error(tmp_path: Path) -> None:
     probe = image.ImageProbe(
         dism="dism.exe",
         mount=lambda path: {},  # 没有拿到盘符
-        unmount=lambda path: unmounted.append(path),
+        unmount=unmounted.append,
     )
     with pytest.raises(image.ImageError, match="没有拿到盘符"):
         probe.inspect(str(target))

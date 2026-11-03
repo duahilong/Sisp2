@@ -274,8 +274,8 @@ def scan_used_drive_letters() -> list[str]:
     if not stdout:
         return []
     letters: list[str] = []
-    for line in stdout.splitlines():
-        line = line.strip()
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
         if line and line not in letters:
             letters.append(line.upper())
     return letters

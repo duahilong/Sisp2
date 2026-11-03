@@ -16,9 +16,10 @@ import json
 import os
 import shutil
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 SETTINGS_VERSION = 1
 

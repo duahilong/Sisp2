@@ -594,7 +594,8 @@ class WebApi:
             if sys.platform.startswith("win"):
                 import os
 
-                os.startfile(str(path.parent))  # type: ignore[attr-defined]
+                # 打开资源管理器是外壳动作，不经 shell 才是正确做法
+                os.startfile(str(path.parent))  # type: ignore[attr-defined]  # noqa: S606
             return ok({"path": str(path)})
         except Exception as exc:  # noqa: BLE001
             return err("E_SETTINGS", str(exc))

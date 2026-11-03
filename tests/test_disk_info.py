@@ -106,7 +106,7 @@ def test_powershell_script_gets_utf8_prologue(monkeypatch) -> None:
 
     def fake_run(argv, **kwargs):
         captured["argv"] = argv
-        return subprocess.CompletedProcess(argv, 0, "ok".encode("utf-8"), b"")
+        return subprocess.CompletedProcess(argv, 0, b"ok", b"")
 
     monkeypatch.setattr(common.subprocess, "run", fake_run)
     done = common.run_powershell("Write-Output hi")

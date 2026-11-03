@@ -173,7 +173,7 @@ def test_default_settings_path_uses_appdata(monkeypatch: pytest.MonkeyPatch, tmp
 
 def test_to_dict_reports_sections(store: SettingsStore) -> None:
     payload = store.to_dict()
-    assert [section["key"] for section in payload["sections"]][0] == "general"
+    assert next(section["key"] for section in payload["sections"]) == "general"
     assert "settings" in payload and "pathKeys" in payload
 
 

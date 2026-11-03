@@ -90,7 +90,7 @@ def test_css_is_plain_css() -> None:
 
 
 def test_no_legacy_fallback() -> None:
-    for path in list(_js_files()) + [UI / "index.html"]:
+    for path in [*list(_js_files()), UI / "index.html"]:
         text = path.read_text(encoding="utf-8")
         assert "legacy" not in text.lower(), path.name
 
@@ -137,5 +137,6 @@ def test_frontend_static_check() -> None:
         text=True,
         encoding="utf-8",
         errors="replace",
+        check=False,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr

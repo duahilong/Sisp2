@@ -6,8 +6,8 @@
 
 from app.modules.settings.service import (
     DEFAULTS,
-    SETTINGS_VERSION,
     SECTIONS,
+    SETTINGS_VERSION,
     ProbeResult,
     SettingsError,
     SettingsStore,
@@ -18,8 +18,8 @@ from app.modules.settings.service import (
 
 __all__ = [
     "DEFAULTS",
-    "SETTINGS_VERSION",
     "SECTIONS",
+    "SETTINGS_VERSION",
     "ProbeResult",
     "SettingsError",
     "SettingsStore",

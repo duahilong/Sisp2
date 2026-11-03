@@ -65,7 +65,7 @@ def test_frozen_reads_assets_from_bundle(
 def test_frozen_prefers_config_beside_exe(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    exe, bundle = _fake_frozen(monkeypatch, tmp_path)
+    exe, _bundle = _fake_frozen(monkeypatch, tmp_path)
     local = exe.parent / "json" / "win11.json"
     local.parent.mkdir(parents=True)
     local.write_text('{"partition_info": {"efi_size_mb": 100}}', encoding="utf-8")
@@ -87,7 +87,7 @@ def test_ensure_default_config_falls_back_when_copy_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """装在只读目录时不能因为复制失败就起不来。"""
-    exe, bundle = _fake_frozen(monkeypatch, tmp_path)
+    _exe, bundle = _fake_frozen(monkeypatch, tmp_path)
 
     def boom(*args: object, **kwargs: object) -> None:
         raise OSError("拒绝访问")

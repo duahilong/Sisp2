@@ -77,7 +77,7 @@ def create_app(
     if host_check:
 
         @app.middleware("http")
-        async def check_host_header(request: Request, call_next):  # noqa: ANN001, ANN202
+        async def check_host_header(request: Request, call_next):
             host = request.headers.get("host", "")
             # 去掉端口；IPv6 形如 [::1]:8765。
             hostname = host.rsplit(":", 1)[0] if not host.startswith("[") else host.split("]", 1)[0] + "]"
@@ -241,7 +241,7 @@ def create_app(
         def jobs_snapshot() -> list[dict[str, Any]]:
             return [job.to_dict() for job in wf.jobs()]
 
-        async def stream():  # noqa: ANN202
+        async def stream():
             try:
                 # 首帧：快照 + 断线期间积压的事件（复用 poll_events 的游标缓冲）。
                 backlog = api.poll_events(cursor, _SSE_BACKLOG_LIMIT)["data"]

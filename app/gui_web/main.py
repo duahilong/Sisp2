@@ -55,7 +55,8 @@ def _ensure_std_streams() -> None:
         if getattr(sys, name, None) is not None:
             continue
         try:
-            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
+            # 进程退出才需要关闭：这里替换的是 sys.stdout/stderr 本身
+            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))  # noqa: SIM115
         except OSError:  # 极端情况下连空设备都打不开
             setattr(sys, name, io.StringIO())
 
@@ -167,8 +168,8 @@ def relaunch_as_admin(argv: list[str] | None = None) -> bool:
 def build_api(config_path: str | None, dry_run: bool, settings_path: str | None = None):
     """构造 WorkflowController + WebApi，并立刻建立会话。"""
     from app.application.workflow import WorkflowController
-    from app.modules.settings.service import build_store
     from app.gui_web.api import WebApi
+    from app.modules.settings.service import build_store
 
     store = build_store(settings_path)
     settings = store.get()
@@ -352,12 +353,12 @@ def main(argv: list[str] | None = None) -> int:
                     "y": int(window.y),
                 },
             )
-        except Exception:  # noqa: BLE001 - 记不住窗口位置不能影响退出
+        except Exception:  # noqa: BLE001, S110 - 记不住窗口位置不能影响退出
             pass
 
     try:
         window.events.closing += _remember_geometry
-    except Exception:  # noqa: BLE001 - 旧版 pywebview 没有 events 挂钩
+    except Exception:  # noqa: BLE001, S110 - 旧版 pywebview 没有 events 挂钩
         pass
 
     try:

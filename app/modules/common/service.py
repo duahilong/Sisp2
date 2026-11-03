@@ -141,7 +141,7 @@ def run_powershell(script: str, timeout: float | None = POWERSHELL_SCAN_TIMEOUT)
     ]
 
     try:
-        completed = subprocess.run(
+        completed = subprocess.run(  # noqa: S603 - argv 由本模块按固定模板拼装
             argv,
             capture_output=True,
             timeout=timeout,

@@ -92,7 +92,7 @@ def scan() -> dict[str, Any]:
 
     try:
         raw = run_powershell_json(SCAN_SCRIPT)
-    except Exception as exc:  # noqa: BLE001 - 统一翻成 BootError，界面只认一种错误
+    except Exception as exc:
         raise BootError(f"扫描引导信息失败：{exc}") from exc
 
     payload = raw[0] if isinstance(raw, list) and raw else raw
@@ -485,7 +485,7 @@ class BootRepairer:
     def _run_diskpart(self, lines: Sequence[str]) -> tuple[int, str]:
         if not self.diskpart:
             raise BootError("找不到 diskpart.exe")
-        handle, script_path = tempfile.mkstemp(
+        _handle, script_path = tempfile.mkstemp(
             prefix="sisp-boot-", suffix=".txt", dir=self.temp_dir
         )
         try:

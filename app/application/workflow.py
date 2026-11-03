@@ -668,7 +668,7 @@ class WorkflowController:
 
         try:
             report = self._run_preflight(config_path)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 预检失败也要变成会话阻断项而不是崩栈
             report = {
                 "all_passed": False,
                 "results": [
@@ -705,7 +705,7 @@ class WorkflowController:
         excluded_names = self._merged_excluded_names(payload)
         try:
             disks = tuple(self._service.scan_protected_disks(excluded_names))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 扫描失败记成阻断项，界面还能打开
             blockers.append(f"硬盘扫描失败：{exc}")
 
         if not disks:

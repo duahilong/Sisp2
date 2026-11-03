@@ -1,0 +1,43 @@
+# 静态检查配置（ruff）。项目本身没有构建系统，这个文件只服务于 lint。
+#
+# 规则集的选择理由：
+# - E/F/W：语法与未使用代码，任何项目都该开；
+# - I：导入排序（统一风格，避免 review 时反复争）；
+# - UP：只写 Python 3.10+ 认可的写法（README 声明的最低版本）；
+# - B / BLE / S / SIM / PIE / RUF / PLW / TRY：真实缺陷面。
+#   其中 S（bandit 规则）与 BLE（盲 except）是代码里已有 `# noqa: S603/BLE001`
+#   依赖的规则集，必须显式启用，否则那些 noqa 会变成“未使用指令”。
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["app", "tests", "tools", "packaging"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "BLE", "S", "SIM", "PIE", "RUF", "PLW", "TRY"]
+ignore = [
+    # 行宽由 line-length 统一约束（中文按 2 列计，硬换行反而更乱）
+    "E501",
+    # 全角标点在中文注释/文档/提示语里是正常写法，不是“混淆字符”
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # 本项目的错误文案需要带上下文，统一拼成一句话；异常类型足够表达种类
+    "TRY003",
+    # 脚本/入口里的延迟 import（避免拉起整条依赖链）是有意为之
+    "E402",
+    # try/except/pass 在清理逻辑里比 contextlib.suppress 更直观
+    "SIM105",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试大量使用 assert、临时文件与替身，bandit 规则不适用
+"tests/*" = ["S101", "S108", "S603", "S607", "S608", "PLR2004"]
+# 打包脚本与工具脚本要调外部命令
+"tools/*" = ["S603", "S607"]
+"packaging/*" = ["S603", "S607", "S108"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = []
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]

@@ -308,7 +308,7 @@ def test_sse_streams_snapshot_and_events(tmp_path: Path) -> None:
                             json={"selection": [1], "dry_run": True},
                         )
                         producer.post(base + "/api/submit")
-                except Exception:  # noqa: BLE001 - 测试里失败由帧断言兜底
+                except Exception:  # noqa: BLE001, S110 - 测试里失败由帧断言兜底
                     pass
 
             producer = threading.Thread(target=produce_event, daemon=True)
@@ -444,7 +444,7 @@ def test_partition_execute_rejects_bad_disk_number(tmp_path: Path) -> None:
 
 def test_delete_confirmed_accepts_several_spellings(tmp_path: Path) -> None:
     store = build_store(tmp_path / "settings.json")
-    client, wf = _build_client(tmp_path)
+    _client, wf = _build_client(tmp_path)
     api = WebApi(wf, settings=store)
     identity = {"model": "Samsung SSD 990"}
     for text in ("1", "disk1", "disk 1", "硬盘1", "硬盘 1", "samsung ssd 990", " SAMSUNG  SSD 990 "):
@@ -472,7 +472,7 @@ def test_resolve_identity_prefers_caller_then_scans(tmp_path: Path, monkeypatch)
     ``identity or {}``，于是**真实分区操作和修复引导全部被拒**——在打包好的
     exe 上实测才会发现（演练模式不拦，所以本地测不出来）。
     """
-    client, wf = _build_client(tmp_path)  # noqa: F841 - 只是为了拿到 wf
+    _client, wf = _build_client(tmp_path)
     api = WebApi(wf, settings=build_store(tmp_path / "settings.json"))
 
     # 调用方显式给了身份：原样返回，不再扫盘
@@ -505,7 +505,7 @@ def test_resolve_identity_prefers_caller_then_scans(tmp_path: Path, monkeypatch)
 
 def test_partition_execute_passes_resolved_identity_to_gate(tmp_path: Path, monkeypatch) -> None:
     """真实分区执行要把补齐后的身份交给写盘闸门，而不是空字典。"""
-    client, wf = _build_client(tmp_path)  # noqa: F841
+    _client, wf = _build_client(tmp_path)
     api = WebApi(wf, settings=build_store(tmp_path / "settings.json"))
     seen: dict[str, Any] = {}
 
@@ -518,7 +518,7 @@ def test_partition_execute_passes_resolved_identity_to_gate(tmp_path: Path, monk
         "app.gui_web.api._scan_summary",
         lambda number: {"disk_number": number, "unique_id": "eui-1", "serial_number": "SN"},
     )
-    api._partition_runner = lambda: _Runner()  # type: ignore[method-assign]
+    api._partition_runner = _Runner  # type: ignore[method-assign]
 
     body = api.partition_execute(1, [{"kind": "format", "partition_number": 2}], confirm_text="1")
     assert body["ok"] is True, body
@@ -530,7 +530,7 @@ def test_partition_execute_passes_resolved_identity_to_gate(tmp_path: Path, monk
 def test_export_settings_writes_file_and_roundtrips(tmp_path: Path) -> None:
     store = build_store(tmp_path / "settings.json")
     store.update({"sysDefaultGb": 200, "excludedDiskNames": ["A disk"]})
-    client, wf = _build_client(tmp_path)
+    _client, wf = _build_client(tmp_path)
     api = WebApi(wf, settings=store)
 
     target = tmp_path / "out" / "sisp2-settings.json"
@@ -544,7 +544,7 @@ def test_export_settings_writes_file_and_roundtrips(tmp_path: Path) -> None:
 
 def test_export_without_path_uses_settings_folder(tmp_path: Path) -> None:
     store = build_store(tmp_path / "settings.json")
-    client, wf = _build_client(tmp_path)
+    _client, wf = _build_client(tmp_path)
     api = WebApi(wf, settings=store)
     data = api.export_settings(None)
     assert data["ok"] is True
@@ -555,7 +555,7 @@ def test_export_without_path_uses_settings_folder(tmp_path: Path) -> None:
 
 def test_import_settings_applies_and_validates(tmp_path: Path) -> None:
     store = build_store(tmp_path / "settings.json")
-    client, wf = _build_client(tmp_path)
+    _client, wf = _build_client(tmp_path)
     api = WebApi(wf, settings=store)
 
     good = tmp_path / "good.json"
@@ -579,7 +579,7 @@ def test_import_settings_applies_and_validates(tmp_path: Path) -> None:
 
 def test_import_settings_rejects_missing_or_broken_file(tmp_path: Path) -> None:
     store = build_store(tmp_path / "settings.json")
-    client, wf = _build_client(tmp_path)
+    _client, wf = _build_client(tmp_path)
     api = WebApi(wf, settings=store)
 
     assert api.import_settings(str(tmp_path / "nope.json"))["ok"] is False
@@ -592,7 +592,7 @@ def test_import_settings_rejects_missing_or_broken_file(tmp_path: Path) -> None:
 
 def test_import_settings_accepts_inline_content(tmp_path: Path) -> None:
     store = build_store(tmp_path / "settings.json")
-    client, wf = _build_client(tmp_path)
+    _client, wf = _build_client(tmp_path)
     api = WebApi(wf, settings=store)
     body = api.import_settings(None, json.dumps({"efiDefaultMb": 260}))
     assert body["ok"] is True, body

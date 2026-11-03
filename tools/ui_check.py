@@ -21,8 +21,8 @@ import json
 import re
 import shutil
 import subprocess
-import tempfile
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -80,13 +80,14 @@ EXPECTED = {
 
 
 def _run(cmd: list[str], cwd: Path) -> tuple[int, str]:
-    proc = subprocess.run(  # noqa: S603 - 固定的 node 可执行文件 + 本仓库内路径
+    proc = subprocess.run(
         cmd,
         cwd=str(cwd),
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
+        check=False,
     )
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 

@@ -232,7 +232,7 @@ def find_powershell() -> str | None:
 
 def _system_drive_root() -> str:
     if os.name == "nt":
-        drive = (os.environ.get("SystemDrive") or "C:").rstrip("\\/") or "C:"
+        drive = (os.environ.get("SYSTEMDRIVE") or "C:").rstrip("\\/") or "C:"
         return drive + "\\"
     return "/"
 
@@ -253,10 +253,7 @@ def _check_free_space(
     root = _system_drive_root()
     try:
         usage = (disk_usage or shutil.disk_usage)(root)
-        if isinstance(usage, tuple):
-            free = int(usage[2])
-        else:
-            free = int(getattr(usage, "free", 0))
+        free = int(usage[2]) if isinstance(usage, tuple) else int(getattr(usage, "free", 0))
     except Exception as exc:  # noqa: BLE001 - 查不到空间不应该阻断整个流程
         return True, f"无法读取 {root} 剩余空间，已跳过: {exc}"
     if free < MIN_FREE_BYTES:

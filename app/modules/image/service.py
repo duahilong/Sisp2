@@ -179,7 +179,7 @@ class ImageProbe:
         if not self.dism:
             raise ImageError("找不到 dism.exe，无法读取镜像索引")
         code, output = self._run(
-            [self.dism, "/English", f"/Get-WimInfo", f"/WimFile:{path}"], DISM_TIMEOUT
+            [self.dism, "/English", "/Get-WimInfo", f"/WimFile:{path}"], DISM_TIMEOUT
         )
         if code != 0:
             raise ImageError(f"读取镜像索引失败（dism 退出码 {code}）：{output.strip()[:400]}")
@@ -248,7 +248,7 @@ class ImageProbe:
         script = f"Dismount-DiskImage -ImagePath '{path}'"
         try:
             self._run([self.powershell, "-NoProfile", "-NonInteractive", "-Command", script], 120.0)
-        except Exception:  # noqa: BLE001 - 卸载失败不能覆盖原本的错误
+        except Exception:  # noqa: BLE001, S110 - 卸载失败不能覆盖原本的错误
             pass
 
 

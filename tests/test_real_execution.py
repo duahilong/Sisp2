@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 from app.application.contracts import DiskInfo
-from app.application.jobs import ExecutionPlan, JobManager, JobSpec, JobStatus
+from app.application.jobs import ExecutionPlan, Job, JobManager, JobSpec, JobStatus
 from app.application.real_runner import (
     WindowsDiskRunner,
     _CommandLog,
@@ -115,7 +115,7 @@ def test_default_executor_delegates_to_session_service():
 
 
 def test_injected_service_keeps_its_dry_run_but_gets_allowlist():
-    service = SispService(disk_scanner=lambda: [], dry_run=True)
+    service = SispService(disk_scanner=list, dry_run=True)
     controller = WorkflowController(service=service, dry_run=False, allowed_disk_numbers=[3])
 
     controller._sync_service_policy(dry_run=False)
@@ -742,7 +742,7 @@ def test_step_events_are_broadcast_for_every_stage():
     """每个阶段都要广播 ``job.step``——进度页靠它点亮阶段条。"""
     import queue
 
-    seen: "queue.Queue" = queue.Queue()
+    seen: queue.Queue = queue.Queue()
     manager = JobManager()
 
     def executor(spec: Any, cancel_event: threading.Event, on_step=None) -> WorkerResult:

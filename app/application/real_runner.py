@@ -75,7 +75,7 @@ class _StepSink(list):
             return
         try:
             self._reporter(step.key, step.status, step.message)
-        except Exception:  # noqa: BLE001 - 进度回调失败不能影响写盘
+        except Exception:
             _LOGGER.warning("进度回调失败", exc_info=True)
 
     def extend(self, items: Any) -> None:  # type: ignore[override]
@@ -298,7 +298,7 @@ class WindowsDiskRunner:
         ]
         if missing:
             failure = f"缺少系统工具：{'、'.join(missing)}（真实写盘需要管理员环境里的这些命令）"
-            for key in _STEP_ORDER + ("image", "boot"):
+            for key in (*_STEP_ORDER, "image", "boot"):
                 steps.append(StepResult(key=key, title=STEP_TITLES[key], status=STEP_SKIPPED, message="前置条件不满足"))
         else:
             # tracker 用来保证：只要 diskpart 开始动盘，就尝试释放 EFI 盘符，
@@ -367,7 +367,7 @@ class WindowsDiskRunner:
             return
         try:
             on_step(key, status, message)
-        except Exception:  # noqa: BLE001
+        except Exception:
             _LOGGER.warning("进度回调失败", exc_info=True)
 
     # ------------------------------------------------------------------ 六步
@@ -624,7 +624,7 @@ class WindowsDiskRunner:
         options: Mapping[str, Any] | None = None,
         env: Mapping[str, str] | None = None,
     ) -> tuple[int, str, float]:
-        assert self.dism  # 前置检查已保证
+        assert self.dism  # noqa: S101 - 构造期已确保存在，这里只拦编程错误
         options = dict(options or {})
         command = [
             self.dism,
@@ -654,7 +654,7 @@ class WindowsDiskRunner:
         options: Mapping[str, Any] | None = None,
         env: Mapping[str, str] | None = None,
     ) -> tuple[int, str, float]:
-        assert self.bcdboot  # 前置检查已保证
+        assert self.bcdboot  # noqa: S101 - 构造期已确保存在，这里只拦编程错误
         options = dict(options or {})
         windows = f"{letters['windows']}:\\Windows"
         efi = f"{letters['efi']}:"
@@ -790,7 +790,7 @@ class WindowsDiskRunner:
         if found:
             return found
         if os.name == "nt":
-            system32 = Path(os.environ.get("SystemRoot") or r"C:\Windows") / "System32"
+            system32 = Path(os.environ.get("SYSTEMROOT") or r"C:\Windows") / "System32"
             candidate = system32 / name
             if candidate.is_file():
                 return str(candidate)

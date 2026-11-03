@@ -43,8 +43,8 @@ from app.application.contracts import (
     SelectionPlan,
     format_size,
 )
-from app.models import STEP_SKIPPED, StepResult, WorkerResult
 from app.application.real_runner import data_fs_token
+from app.models import STEP_SKIPPED, StepResult, WorkerResult
 from app.orchestrator import build_worker_disk_identity, identity_matches, is_strong_identity
 from app.preflight import load_config, resolve_config_path
 
@@ -132,7 +132,7 @@ def _as_int(value: Any) -> int | None:
 def _system_drive_letter() -> str | None:
     """系统盘符；``app.drive_letters`` 不可用时也能算出来。"""
     if os.name == "nt":
-        drive = (os.environ.get("SystemDrive") or "C:").rstrip("\\/") or "C:"
+        drive = (os.environ.get("SYSTEMDRIVE") or "C:").rstrip("\\/") or "C:"
         return drive[0].upper()
     return Path("/").anchor[:1].upper() or None
 
@@ -244,7 +244,7 @@ class SispService:
         if isinstance(payload, Mapping):
             payload = [payload]
         if not isinstance(payload, list):
-            raise RuntimeError("硬盘扫描输出格式异常")
+            raise TypeError("硬盘扫描输出格式异常")
         return [_normalize_summary(item) for item in payload if isinstance(item, Mapping)]
 
     def scan_protected_disks(
@@ -424,7 +424,7 @@ class SispService:
             if index + LETTERS_PER_DISK > len(pool):
                 raise ValueError(f"可用盘符不足，无法为硬盘 {number} 分配 {LETTERS_PER_DISK} 个盘符")
             letters = pool[index:index + LETTERS_PER_DISK]
-            allocations[number] = dict(zip(DRIVE_LETTER_ROLES, letters))
+            allocations[number] = dict(zip(DRIVE_LETTER_ROLES, letters, strict=False))
             index += LETTERS_PER_DISK
         return allocations
 

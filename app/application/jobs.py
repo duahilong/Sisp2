@@ -300,7 +300,7 @@ class JobManager:
         for callback in subscribers:
             try:
                 callback(event)
-            except Exception:  # noqa: BLE001 - 界面回调出错不能影响执行
+            except Exception:
                 _LOGGER.exception("任务事件回调失败: %s", event_type)
 
     def _persist_event(self, event: JobEvent) -> None:
@@ -427,7 +427,7 @@ class JobManager:
 
             try:
                 result = self._execute(job)
-            except Exception as exc:  # noqa: BLE001 - 执行器异常一律落到 failed
+            except Exception as exc:
                 _LOGGER.exception("任务执行失败: %s", job.id)
                 self._finish(job, JobStatus.FAILED, error=f"{type(exc).__name__}: {exc}")
                 return
@@ -466,7 +466,7 @@ class JobManager:
                     current = None
                     if key not in completed:
                         completed.append(key)
-                percent = int(round(len(completed) * 100 / total)) if total else 0
+                percent = round(len(completed) * 100 / total) if total else 0
                 job.progress = {
                     "total": total,
                     "completed": completed,
