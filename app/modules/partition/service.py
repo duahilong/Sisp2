@@ -359,17 +359,21 @@ class PartitionRunner:
         log.write("diskpart 脚本：\n" + "\n".join(script))
         try:
             code, output = self._run_diskpart(script)
+            result["exit"] = code
+            result["output"] = _tail(output)
+            if code != 0:
+                log.write(f"diskpart 失败（退出码 {code}）：{_tail(output)}")
+            else:
+                log.write("diskpart 输出：\n" + _tail(output, 2000))
+                log.write("diskpart 完成")
         finally:
+            # _RunLog 是“攒行 + 一次落盘”，所以必须在写完最后一行的同一个
+            # finally 里 flush，否则后写的输出根本不会落到文件里。
             log.flush()
 
-        result["exit"] = code
-        result["output"] = _tail(output)
         result["log_path"] = _mask(log.path)
         if code != 0:
-            log.write(f"diskpart 失败（退出码 {code}）：{_tail(output)}")
             raise PartitionError(f"diskpart 失败（退出码 {code}）：{_tail(output, 800)}")
-        log.write("diskpart 输出：\n" + _tail(output, 2000))
-        log.write("diskpart 完成")
         result["message"] = "分区操作已完成"
         return result
 

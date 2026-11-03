@@ -343,3 +343,44 @@ def test_partition_runner_removes_script_and_logs_output(tmp_path, monkeypatch) 
     assert "DiskPart ok" in output
     assert seen["script"][0].exists() is False
     assert list(tmp_path.glob("sisp-partition-*.txt")) == []
+
+
+def test_partition_run_logs_diskpart_output(tmp_path, monkeypatch) -> None:
+    """执行日志必须包含 diskpart 的输出，而不只是脚本。
+
+    ``_RunLog`` 是“攒行 + 一次落盘”，所以输出写完必须再 flush 一次；否则排障时
+    打开日志只能看到脚本，看不到 diskpart 到底说了什么。
+    """
+    import subprocess
+
+    from app.modules.partition import service as partition_service
+
+    monkeypatch.setattr(
+        partition_service.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, b"DiskPart ok", b""),
+    )
+    runner = partition_service.PartitionRunner(
+        diskpart="diskpart.exe",
+        temp_dir=str(tmp_path),
+        log_dir=str(tmp_path / "logs"),
+        dry_run=False,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_resolve_disk",
+        lambda number, identity, dry_run: {
+            "disk_number": number,
+            "size_bytes": 100 * 1024**3,
+            "partitions": [],
+        },
+    )
+
+    result = runner.run(1, [{"kind": "create", "size_gb": 1, "label": "T"}])
+
+    assert result["exit"] == 0
+    log_file = Path(result["log_path"])
+    text = log_file.read_text(encoding="utf-8")
+    assert "diskpart 脚本" in text
+    assert "DiskPart ok" in text
+    assert "diskpart 完成" in text
