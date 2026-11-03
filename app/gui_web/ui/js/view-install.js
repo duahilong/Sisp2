@@ -823,8 +823,11 @@ async function showJobLogs() {
   if (!jobId) return;
   try {
     const data = await api.jobLog(jobId, 300);
-    const body = `<div class="codebox dark-code" style="max-height:340px">${esc((data.lines || []).join('\n'))}</div>
-      <div class="hint" style="margin-top:6px">${esc(data.path || data.message || '')}</div>`;
+    const lines = data.lines || [];
+    // 没配 logDir 时后端不会有执行器日志，这里给一句人话，别弹一个空黑框。
+    const text = lines.length ? lines.join('\n') : (data.message || '这个任务没有输出日志');
+    const body = `<div class="codebox dark-code" style="max-height:340px">${esc(text)}</div>
+      <div class="hint" style="margin-top:6px">${esc(data.path || '')}</div>`;
     openModal({ title: `任务日志 · ${jobId.slice(0, 8)}`, body, width: 720 });
   } catch (exc) {
     toast(`读日志失败：${exc.message || exc}`, 'err');
