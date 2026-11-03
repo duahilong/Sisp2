@@ -6,6 +6,10 @@
 
 from __future__ import annotations
 
+import sys
+
+import pytest
+
 from app.modules.disk_info.service import summarize_disk
 
 _MB = 1024 * 1024
@@ -89,3 +93,42 @@ def test_summarize_disk_without_volume_still_keeps_size_and_type() -> None:
     assert part["free_bytes"] is None
     assert summary["drive_letters"] == []
     assert summary["model"] == "RAW Disk"
+
+
+# ------------------------------------------------- PowerShell 输出编码（卷标）
+def test_powershell_script_gets_utf8_prologue(monkeypatch) -> None:
+    """脚本前面必须挂 UTF-8 输出引子，否则卷标会“解出来了但是乱码”。"""
+    import subprocess
+
+    from app.modules.common import service as common
+
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, "ok".encode("utf-8"), b"")
+
+    monkeypatch.setattr(common.subprocess, "run", fake_run)
+    done = common.run_powershell("Write-Output hi")
+
+    argv = captured["argv"]
+    assert isinstance(argv, list)
+    script = argv[-1]
+    assert script.startswith(common._UTF8_OUTPUT_PROLOGUE)
+    assert "Write-Output hi" in script
+    assert done.stdout == "ok"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="需要 Windows PowerShell")
+def test_powershell_round_trips_chinese_labels() -> None:
+    """「系统」的 cp936 字节恰好是合法 UTF-8（CF B5 CD B3），曾被解成 ϵͳ。
+
+    这是真实踩到的坑：分区卷标「系统」在界面里显示成「ϵͳ」。修法是在脚本前置
+    UTF-8 输出编码，而不是事后猜编码。
+    """
+    from app.modules.common.service import run_powershell
+
+    for label in ("系统", "数据", "备份盘", "WIN10"):
+        done = run_powershell(f'[PSCustomObject]@{{ label = "{label}" }} | ConvertTo-Json')
+        assert done.returncode == 0
+        assert label in done.stdout, (label, done.stdout)

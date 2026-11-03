@@ -100,6 +100,19 @@ def _decode_console_output(data: bytes | str | None) -> str:
 # ---------------------------------------------------------------- PowerShell
 
 
+# 先把 PowerShell 的输出编码钉成 UTF-8，再交给 _decode_console_output 解。
+#
+# 默认情况下（Windows PowerShell 5.1、输出被重定向）它按控制台代码页写字节，
+# 简体中文机器上是 cp936。个别汉字的 cp936 字节恰好也是合法 UTF-8，例如
+# 「系统」= CF B5 CD B3 —— UTF-8 解码器会“成功”解出 ϵͳ，于是卷标变成乱码，
+# 而且不会抛异常。所以不能靠事后猜编码，必须在源头写 UTF-8。
+# 没有控制台（--windowed / 服务进程）时设置会抛错，吞掉即可。
+_UTF8_OUTPUT_PROLOGUE = (
+    "try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }; "
+    "$OutputEncoding = [Text.Encoding]::UTF8; "
+)
+
+
 def run_powershell(script: str, timeout: float | None = POWERSHELL_SCAN_TIMEOUT) -> subprocess.CompletedProcess[str]:
     """执行一段 PowerShell 脚本，返回 ``CompletedProcess[str]``。
 
@@ -108,9 +121,10 @@ def run_powershell(script: str, timeout: float | None = POWERSHELL_SCAN_TIMEOUT)
         timeout：超时秒数，``None`` 表示不限制；默认 ``POWERSHELL_SCAN_TIMEOUT``。
 
     返回：
-        ``subprocess.CompletedProcess``，``stdout`` / ``stderr`` 已经是 ``str``
-        （编码按 UTF-8 -> 本机代码页 的顺序自动识别），调用方直接判
-        ``returncode != 0`` 即可。
+        ``subprocess.CompletedProcess``，``stdout`` / ``stderr`` 已经是 ``str``。
+        脚本前面会先挂一段把输出编码设成 UTF-8 的引子（见
+        ``_UTF8_OUTPUT_PROLOGUE``），所以正常情况按 UTF-8 解就对；返回值的解码
+        仍保留“UTF-8 → 本机代码页”的兜底，调用方直接判 ``returncode != 0`` 即可。
 
     注意：超时和“找不到 powershell.exe”同样以返回值表达（退出码 124 / 127，
     中文说明放在 ``stderr``），这样调用方抛出的错误信息里既有退出码也有原因。
@@ -118,7 +132,13 @@ def run_powershell(script: str, timeout: float | None = POWERSHELL_SCAN_TIMEOUT)
     if not isinstance(script, str) or not script.strip():
         raise ValueError("PowerShell 脚本不能为空")
 
-    argv = [_POWERSHELL_EXECUTABLE, "-NoProfile", "-NonInteractive", "-Command", script]
+    argv = [
+        _POWERSHELL_EXECUTABLE,
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        _UTF8_OUTPUT_PROLOGUE + script,
+    ]
 
     try:
         completed = subprocess.run(
