@@ -318,6 +318,9 @@ def create_controller(
     controller_class = workflow_module.WorkflowController
 
     settings = dict(settings or {})
+    # 界面设置里的日志目录是 ``--log-dir`` 的兜底：用户设过的目录就要用。
+    if not log_dir:
+        log_dir = str(settings.get("logDir") or "").strip() or None
     kwargs: dict[str, Any] = {"dry_run": bool(dry_run)}
     for name, value in (
         ("test_mode", bool(test_mode)),
@@ -552,6 +555,7 @@ def _run(
     raw_argv: Sequence[str],
     reporter: Reporter,
     report: dict[str, Any],
+    settings: Mapping[str, Any] | None = None,
 ) -> int:
     workflow_module = _workflow_module()
 
@@ -574,7 +578,7 @@ def _run(
         test_mode=bool(args.test_mode),
         allow_disks=args.allow_disks,
         log_dir=args.log_dir,
-        settings=load_settings(args.settings),
+        settings=settings if settings is not None else load_settings(args.settings),
     )
     try:
         session = controller.start(args.config, dry_run=bool(args.dry_run))
@@ -778,6 +782,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(raw_argv)
 
     reporter = Reporter(json_mode=bool(args.json))
+    settings = load_settings(args.settings)
+    # 报告里的 log_dir 要与实际生效的一致（--log-dir 优先，其次设置里的 logDir）。
+    effective_log_dir = str(args.log_dir or "").strip() or (
+        str(settings.get("logDir") or "").strip() or None
+    )
     report: dict[str, Any] = {
         "ok": False,
         "mode": "list" if args.list_only else ("dry-run" if args.dry_run else "execute"),
@@ -785,7 +794,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "dry_run": bool(args.dry_run),
         "test_mode": bool(args.test_mode),
         "allow_disks": list(args.allow_disks) if args.allow_disks else None,
-        "log_dir": args.log_dir,
+        "log_dir": effective_log_dir,
         "targets": [],
         "disks": [],
         "checks": [],
@@ -797,7 +806,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
 
     try:
-        code = _run(args, raw_argv, reporter, report)
+        code = _run(args, raw_argv, reporter, report, settings)
     except KeyboardInterrupt:
         reporter.error("已中断（Ctrl+C），未完成的任务请到任务日志里确认状态。")
         code = EXIT_INTERRUPTED

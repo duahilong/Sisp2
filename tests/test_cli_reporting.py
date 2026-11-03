@@ -7,7 +7,11 @@
 
 from __future__ import annotations
 
+import json
+import os
 from types import SimpleNamespace
+
+import pytest
 
 from app.cli import (
     Reporter,
@@ -15,6 +19,7 @@ from app.cli import (
     _print_step_records,
     _result_log_path,
     create_controller,
+    main,
 )
 from app.models import STEP_FAILED, STEP_OK, STEP_SKIPPED, StepResult, WorkerResult
 
@@ -82,3 +87,59 @@ def test_create_controller_passes_log_dir(tmp_path) -> None:
     )
 
     assert controller._log_dir == str(tmp_path)
+
+
+def test_create_controller_falls_back_to_settings_log_dir(tmp_path) -> None:
+    """设置里配了 logDir，CLI 没给 --log-dir 时也要写日志到那里。"""
+    controller = create_controller(
+        dry_run=True,
+        test_mode=False,
+        allow_disks=None,
+        settings={"logDir": str(tmp_path), "logRetentionDays": 30},
+    )
+
+    assert controller._log_dir == str(tmp_path)
+
+
+def test_create_controller_prefers_explicit_log_dir(tmp_path) -> None:
+    explicit = tmp_path / "explicit"
+    controller = create_controller(
+        dry_run=True,
+        test_mode=False,
+        allow_disks=None,
+        log_dir=str(explicit),
+        settings={"logDir": str(tmp_path / "from-settings")},
+    )
+
+    assert controller._log_dir == str(explicit)
+
+
+def test_create_controller_applies_security_settings() -> None:
+    controller = create_controller(
+        dry_run=True,
+        test_mode=False,
+        allow_disks=None,
+        settings={"protectSystemDisk": False, "blockUnverified": False},
+    )
+
+    assert controller._protect_system_disk is False
+    assert controller._block_unverified is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="--list 会调用 PowerShell 扫描硬盘")
+def test_cli_list_json_uses_settings_log_dir(tmp_path, capsys) -> None:
+    log_dir = tmp_path / "logs"
+    settings_file = tmp_path / "settings.json"
+    settings_file.write_text(
+        json.dumps({"version": 1, "settings": {"logDir": str(log_dir)}}),
+        encoding="utf-8",
+    )
+
+    code = main(["--list", "--json", "--settings", str(settings_file)])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    payload = json.loads(out[out.index("{"):])
+    assert payload["log_dir"] == str(log_dir)
+    # --list 只列硬盘，不该声称会写盘
+    assert payload["would_execute"] is False
