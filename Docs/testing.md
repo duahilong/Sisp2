@@ -94,6 +94,12 @@ python -m app.gui_web.main --serve -j D:\sisp-test\config.json `
 # 然后 POST /api/prepare -> /api/submit -> /api/confirm
 ```
 
+`typeToConfirm=true`（默认）时确认请求要带 `confirm_text`，值为盘号或磁盘型号：
+
+```json
+{"job_ids": ["disk1-xxxx"], "confirm_text": "1"}
+```
+
 ### 3.4 清理
 
 ```powershell
@@ -107,12 +113,16 @@ diskpart /s $env:TEMP\detach.txt
 
 ## 已通过的真实 VM 验证（2026-11）
 
-- Windows 10 22H2 + Python 3.14 + starlette 1.10：67 passed；
+- Windows 10 22H2 + Python 3.15.2：`pytest tests/ -q` → 103 passed；
 - CLI/GUI 真实执行在 8GB VHDX 上六步全部成功，`bcdboot` 写入 EFI，`verify` 识别 GPT/分区；
 - 失败路径：错误镜像索引（dism 87）→ image 失败、boot/verify 跳过、退出码 3；缺镜像 → 预检阻断、退出码 2；容量不足 → 计划阶段阻断、退出码 2；受保护系统盘 → 退出码 4；
-- 安全闸门：真实身份通过；错误 UniqueId / 白名单外 / 服务 dry-run / 弱身份全部 `PermissionError`；
-- 连续多次真实执行后盘符池稳定；EFI 盘符在任务结束后自动释放，无幽灵盘符；
-- CLI `--log-dir` 与 GUI `logDir` 均能落执行日志；`logRetentionDays` 启动清理过期日志生效。
+- 安全闸门：真实身份通过；错误 UniqueId / 白名单外 / 服务 dry-run / 弱身份全部 `PermissionError`；受保护盘的计划会带阻断项，`confirm` 拒绝执行；
+- `typeToConfirm` 走 REST 实测：`/api/confirm` 不带文本、空白文本均返回 `E_CONFIRM`；盘号不匹配（`99`）与型号不匹配（`GeIL`）也返回 `E_CONFIRM`；`" disk 1 "` 这种带空格写法被接受并真的跑完六步；
+- `protectSystemDisk=false` 实测：`GET /api/disks` 中 Disk 0 变回可选、`prepare` 可生成 dry-run 计划；开启时 Disk 0 不可选且计划带「系统盘、启动盘、包含系统盘符 C:」阻断项。真实写盘未在系统盘上验证，也不应该验证；
+- 设置接通实测：`sysTemp` 被用作 dism/diskpart 子进程 `TMP`/`TEMP`，diskpart 脚本文件也落在这个目录；预检多出「外部工具可用性检查」「设置路径有效性检查」两项（故意填错路径 → 退出码 2）；
+- 日志：CLI 未给 `--log-dir` 时用设置里的 `logDir`；桌面进程在 `logDir` 下写 `app.log`（含真实执行日志路径）；`logRetentionDays` 启动清理同时删掉过期的 `disk-runner-*.log` 和 `app.log.*`（实测 6 → 4 个文件）；
+- 窗口记忆：关窗后 `window.json` 写入 `{"width":1280,"height":860,"x":182,"y":182}`；预先写入 1024×700 @ (300,240) 后重启，窗口按该位置恢复；`rememberWindow=false` 时既不恢复也不写文件；
+- 连续多次真实执行后盘符池稳定；EFI 盘符在任务结束后自动释放，无幽灵盘符。
 
 ### 由此修复的问题
 
