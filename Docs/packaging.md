@@ -39,7 +39,7 @@ python packaging/build.py
 | --- | --- | --- |
 | 界面 `ui/index.html` + `ui/css` + `ui/js`、默认配置模板 | exe 内部资源 | 只读，随包发布（spec 的 `DATAS` 必须整目录带上，否则 exe 只剩空壳） |
 | 业务配置 `json/win11.json` | **exe 同目录** | 首次运行自动从模板复制一份，之后可随意编辑 |
-| 设置 `settings.json` | `%APPDATA%\Sisp\` | 与源码运行完全一致，exe 升级不会丢 |
+| 设置 `settings.json` | `%APPDATA%\Sisp\` | 与源码运行完全一致，exe 升级不会丢；设置页可导出/导入换机 |
 | 窗口位置 `window.json` | `%APPDATA%\Sisp\` | 受 `rememberWindow` 控制 |
 | 执行日志、`app.log` | 设置里的 `logDir` | 无控制台窗口时，这里是唯一的诊断出口 |
 | 解包目录 | `%TEMP%\_MEIxxxx` | onefile 临时目录，退出后自动清理 |

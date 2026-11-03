@@ -524,3 +524,76 @@ def test_partition_execute_passes_resolved_identity_to_gate(tmp_path: Path, monk
     assert body["ok"] is True, body
     # 闸门由 PartitionRunner 在真实模式下调用，identity 从这里传进去
     assert seen["identity"]["unique_id"] == "eui-1"
+
+
+# ------------------------------------------------------ 设置导出 / 导入
+def test_export_settings_writes_file_and_roundtrips(tmp_path: Path) -> None:
+    store = build_store(tmp_path / "settings.json")
+    store.update({"sysDefaultGb": 200, "excludedDiskNames": ["A disk"]})
+    client, wf = _build_client(tmp_path)
+    api = WebApi(wf, settings=store)
+
+    target = tmp_path / "out" / "sisp2-settings.json"
+    data = api.export_settings(str(target))
+    assert data["ok"] is True, data
+    assert target.is_file()
+    written = json.loads(target.read_text(encoding="utf-8"))
+    assert written["settings"]["sysDefaultGb"] == 200
+    assert written["settings"]["excludedDiskNames"] == ["A disk"]
+
+
+def test_export_without_path_uses_settings_folder(tmp_path: Path) -> None:
+    store = build_store(tmp_path / "settings.json")
+    client, wf = _build_client(tmp_path)
+    api = WebApi(wf, settings=store)
+    data = api.export_settings(None)
+    assert data["ok"] is True
+    exported = Path(data["data"]["path"])
+    assert exported.is_file()
+    assert exported.parent == (tmp_path / "settings.json").parent
+
+
+def test_import_settings_applies_and_validates(tmp_path: Path) -> None:
+    store = build_store(tmp_path / "settings.json")
+    client, wf = _build_client(tmp_path)
+    api = WebApi(wf, settings=store)
+
+    good = tmp_path / "good.json"
+    good.write_text(
+        json.dumps({"version": 1, "settings": {"sysDefaultGb": 333, "theme": "dark"}}),
+        encoding="utf-8",
+    )
+    result = api.import_settings(str(good))
+    assert result["ok"] is True, result
+    assert store.get()["sysDefaultGb"] == 333
+    assert store.get()["theme"] == "dark"
+
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"settings": {"sysDefaultGb": 5}}), encoding="utf-8")
+    rejected = api.import_settings(str(bad))
+    assert rejected["ok"] is False
+    assert rejected["error"]["detail"]["field"] == "sysDefaultGb"
+    # 整体拒绝：合法的 theme 也不能被写进去
+    assert store.get()["sysDefaultGb"] == 333
+
+
+def test_import_settings_rejects_missing_or_broken_file(tmp_path: Path) -> None:
+    store = build_store(tmp_path / "settings.json")
+    client, wf = _build_client(tmp_path)
+    api = WebApi(wf, settings=store)
+
+    assert api.import_settings(str(tmp_path / "nope.json"))["ok"] is False
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+    body = api.import_settings(str(broken))
+    assert body["ok"] is False
+    assert "JSON" in body["error"]["message"]
+
+
+def test_import_settings_accepts_inline_content(tmp_path: Path) -> None:
+    store = build_store(tmp_path / "settings.json")
+    client, wf = _build_client(tmp_path)
+    api = WebApi(wf, settings=store)
+    body = api.import_settings(None, json.dumps({"efiDefaultMb": 260}))
+    assert body["ok"] is True, body
+    assert store.get()["efiDefaultMb"] == 260

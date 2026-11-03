@@ -383,6 +383,46 @@ export async function resetSettings() {
   }
 }
 
+export async function exportSettings() {
+  let target = '';
+  try {
+    // 桌面窗口有原生保存框；浏览器模式（--serve）没有，后端会落到设置目录并回报路径
+    const picked = await api.pickPath('', 'save').catch(() => null);
+    if (picked && picked.cancelled) return;
+    target = (picked && picked.path) || '';
+  } catch (exc) {
+    target = '';
+  }
+  try {
+    const data = await api.exportSettings(target || undefined);
+    toast(`设置已导出：${data.path}`);
+    pushLog(`设置已导出：${data.path}`, '', 'settings');
+  } catch (exc) {
+    toast(`导出失败：${exc.message || exc}`, 'err');
+  }
+}
+
+export async function importSettings() {
+  try {
+    const picked = await api.pickPath('', 'file').catch(() => null);
+    if (!picked || picked.cancelled || !picked.path) {
+      if (picked && picked.cancelled) return;
+      toast('浏览器模式下请输入设置文件路径', 'err');
+      return;
+    }
+    const data = await api.importSettings({ path: picked.path });
+    state.settings = data.settings || state.settings;
+    clearDraft();
+    state.probes = {};
+    applyAppearance(state.settings);
+    renderSettings();
+    toast('设置已导入');
+    pushLog(`设置已从 ${picked.path} 导入`, '', 'settings');
+  } catch (exc) {
+    toast(`导入失败：${exc.message || exc}`, 'err');
+  }
+}
+
 export async function probeAllSettings() {
   try {
     const result = await api.probeAllPaths();

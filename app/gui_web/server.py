@@ -290,6 +290,16 @@ def create_app(
     def reset_settings() -> dict[str, Any]:
         return api.reset_settings()
 
+    @app.post("/api/settings/export")
+    def export_settings(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        body = payload or {}
+        return api.export_settings(body.get("path"))
+
+    @app.post("/api/settings/import")
+    def import_settings(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        body = payload or {}
+        return api.import_settings(body.get("path"), body.get("content"))
+
     @app.post("/api/settings/probe")
     def probe_path(body: dict[str, Any] | None = None) -> dict[str, Any]:
         return api.probe_path(str((body or {}).get("key") or ""))

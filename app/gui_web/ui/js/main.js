@@ -20,7 +20,7 @@ import {
   renderInstall, goStep, next, back, resetAll, onStepEvent, refreshPhase,
   pollJobLogs, loadImages,
 } from './view-install.js';
-import { renderSettings, saveSettings, resetSettings } from './view-settings.js';
+import { renderSettings, saveSettings, resetSettings, exportSettings, importSettings } from './view-settings.js';
 import {
   openPartitionDialog, openBootDialog, openCheckDialog, openAboutDialog, openKeysDialog,
 } from './dialogs.js';
@@ -256,6 +256,8 @@ function bindToolbar() {
   const wzExit = document.querySelector('#wzExit');
   const setSave = document.querySelector('#setSave');
   const setDefaults = document.querySelector('#setDefaults');
+  const setExport = document.querySelector('#setExport');
+  const setImport = document.querySelector('#setImport');
 
   if (wzBack) wzBack.addEventListener('click', () => back());
   if (wzNext) wzNext.addEventListener('click', () => next());
@@ -268,6 +270,8 @@ function bindToolbar() {
   if (wzExit) wzExit.addEventListener('click', () => goTo('main'));
   if (setSave) setSave.addEventListener('click', () => { void saveSettings(); });
   if (setDefaults) setDefaults.addEventListener('click', () => { void resetSettings(); });
+  if (setExport) setExport.addEventListener('click', () => { void exportSettings(); });
+  if (setImport) setImport.addEventListener('click', () => { void importSettings(); });
 }
 
 /* ------------------------------------------------------------------ 启动 */

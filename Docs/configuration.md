@@ -80,6 +80,17 @@ Sisp2 有两类配置：**界面设置**是日常入口（GUI 全部参数都在
 
 `language` 只影响页面 `lang` 属性与持久化，未做多语言文案；其余字段均已接入运行时。
 
+### 导出 / 导入
+
+设置页顶部的「导出…/导入…」用于把一台机器上的设置带到另一台：
+
+- 导出：桌面窗口会弹原生保存框；浏览器模式（`--serve`）没有保存框，直接落到
+  `%APPDATA%\Sisp\sisp2-settings-<时间戳>.json`，返回值里带路径。
+- 导入：读 `{"version":1,"settings":{…}}` 封套或裸设置对象都行；**整体校验**，
+  任一字段非法就全部不写，错误里带 `field`。
+- 对应接口：`POST /api/settings/export`（可选 `path`）、
+  `POST /api/settings/import`（`path` 或 `content`）。
+
 生效时机分三档：界面外观（`theme`、`density`）与安全开关（`protectSystemDisk`、`blockUnverified`、`typeToConfirm`、`excludedDiskNames`）保存后立即生效；`confirmBeforeStart` 是界面交互开关，下一次提交/确认就读新值；日志器相关（`logDir`、`logLevel`）在进程启动时装配，改动下次启动生效（`logRetentionDays` 的清理也发生在启动时）。
 
 `sysDefaultGb + dataDefaultGb` 若两者为数字且总和不大于 60 会被拒绝；`sysTemp` 与 `logDir` 相同也会被拒绝。路径探测只报告存在状态或系统内置命令，不会验证业务兼容性；预检的单项通过也不代表镜像/引导真的可用。

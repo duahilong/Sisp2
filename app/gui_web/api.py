@@ -22,6 +22,7 @@ import json
 import platform
 import sys
 import threading
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -460,6 +461,60 @@ class WebApi:
         except Exception as exc:  # noqa: BLE001
             return err("E_SETTINGS", str(exc), {"field": getattr(exc, "field", None)})
 
+    def export_settings(self, path: str | None = None) -> dict[str, Any]:
+        """把当前设置写成一个可携带的 JSON 文件。
+
+        不传 ``path`` 时写到设置目录下的 ``sisp2-settings-<时间戳>.json``，
+        返回值里带最终路径（浏览器模式下没有原生保存框，靠这个路径就能找到文件）。
+        """
+        try:
+            payload = {
+                "version": 1,  # 与 SettingsStore.save() 的封套版本保持一致
+                "settings": self._settings.get(),
+            }
+            if path:
+                target = Path(str(path)).expanduser()
+            else:
+                stamp = time.strftime("%Y%m%d-%H%M%S")
+                base = Path(getattr(self._settings, "path", "")).parent
+                target = base / f"sisp2-settings-{stamp}.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception as exc:  # noqa: BLE001
+            return err("E_SETTINGS", f"导出设置失败：{exc}")
+        return ok({"path": str(target), "settings": payload["settings"]})
+
+    def import_settings(
+        self, path: str | None = None, content: str | None = None
+    ) -> dict[str, Any]:
+        """从文件（或直接给的 JSON 文本）导入设置；整体校验，不合法一个字段都不写。"""
+        raw = content
+        source = ""
+        if raw in (None, ""):
+            if not path:
+                return err("E_SETTINGS", "导入设置需要文件路径或 JSON 内容")
+            source = str(path)
+            try:
+                raw = Path(source).expanduser().read_text(encoding="utf-8-sig")
+            except (OSError, UnicodeDecodeError) as exc:
+                return err("E_SETTINGS", f"读取设置文件失败：{exc}")
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            return err("E_SETTINGS", f"设置文件不是合法 JSON：{exc}")
+        if not isinstance(parsed, dict):
+            return err("E_SETTINGS", "设置文件顶层必须是 JSON 对象")
+        # 兼容 {"version":1,"settings":{...}} 封套与裸设置对象两种形态
+        stored = parsed.get("settings")
+        patch = stored if isinstance(stored, dict) else parsed
+        try:
+            settings = self._settings.update(dict(patch))
+        except Exception as exc:  # noqa: BLE001
+            return err("E_SETTINGS", str(exc), {"field": getattr(exc, "field", None)})
+        return ok({"settings": settings, "source": source or "inline"})
+
     def reset_settings(self) -> dict[str, Any]:
         try:
             return ok(self._settings.reset())
@@ -493,11 +548,25 @@ class WebApi:
 
             dialog_module = getattr(webview, "FileDialog", None)
             if dialog_module is not None:
-                dialog = dialog_module.FOLDER if kind == "dir" else dialog_module.OPEN
+                if kind == "dir":
+                    dialog = dialog_module.FOLDER
+                elif kind == "save":
+                    dialog = dialog_module.SAVE
+                else:
+                    dialog = dialog_module.OPEN
             else:
-                dialog = getattr(webview, "FOLDER_DIALOG" if kind == "dir" else "OPEN_DIALOG")
+                legacy = {"dir": "FOLDER_DIALOG", "save": "SAVE_DIALOG"}
+                dialog = getattr(webview, legacy.get(kind, "OPEN_DIALOG"))
 
-            selection = window.create_file_dialog(dialog, allow_multiple=False)
+            kwargs: dict[str, Any] = {"allow_multiple": False}
+            if kind == "save":
+                # 保存框需要一个默认文件名；旧版 pywebview 不认这个参数
+                kwargs["save_filename"] = "sisp2-settings.json"
+            try:
+                selection = window.create_file_dialog(dialog, **kwargs)
+            except TypeError:
+                kwargs.pop("save_filename", None)
+                selection = window.create_file_dialog(dialog, **kwargs)
         except Exception as exc:  # noqa: BLE001
             return err("E_PICK", str(exc))
 
