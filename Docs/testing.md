@@ -221,6 +221,40 @@ diskpart /s $env:TEMP\detach.txt
 - **diskpart 脚本残留在 temp 目录**：`mkstemp` 的 fd 没关，Windows 上 `unlink` 因占用失败；
 - **分区日志没有 diskpart 输出**：攒行日志在写完最后一行后没再 flush。
 
+## 3.1 VM 实测记录（2026-11-03，界面设置接管业务配置之后）
+
+测试机：`DESKTOP-FODEEKK`，Windows 10 22H2（19045），Python 3.15.2，node v26.13.0。
+代码版本 `1ad74ab`。
+
+| 检查 | 结果 |
+| --- | --- |
+| `python -m ruff check .` | All checks passed |
+| `python -m compileall -q app tests tools packaging` | ok |
+| `python tools/ui_check.py` | 10 个模块通过 |
+| `python -m pytest tests/ -q` | **197 passed**（6.2s） |
+| 浏览器冒烟（dry-run，3 块盘） | `ok=true`，10 张截图，树 10 节点，设置页 34 行 |
+| 浏览器冒烟（真实模式，写盘后） | `ok=true`，树 14 节点（4 个分区），计划表 9 行，无阻断 |
+| **真实整盘安装**（200 GB 可扩展 VHDX，走 REST） | **六步全绿**：EFI 100 MB(E:) → Windows 120 GB(H:) → 数据 70 GB(I:) → dism 应用 test.wim → bcdboot → 校验 GPT/4 分区 |
+
+### 这台机器上的两个坑
+
+- **40 GB 的系统副盘不够用**：默认 C=120 GB，`sysDefaultGb` 的下限是 60 GB，
+  所以不到 ~81 GB 的盘永远过不了体积校验（第 2 步「下一步」直接禁用）。测整盘安装
+  请用 ≥200 GB 的可扩展 VHDX（`create vdisk maximum=204800 type=expandable`，实际占用很小）。
+- **合成 WIM 的 `Windows\System32` 为空时，bcdboot 一定失败**
+  （`BFSVC Error: BCD strings MUI load failure ... bootstr.dll`）。测试盘上的
+  `test.wim` 只带 `Windows\Boot\*`，所以要先把设置里的「引导文件目录」`sysBoot`
+  指向一个真实 Windows 目录（本机 `C:\Windows` 即可），`bcdboot` 才会写出启动文件。
+  这是测试数据的问题，不是流程的问题；失败时也能看到步骤状态、退出码与日志定位。
+
+### 由此修掉的两个产品缺陷
+
+1. `_apply_image_defaults` 只在镜像路径为空时兜底 → 模板里的占位路径
+   （`json/win11.example.json` 的 `D:\images\win11.wim`）压住了设置里的 `sysWim`，
+   用户在设置页填了真镜像仍然一直看到「镜像文件不存在」。现在无 `-j` 时设置覆盖配置。
+2. 预检自己读配置算镜像，绕过了上面那条覆盖规则 → 会话仍然带阻断项。
+   `preflight` 改为与运行时同一套优先级（显式 `-j` 才配置优先）。
+
 ## 4. 打包产物（exe）
 
 `Docs/packaging.md` 记录构建方式；验证时按“新打出来的 exe 就是用户手里的东西”
