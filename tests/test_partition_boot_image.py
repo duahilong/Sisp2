@@ -311,3 +311,35 @@ def test_find_default_image_prefers_wim() -> None:
     ]
     assert image.find_default_image(images) == "c.wim"
     assert image.find_default_image([]) == ""
+
+
+def test_partition_runner_removes_script_and_logs_output(tmp_path, monkeypatch) -> None:
+    """diskpart 脚本必须落到 temp 目录后被删掉，输出要进日志。
+
+    以前 ``mkstemp`` 返回的 fd 没关，Windows 上 ``unlink`` 因“文件被占用”失败，
+    脚本就永久留在用户的临时目录里（VM 上实测发现的残留文件）。
+    """
+    import subprocess
+
+    from app.modules.partition import service as partition_service
+
+    seen: dict[str, list[Path]] = {}
+
+    def fake_run(argv, **kwargs):
+        script = Path(argv[-1])
+        seen["script"] = [script]
+        return subprocess.CompletedProcess(argv, 0, b"DiskPart ok", b"")
+
+    monkeypatch.setattr(partition_service.subprocess, "run", fake_run)
+
+    runner = partition_service.PartitionRunner(
+        diskpart="diskpart.exe",
+        temp_dir=str(tmp_path),
+        log_dir=str(tmp_path / "logs"),
+    )
+    code, output = runner._run_diskpart(["select disk 1", "exit"])
+
+    assert code == 0
+    assert "DiskPart ok" in output
+    assert seen["script"][0].exists() is False
+    assert list(tmp_path.glob("sisp-partition-*.txt")) == []

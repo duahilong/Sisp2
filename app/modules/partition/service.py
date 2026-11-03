@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -367,6 +368,7 @@ class PartitionRunner:
         if code != 0:
             log.write(f"diskpart 失败（退出码 {code}）：{_tail(output)}")
             raise PartitionError(f"diskpart 失败（退出码 {code}）：{_tail(output, 800)}")
+        log.write("diskpart 输出：\n" + _tail(output, 2000))
         log.write("diskpart 完成")
         result["message"] = "分区操作已完成"
         return result
@@ -409,7 +411,13 @@ class PartitionRunner:
         handle, script_path = tempfile.mkstemp(
             prefix="sisp-partition-", suffix=".txt", dir=self.temp_dir
         )
-        Path(script_path).write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
+        # 用 os.fdopen 接管句柄：mkstemp 返回的 fd 不关掉的话，Windows 上 finally 里的
+        # unlink 会因“文件还被占用”失败，脚本文件就永远留在 temp 目录里。
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8", newline="\r\n") as script_file:
+                script_file.write("\r\n".join(lines) + "\r\n")
+        except OSError as exc:
+            raise PartitionError(f"无法写入 diskpart 脚本：{exc}") from exc
         try:
             completed = subprocess.run(  # noqa: S603 - 固定命令 + 已校验脚本
                 [self.diskpart, "/s", script_path],
