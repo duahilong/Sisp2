@@ -47,3 +47,6 @@ build/
 # Configuration files with secrets
 secrets.json
 config.local.json
+
+# 本机业务配置（由 json/win11.example.json 首次运行复制出来，含本机镜像路径）
+json/win11.json

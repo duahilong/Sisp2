@@ -22,7 +22,11 @@ def test_source_run_uses_repo_root() -> None:
     assert resources.bundle_root() == REPO_ROOT
     assert resources.ui_path() == REPO_ROOT / "app" / "gui_web" / "ui" / "index.html"
     assert resources.ui_path().is_file()
-    assert resources.default_config_path() == REPO_ROOT / "json" / "win11.json"
+    # 本机配置是首次运行从模板复制出来的（已 gitignore），可能还没生成
+    local = REPO_ROOT / "json" / "win11.json"
+    template = REPO_ROOT / "json" / "win11.example.json"
+    assert resources.default_config_path() == (local if local.is_file() else template)
+    assert template.is_file()
 
 
 def _fake_frozen(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
@@ -37,7 +41,7 @@ def _fake_frozen(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path,
     (ui / "index.html").write_text("<html></html>", encoding="utf-8")
     cfg = bundle / "json"
     cfg.mkdir(parents=True)
-    (cfg / "win11.json").write_text('{"partition_info": {}}', encoding="utf-8")
+    (cfg / "win11.example.json").write_text('{"partition_info": {}}', encoding="utf-8")
 
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "_MEIPASS", str(bundle), raising=False)
@@ -55,7 +59,7 @@ def test_frozen_reads_assets_from_bundle(
     assert resources.ui_path() == bundle / "app" / "gui_web" / "ui" / "index.html"
     assert resources.ui_path().is_file()
     # exe 旁边还没有配置 → 回退随包模板
-    assert resources.default_config_path() == bundle / "json" / "win11.json"
+    assert resources.default_config_path() == bundle / "json" / "win11.example.json"
 
 
 def test_frozen_prefers_config_beside_exe(
@@ -74,9 +78,9 @@ def test_ensure_default_config_copies_template(
     exe, bundle = _fake_frozen(monkeypatch, tmp_path)
     target = resources.ensure_default_config()
     assert target == exe.parent / "json" / "win11.json"
-    assert target.read_text(encoding="utf-8") == (bundle / "json" / "win11.json").read_text(
-        encoding="utf-8"
-    )
+    assert target.read_text(encoding="utf-8") == (
+        bundle / "json" / "win11.example.json"
+    ).read_text(encoding="utf-8")
 
 
 def test_ensure_default_config_falls_back_when_copy_fails(
@@ -89,7 +93,7 @@ def test_ensure_default_config_falls_back_when_copy_fails(
         raise OSError("拒绝访问")
 
     monkeypatch.setattr(resources.shutil, "copyfile", boom)
-    assert resources.ensure_default_config() == bundle / "json" / "win11.json"
+    assert resources.ensure_default_config() == bundle / "json" / "win11.example.json"
 
 
 def test_ensure_default_config_keeps_existing_file(

@@ -17,8 +17,10 @@ import shutil
 import sys
 from pathlib import Path
 
-# 默认业务配置在包内的相对位置；exe 目录里同名的文件优先。
+# 用户可编辑的业务配置（不随包跟踪，源码运行时由模板复制出来）。
 DEFAULT_CONFIG_RELATIVE = Path("json") / "win11.json"
+# 随包发布的**模板**：内容是占位值，首次运行复制成上面那个文件。
+TEMPLATE_CONFIG_RELATIVE = Path("json") / "win11.example.json"
 UI_RELATIVE = Path("app") / "gui_web" / "ui" / "index.html"
 
 
@@ -48,29 +50,35 @@ def ui_path() -> Path:
 
 
 def default_config_path() -> Path:
-    """默认业务配置：exe 目录优先（用户可改），其次随包模板。"""
+    """默认业务配置：可写目录优先（用户可改），其次随包同名文件，最后模板。"""
     preferred = app_root() / DEFAULT_CONFIG_RELATIVE
     if preferred.is_file():
         return preferred
     bundled = bundle_root() / DEFAULT_CONFIG_RELATIVE
-    return bundled if bundled.is_file() else preferred
+    if bundled.is_file():
+        return bundled
+    template = bundle_root() / TEMPLATE_CONFIG_RELATIVE
+    return template if template.is_file() else preferred
 
 
 def ensure_default_config() -> Path:
-    """返回可用的默认配置路径；冻结版首次运行会把模板复制到 exe 目录。
+    """返回可用的默认配置路径；首次运行把模板复制成可编辑的配置文件。
 
-    复制失败（例如装在 Program Files 且没有写权限）不算错误，直接用随包
-    模板：至少能起来，用户可用 ``-j`` 指定别处的配置。
+    源码运行复制到仓库根的 ``json/win11.json``（已 gitignore），冻结版复制到
+    exe 目录。复制失败（例如装在 Program Files 且没有写权限）不算错误，直接
+    用随包模板：至少能起来，用户可用 ``-j`` 指定别处的配置。
     """
     target = app_root() / DEFAULT_CONFIG_RELATIVE
     if target.is_file():
         return target
-    template = bundle_root() / DEFAULT_CONFIG_RELATIVE
-    if is_frozen() and template.is_file():
+    template = bundle_root() / TEMPLATE_CONFIG_RELATIVE
+    if template.is_file():
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(template, target)
             return target
         except OSError:
-            pass
-    return template if template.is_file() else target
+            # 装在只读目录（例如 Program Files）时用随包模板，至少能起来。
+            return template
+    bundled = bundle_root() / DEFAULT_CONFIG_RELATIVE
+    return bundled if bundled.is_file() else target

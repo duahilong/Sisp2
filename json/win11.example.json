@@ -1,0 +1,14 @@
+{
+  "partition_info": {
+    "efi_size_mb": 300,
+    "c_size_gb": 30,
+    "data_size_gb": "auto"
+  },
+  "image_info": {
+    "image_path": "D:\\images\\win11.wim",
+    "image_index": 1
+  },
+  "excluded_disk_names": [
+    "Example SSD Model"
+  ]
+}

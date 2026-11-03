@@ -240,6 +240,7 @@ class CheckItem:
     passed: bool
     message: str
     details: dict[str, Any] = field(default_factory=dict)
+    optional: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -248,6 +249,7 @@ class CheckItem:
             "passed": self.passed,
             "message": self.message,
             "details": dict(self.details),
+            "optional": self.optional,
         }
 
 

@@ -283,8 +283,15 @@ def run_preflight_checks(
     """
     results: list[dict[str, Any]] = []
 
-    def add(name: str, passed: bool, message: str) -> None:
-        results.append({"name": name, "passed": bool(passed), "message": str(message)})
+    def add(name: str, passed: bool, message: str, *, optional: bool = False) -> None:
+        results.append(
+            {
+                "name": name,
+                "passed": bool(passed),
+                "message": str(message),
+                "optional": bool(optional),
+            }
+        )
 
     # ---------------------------------------------------------------- 权限
     checker = admin_checker or is_admin
@@ -320,20 +327,34 @@ def run_preflight_checks(
         add(CHECK_POWERSHELL, False, "未找到 powershell/pwsh，无法扫描硬盘或执行 diskpart")
 
     # --------------------------------------------------------------- 配置
+    # 业务配置是**可选预设**：分区大小、镜像、排除名单都能在界面设置里维护。
+    # 因此“文件不存在”只作为提示（optional），不阻断；而“文件存在但坏了”
+    # 仍然阻断——那是用户主动写的内容，静默忽略比报错更危险。
     loaded = load_config(config_path)
+    missing = loaded.error_code == ERROR_MISSING
     if loaded.path is None:
-        add(CHECK_CONFIG_EXISTS, False, "未指定配置文件")
+        add(CHECK_CONFIG_EXISTS, False, "未指定配置文件", optional=True)
     elif loaded.exists:
         add(CHECK_CONFIG_EXISTS, True, f"配置文件存在: {loaded.path}")
+    elif missing:
+        add(
+            CHECK_CONFIG_EXISTS,
+            False,
+            f"{loaded.message}（可选，未找到就全部使用界面设置）",
+            optional=True,
+        )
     else:
         add(CHECK_CONFIG_EXISTS, False, loaded.message)
     add(
         CHECK_CONFIG_PARSE,
-        loaded.passed,
-        "配置可解析" if loaded.passed else loaded.message,
+        loaded.passed or missing,
+        "配置可解析" if loaded.passed else (f"{loaded.message}（可选）" if missing else loaded.message),
+        optional=missing,
     )
 
     payload = loaded.payload
+    if payload is None and missing:
+        payload = {}
 
     # --------------------------------------------------------------- 镜像
     image_path = None
@@ -361,7 +382,8 @@ def run_preflight_checks(
         _add_setting_path_checks(add, settings)
 
     return {
-        "all_passed": all(item["passed"] for item in results),
+        # 可选检查（例如没放业务配置文件）失败不算“没通过”
+        "all_passed": all(item["passed"] for item in results if not item.get("optional")),
         "dry_run": bool(dry_run),
         "results": results,
         "config_path": str(loaded.path) if loaded.path is not None else None,

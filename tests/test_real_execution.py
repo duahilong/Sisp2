@@ -517,7 +517,8 @@ def test_duplicate_submit_for_same_disk_is_rejected():
 
 
 # ---------------------------------------------------------------- 界面设置接线
-def test_partition_defaults_fill_only_missing_keys():
+def test_partition_defaults_settings_win_by_default():
+    """没有显式 ``-j`` 时界面设置优先：设置页改了什么，计划就用什么。"""
     def preflight(config_path=None):
         return {
             "results": [],
@@ -531,9 +532,36 @@ def test_partition_defaults_fill_only_missing_keys():
         service=_FakeService([_disk(1)]),
         dry_run=True,
         preflight_runner=preflight,
-        partition_defaults={"efi_size_mb": 100, "c_size_gb": 20, "data_size_gb": 50},
+        partition_defaults={"efi_size_mb": 100, "c_size_gb": 20, "data_size_gb": 10},
     )
     controller.start(None, dry_run=True)
+
+    info = controller.prepare([1])[0].spec.config_payload["partition_info"]
+
+    assert info["efi_size_mb"] == 100      # 设置值覆盖配置
+    assert info["c_size_gb"] == 20
+    assert info["data_size_gb"] == 10
+
+
+def test_partition_defaults_config_wins_when_config_explicit():
+    """显式 ``-j/--config`` 的会话保持“配置优先”，设置只补缺失字段。"""
+    def preflight(config_path=None):
+        return {
+            "results": [],
+            "config_payload": {
+                "partition_info": {"efi_size_mb": 300, "data_size_gb": "auto"},
+                "image_info": {},
+            },
+        }
+
+    controller = WorkflowController(
+        service=_FakeService([_disk(1)]),
+        dry_run=True,
+        preflight_runner=preflight,
+        partition_defaults={"efi_size_mb": 100, "c_size_gb": 20, "data_size_gb": 10},
+    )
+    session = controller.start("preset.json", dry_run=True)
+    assert session.config_explicit is True
 
     info = controller.prepare([1])[0].spec.config_payload["partition_info"]
 

@@ -51,7 +51,7 @@ def test_spec_declares_both_executables() -> None:
 
 def test_spec_resources_exist() -> None:
     assert resources.ui_path().is_file(), "界面文件缺失，打出来的 exe 会打不开窗口"
-    assert (ROOT / "json" / "win11.json").is_file(), "默认业务配置缺失"
+    assert (ROOT / "json" / "win11.example.json").is_file(), "业务配置模板缺失"
     assert (PACKAGING / "sisp2.ico").is_file(), "图标缺失，先跑 packaging/make_icon.py"
     assert (PACKAGING / "version_info.txt").is_file()
 

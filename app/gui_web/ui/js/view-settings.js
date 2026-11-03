@@ -126,7 +126,7 @@ export function renderSettings() {
     return;
   }
 
-  body.innerHTML = SECTIONS.map(([section, title]) => {
+  body.innerHTML = sourceBanner() + SECTIONS.map(([section, title]) => {
     const fields = FIELDS.filter((field) => sectionOf(field.key) === section);
     if (!fields.length) return '';
     const rows = fields.map((field) => renderRow(field, settings)).join('');
@@ -135,6 +135,22 @@ export function renderSettings() {
 
   bindSettings();
   renderState();
+}
+
+/**
+ * 顶部一行“当前生效来源”：界面设置优先，除非启动时显式指定了 -j/--config。
+ * 没有这一行的话，用户改完设置发现计划没变，会怀疑是 bug。
+ */
+function sourceBanner() {
+  const session = state.session || {};
+  const configPath = session.config_path || '';
+  const explicit = !!session.config_explicit;
+  const text = explicit
+    ? `界面设置 · 业务配置已显式指定（${configPath}），同名分区字段以业务配置为准`
+    : (configPath
+      ? `界面设置（业务配置 ${configPath} 作为可选预设，界面设置优先）`
+      : '界面设置');
+  return `<div class="set-src" id="settingsSource">当前生效：${esc(text)}</div>`;
 }
 
 function sectionOf(key) {

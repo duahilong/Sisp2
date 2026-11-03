@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import os
 import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -75,6 +76,9 @@ class SessionState:
     blockers: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     dry_run: bool = False
+    # 用户是否显式指定了业务配置文件（``-j/--config`` 或 ``SISP_CONFIG``）。
+    # 显式指定时配置优先于界面设置，否则界面设置优先。
+    config_explicit: bool = False
 
     @property
     def ready(self) -> bool:
@@ -93,6 +97,7 @@ class SessionState:
     def to_dict(self) -> dict[str, Any]:
         return {
             "config_path": self.config_path,
+            "config_explicit": self.config_explicit,
             "dry_run": self.dry_run,
             "checks": [check.to_dict() for check in self.checks],
             "disks": [disk.to_dict() for disk in self.disks],
@@ -120,6 +125,9 @@ def _build_check_items(results: Sequence[dict[str, Any]] | None) -> tuple[CheckI
                 label=name,
                 passed=bool(result.get("passed")),
                 message=str(result.get("message") or ""),
+                # “可选”检查失败不进入阻断项：业务配置文件缺失属于可选，
+                # 界面设置已经能覆盖它的全部内容。
+                optional=bool(result.get("optional")),
             )
         )
     return tuple(checks)
@@ -230,8 +238,13 @@ def _image_blocker(payload: Mapping[str, Any] | None) -> str | None:
 def _apply_partition_defaults(
     payload: dict[str, Any],
     defaults: Mapping[str, Any] | None,
+    *,
+    settings_win: bool = True,
 ) -> dict[str, Any]:
-    """用界面设置补足业务配置里缺失的分区字段；配置已有的值优先。
+    """把界面设置里的分区默认值合并进载荷。
+
+    ``settings_win=True``（默认，界面设置优先）时用设置值覆盖配置；显式指定了
+    ``-j/--config`` 的会话会传 ``False``，退回到“配置优先、设置只补缺失字段”。
 
     ``data_size_gb=None`` 表示“用剩余空间”，与配置缺省等价，因此不写入。
     """
@@ -247,9 +260,21 @@ def _apply_partition_defaults(
         value = defaults.get(key)
         if value in (None, ""):
             continue
-        if partition_info.get(key) in (None, ""):
-            partition_info[key] = value
+        if not settings_win and partition_info.get(key) not in (None, ""):
+            continue
+        partition_info[key] = value
     return payload
+
+
+def _config_is_explicit(config_path: str | None) -> bool:
+    """用户是否显式指定了业务配置文件。
+
+    显式指定（``-j/--config`` 或环境变量 ``SISP_CONFIG``）时保持“配置优先于界面
+    设置”的老行为，方便批量脚本用预设文件覆盖用户设置；默认走界面设置。
+    """
+    if str(config_path or "").strip():
+        return True
+    return bool(str(os.environ.get("SISP_CONFIG") or "").strip())
 
 
 def _apply_image_defaults(
@@ -662,23 +687,27 @@ class WorkflowController:
             payload = None
 
         blockers = [
-            f"{check.label}：{check.message}" for check in checks if not check.passed
+            f"{check.label}：{check.message}"
+            for check in checks
+            if not check.passed and not check.optional
         ]
-        warnings: list[str] = []
+        warnings: list[str] = [
+            f"{check.label}：{check.message}" for check in checks if not check.passed and check.optional
+        ]
         disks: tuple[DiskInfo, ...] = ()
 
-        if payload is not None:
-            payload = _apply_image_defaults(payload, self._settings())
-        elif self._settings().get("excludedDiskNames"):
-            warnings.append("配置不可用，硬盘列表只应用了界面设置里的排除名单")
+        # 业务配置从“必需”降级为“可选预设”：没有配置文件时用空载荷继续，
+        # 分区大小、镜像、排除名单都能从界面设置里拿到。
+        if payload is None:
+            payload = {}
+            warnings.append("未找到业务配置文件，全部使用界面设置")
+        payload = _apply_image_defaults(payload, self._settings())
         excluded_names = self._merged_excluded_names(payload)
         try:
             disks = tuple(self._service.scan_protected_disks(excluded_names))
         except Exception as exc:
             blockers.append(f"硬盘扫描失败：{exc}")
 
-        if payload is None:
-            blockers.append("配置不可用，无法生成执行计划")
         if not disks:
             warnings.append("未检测到任何硬盘")
         elif not any(disk.is_selectable for disk in disks):
@@ -687,6 +716,7 @@ class WorkflowController:
         session = SessionState(
             config_path=self._resolve_config_path(config_path, payload),
             config_payload=payload,
+            config_explicit=_config_is_explicit(config_path),
             checks=checks,
             disks=disks,
             blockers=tuple(dict.fromkeys(blockers)),
@@ -703,8 +733,6 @@ class WorkflowController:
     def refresh_disks(self) -> list[DiskInfo]:
         """重新扫描硬盘并应用保护规则。"""
         session = self._require_session()
-        if session.config_payload is None:
-            raise WorkflowError("配置不可用，无法刷新硬盘列表")
         self._apply_live_safety_flags()
 
         try:
@@ -810,7 +838,11 @@ class WorkflowController:
                 raise WorkflowError(f"硬盘编号不存在: {disk_number}")
             drive_letters = selection.drive_letter_allocations.get(disk_number) or {}
             payload = _merge_payload(session.config_payload, overrides.get(disk_number))
-            payload = _apply_partition_defaults(payload, self._live_partition_defaults())
+            payload = _apply_partition_defaults(
+                payload,
+                self._live_partition_defaults(),
+                settings_win=not session.config_explicit,
+            )
             payload = _apply_image_defaults(payload, self._settings())
             for message in _check_partition_fit(disk, payload):
                 raise WorkflowError(message)
