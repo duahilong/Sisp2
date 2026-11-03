@@ -498,6 +498,28 @@ class WorkflowController:
                 options[target] = value
         return options
 
+    def authorize_disks(
+        self, disk_numbers: Iterable[int], *, dry_run: bool | None = None
+    ) -> list[int]:
+        """把“刚在界面上确认过”的盘加入隐式白名单。
+
+        整盘安装走 ``prepare()``，它会顺手授权选中的盘；而硬盘分区、修复引导是
+        单盘操作，不经过 ``prepare()``，如果这里不授权，真实执行永远会被
+        “不在白名单内”挡掉（演练模式不看白名单，所以本地测不出来）。
+        用户在主页面选中磁盘 + 输入确认文本，就是与 CLI ``--allow-disks`` 等价的授权。
+        """
+        numbers = [int(number) for number in disk_numbers]
+        active_dry_run = self._resolve_dry_run(dry_run)
+        self._sync_service_policy(dry_run=active_dry_run)
+        if active_dry_run or self._explicit_allowlist() is not None:
+            return numbers
+        before = set(self._service.allowed_disk_numbers)
+        added = {number for number in numbers} - before
+        if added:
+            self._service.allowed_disk_numbers = frozenset(before | added)
+            self._implicit_allowlist |= added
+        return numbers
+
     def _drop_implicit_allowlist(self) -> None:
         """撤销上一次 prepare() 隐式加入的盘号，避免会话间累积授权。"""
         if not self._implicit_allowlist:

@@ -281,6 +281,7 @@ class WebApi:
             number = int(disk_number)
         except (TypeError, ValueError):
             return err("E_BOOT", "硬盘编号不合法")
+        self._wf.authorize_disks([number], dry_run=dry_run)
         try:
             result = self._boot_repairer().repair(
                 number, identity=self._resolve_identity(number, identity), dry_run=dry_run
@@ -329,6 +330,7 @@ class WebApi:
         except (TypeError, ValueError):
             return err("E_PARTITION", "硬盘编号不合法")
         resolved = self._resolve_identity(number, identity)
+        self._wf.authorize_disks([number])
         if not self._delete_confirmed(number, resolved, confirm_text):
             return err(
                 "E_CONFIRM",

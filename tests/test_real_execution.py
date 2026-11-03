@@ -204,6 +204,44 @@ def test_per_disk_image_override_recomputes_image_blocker(tmp_path):
     assert fixed.plan.executable is True
 
 
+def test_authorize_disks_grants_single_disk_operations():
+    """分区/修复引导不经过 prepare，必须自己授权，否则真实执行被白名单挡掉。"""
+    service = _FakeService([_disk(1), _disk(2)])
+    controller = WorkflowController(
+        service=service,
+        dry_run=False,
+        preflight_runner=_preflight,
+    )
+    controller.start(None, dry_run=False)
+
+    assert service.allowed_disk_numbers == frozenset()
+    controller.authorize_disks([1])
+    assert service.allowed_disk_numbers == frozenset({1})
+    # 再授权另一块盘是追加，不是覆盖
+    controller.authorize_disks([2])
+    assert service.allowed_disk_numbers == frozenset({1, 2})
+
+
+def test_authorize_disks_respects_explicit_allowlist_and_dry_run():
+    service = _FakeService([_disk(1), _disk(2)])
+    controller = WorkflowController(
+        service=service,
+        dry_run=False,
+        allowed_disk_numbers=[1],
+        preflight_runner=_preflight,
+    )
+    controller.start(None, dry_run=False)
+
+    controller.authorize_disks([2])
+    assert service.allowed_disk_numbers == frozenset({1})  # 显式白名单不动
+
+    dry_service = _FakeService([_disk(1)])
+    dry = WorkflowController(service=dry_service, dry_run=True, preflight_runner=_preflight)
+    dry.start(None, dry_run=True)
+    dry.authorize_disks([1])
+    assert dry_service.allowed_disk_numbers == frozenset()  # 演练模式不授权
+
+
 def test_prepare_keeps_explicit_allowlist_untouched():
     service = _FakeService([_disk(1), _disk(2)])
     controller = WorkflowController(
