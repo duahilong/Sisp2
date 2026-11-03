@@ -130,6 +130,26 @@ diskpart /s $env:TEMP\detach.txt
 - EFI 隐藏卷盘符在 `clean` 后残留，下一次 `assign letter` 失败（现已释放 + 规划阶段避开）；
 - CLI 无法指定执行日志目录；取消中的任务被执行器失败结果覆盖为 failed。
 
+## 4. 打包产物（exe）
+
+`Docs/packaging.md` 记录构建方式；验证时按“新打出来的 exe 就是用户手里的东西”
+对待，不只看源码：
+
+```powershell
+python packaging/build.py
+.\dist\Sisp2-CLI.exe --list
+.uild\smoke.py 8890        # 先起 .\dist\Sisp2.exe --serve --port 8890 --dry-run
+```
+
+- 专用 VM 上用 Python 3.15.2 现打现测：`--list` / `--dry-run` / `--allow-disks 0`
+  的退出码（0 / 2 / 4）与源码版一致；
+- 打出来的 `Sisp2-CLI.exe --allow-disks 1` 在 8 GB 一次性 VHDX 上完成了六步真实写盘，
+  日志证明 `sysTemp`、`logDir` 等设置经设置文件传入后照常生效；
+- `Sisp2.exe --serve` 下 `/api/info` 报 `version=1.0.0`，桌面窗口能正常渲染；
+- 冻结后的路径解析由 `tests/test_resources.py` 覆盖（源码 / onefile / onedir、
+  exe 旁配置优先、复制失败回退），版本号与 spec 一致性由 `tests/test_packaging.py`
+  覆盖。
+
 ## 已知限制
 
 - 上述 VHD 测试使用的是最小合成 WIM，未验证真实 Windows 装机的可启动性；

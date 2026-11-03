@@ -5,10 +5,10 @@ Python 环境，双击即用。
 
 ## 产物
 
-| 文件 | 说明 | 典型体积 |
+| 文件 | 说明 | 实测体积 |
 | --- | --- | --- |
-| `dist/Sisp2.exe` | 图形界面（无控制台窗口），双击打开「硬盘工具箱」 | ≈ 18 MB |
-| `dist/Sisp2-CLI.exe` | 命令行，参数与 `python -m app.cli` 完全一致 | ≈ 9 MB |
+| `dist/Sisp2.exe` | 图形界面（无控制台窗口），双击打开「硬盘工具箱」 | 17.8 MB（Python 3.14.6）/ 18.1 MB（Python 3.15.2） |
+| `dist/Sisp2-CLI.exe` | 命令行，参数与 `python -m app.cli` 完全一致 | 9.1 MB / 9.5 MB |
 
 两个 exe 都是 onefile：启动时会把自己解到 `%TEMP%` 下的临时目录再运行，
 所以**首次启动约 1–3 秒**（杀毒软件首次扫描时更久），属正常现象。
@@ -72,18 +72,39 @@ python packaging/build.py
 
 ## 验证记录
 
-打包后的 exe 在专用测试机（Windows 10 22H2 / Python 3.15 源码版对照）与本机
-（Windows 11 / Python 3.14.6）都跑过：
+产物在两台机器上都验过：开发机（Windows 11 / Python 3.14.6 / PyInstaller 6.22.2）
+和专用测试机（Windows 10 22H2 / Python 3.15.2 / PyInstaller 6.22.3，从仓库源码
+现打）。
+
+**命令行（测试机）**
 
 | 检查 | 结果 |
 | --- | --- |
-| `Sisp2-CLI.exe --list` / `--json --list` | 退出码 0，硬盘列表与源码一致 |
-| `Sisp2-CLI.exe --dry-run` | 退出码 0，五步流程全过，未提交任何写盘命令 |
-| `Sisp2-CLI.exe --allow-disks 0` | 退出码 2（无管理员/受保护盘按设计拒绝） |
+| `Sisp2-CLI.exe --list` / `--json --list` | 退出码 0，硬盘列表与源码版逐项一致 |
+| `Sisp2-CLI.exe --dry-run` | 退出码 2（该机只剩系统盘，按设计拒绝） |
+| `Sisp2-CLI.exe --allow-disks 0` | 退出码 4（受保护盘，策略拒绝） |
 | `Sisp2-CLI.exe --bogus` | 退出码 4，与源码版一致 |
-| `Sisp2.exe --serve` REST 冒烟 | 会话 → 扫描 → 预检 → 计划 → 提交/确认 → 设置读写全通 |
-| `Sisp2.exe` 桌面窗口 | 窗口标题「硬盘工具箱」，界面完整渲染，右上角显示「已连接后端」 |
-| 首次运行配置 | 自动在 exe 同目录生成 `json/win11.json` |
+
+**真实写盘（测试机，8 GB 虚拟盘，测完即卸）**
+
+```
+Sisp2-CLI.exe --allow-disks 1 --settings D:\sisp-test\settings-ok.json -j D:\sisp-test\config.json
+```
+
+六步全绿：创建 EFI 100 MB（F:）→ Windows 3 GB（G:）→ 数据分区（H:）→
+应用 `test.wim` → 写 UEFI 引导 → 校验分区（#2=100 MB System、#3(G:)=3.00 GB、
+#4(H:)=4.89 GB）。执行日志落在设置指定的 `D:\sisp-test\gui-logs\`，日志里能看到
+`diskpart.exe /s D:\sisp-test	mp\sisp-diskpart-*.txt`——说明 `sysTemp` 这类设置
+在打包版里同样生效；跑完 `tmp` 目录为空，EFI 盘符已释放，固件启动项未新增。
+
+**图形界面**
+
+| 检查 | 结果 |
+| --- | --- |
+| `Sisp2.exe --serve --port 8890 --dry-run` | `/health` 200、`/api/info` 版本 1.0.0、会话 8 项预检、设置 25 个键、系统盘按保护规则不可选 |
+| `Sisp2.exe` 桌面窗口（开发机） | 窗口标题「硬盘工具箱」，磁盘列表完整渲染，右上角「已连接后端」 |
+| 首次运行 | 自动在 exe 同目录生成可编辑的 `json/win11.json` |
+| `pytest tests/ -q` | 测试机 120 passed（含 `test_resources` / `test_packaging`） |
 
 ## 已知限制
 
