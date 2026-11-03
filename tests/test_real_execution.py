@@ -511,7 +511,7 @@ def test_release_efi_letter_builds_diskpart_script():
     runner = WindowsDiskRunner()
     seen: list[list[str]] = []
 
-    def fake_diskpart(lines, log, timeout=600.0):
+    def fake_diskpart(lines, log, timeout=600.0, **kwargs):
         seen.append(list(lines))
         return 0, "ok"
 
@@ -524,7 +524,7 @@ def test_release_efi_letter_builds_diskpart_script():
 def test_release_efi_letter_skips_without_letter():
     runner = WindowsDiskRunner()
     seen: list[list[str]] = []
-    runner._run_diskpart = lambda lines, log, timeout=600.0: (seen.append(list(lines)) or (0, "ok"))
+    runner._run_diskpart = lambda lines, log, timeout=600.0, **kwargs: (seen.append(list(lines)) or (0, "ok"))
 
     runner._release_efi_letter(2, None, _CommandLog(None))
 
@@ -542,12 +542,12 @@ def test_runner_releases_efi_letter_even_when_image_fails(tmp_path):
     )
     scripts: list[list[str]] = []
 
-    def fake_diskpart(lines, log, timeout=600.0):
+    def fake_diskpart(lines, log, timeout=600.0, **kwargs):
         scripts.append(list(lines))
         return 0, "ok"
 
     runner._run_diskpart = fake_diskpart  # type: ignore[method-assign]
-    runner._apply_image = lambda image_path, index, target, log: (87, "bad image", 0.1)
+    runner._apply_image = lambda image_path, index, target, log, **kwargs: (87, "bad image", 0.1)
 
     spec = SimpleNamespace(
         disk_number=2,

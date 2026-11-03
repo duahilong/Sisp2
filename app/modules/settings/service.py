@@ -75,7 +75,7 @@ _PATH_KEYS: dict[str, str] = {
     "ext7z": "file",
     "sysIsoDir": "dir",
     "sysWim": "file",
-    "sysBoot": "file",
+    "sysBoot": "dir",
     "sysUnattend": "file",
     "sysDrivers": "dir",
     "sysTemp": "dir",

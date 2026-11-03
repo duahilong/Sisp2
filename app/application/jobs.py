@@ -122,6 +122,9 @@ class JobSpec:
     expected_identity: dict[str, Any] = field(default_factory=dict)
     drive_letters: dict[str, str] = field(default_factory=dict)
     dry_run: bool = False
+    # 执行器的可选项（临时目录、无人值守应答文件、驱动目录等）；
+    # 由界面设置注入，不写进业务配置文件。
+    runner_options: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -130,6 +133,7 @@ class JobSpec:
             "expected_identity": dict(self.expected_identity),
             "drive_letters": dict(self.drive_letters),
             "dry_run": self.dry_run,
+            "runner_options": dict(self.runner_options),
         }
 
 

@@ -44,6 +44,10 @@ _CHECK_KEYS = {
     "PowerShell 可用性检查": "powershell",
     "配置文件存在性检查": "config_exists",
     "配置文件可解析性检查": "config_parse",
+    "镜像文件存在性检查": "image_exists",
+    "临时目录可用空间检查": "free_space",
+    "外部工具可用性检查": "tools",
+    "设置路径有效性检查": "setting_paths",
 }
 
 # 三分区布局，只需 3 个盘符
@@ -259,6 +263,10 @@ class WorkflowController:
         real_runner: Callable[[Any, threading.Event], WorkerResult] | None = None,
         partition_defaults: Mapping[str, Any] | None = None,
         tool_paths: Mapping[str, str] | None = None,
+        protect_system_disk: bool = True,
+        block_unverified: bool = True,
+        type_to_confirm: bool = False,
+        settings_provider: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._dry_run = bool(dry_run)
         # 构造时的 True 是硬上限：--dry-run / dryRunByDefault 启动后，
@@ -283,6 +291,13 @@ class WorkflowController:
             for key, value in (tool_paths or {}).items()
             if str(value).strip()
         }
+        # 安全开关：protectSystemDisk / blockUnverified 决定哪些盘“不可选”，
+        # typeToConfirm 决定真实执行前是否必须手输盘号/型号。
+        self._protect_system_disk = bool(protect_system_disk)
+        self._block_unverified = bool(block_unverified)
+        self._type_to_confirm = bool(type_to_confirm)
+        # 界面设置提供者：预检、执行器可选项都从这里取最新设置。
+        self._settings_provider = settings_provider
         # 上一次 prepare() 因“无显式白名单”而隐式加入的盘号；下次 prepare/start 时撤销。
         self._implicit_allowlist: set[int] = set()
         # 服务必须跟着控制器的开关走——dry-run、写盘白名单、执行器
@@ -313,6 +328,8 @@ class WorkflowController:
             dry_run=bool(self._dry_run),
             allowed_disk_numbers=self._allowed_disk_numbers or (),
             real_runner=runner,
+            protect_system_disk=self._protect_system_disk,
+            block_unverified=self._block_unverified,
         )
 
     def _execute_spec(self, spec: Any, cancel_event: threading.Event) -> WorkerResult:
@@ -348,21 +365,55 @@ class WorkflowController:
 
     def _run_preflight(self, config_path: str | None) -> dict[str, Any]:
         """调用预检；兼容只接受 config_path 的测试替身。"""
+        accepts: set[str] = set()
+        variadic = False
         try:
             signature = inspect.signature(self._preflight_runner)
         except (TypeError, ValueError):
-            accepts_dry_run = False
-        else:
-            accepts_dry_run = (
-                "dry_run" in signature.parameters
-                or any(
-                    parameter.kind is inspect.Parameter.VAR_KEYWORD
-                    for parameter in signature.parameters.values()
-                )
+            signature = None
+        if signature is not None:
+            accepts = set(signature.parameters)
+            variadic = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in signature.parameters.values()
             )
-        if accepts_dry_run:
-            return self._preflight_runner(config_path, dry_run=self._dry_run)
-        return self._preflight_runner(config_path)
+        kwargs: dict[str, Any] = {}
+        if variadic or "dry_run" in accepts:
+            kwargs["dry_run"] = self._dry_run
+        if (variadic or "settings" in accepts) and self._settings_provider is not None:
+            kwargs["settings"] = self._settings()
+        return self._preflight_runner(config_path, **kwargs)
+
+    # ------------------------------------------------------------------ 设置
+    def set_settings_provider(
+        self, provider: Callable[[], dict[str, Any]] | None
+    ) -> None:
+        """注入设置读取函数；界面改完设置后无需重建控制器。"""
+        self._settings_provider = provider
+
+    def _settings(self) -> dict[str, Any]:
+        if self._settings_provider is None:
+            return {}
+        try:
+            data = self._settings_provider()
+        except Exception:  # noqa: BLE001 - 设置读取失败不能拖死执行
+            return {}
+        return dict(data) if isinstance(data, Mapping) else {}
+
+    def _runner_options(self) -> dict[str, Any]:
+        """把界面设置里的执行器可选项挑出来，随任务一起下发。"""
+        settings = self._settings()
+        options: dict[str, Any] = {}
+        for key, target in (
+            ("sysTemp", "temp_dir"),
+            ("sysUnattend", "unattend_path"),
+            ("sysDrivers", "drivers_path"),
+            ("sysBoot", "boot_source"),
+        ):
+            value = str(settings.get(key) or "").strip()
+            if value:
+                options[target] = value
+        return options
 
     def _drop_implicit_allowlist(self) -> None:
         """撤销上一次 prepare() 隐式加入的盘号，避免会话间累积授权。"""
@@ -705,6 +756,7 @@ class WorkflowController:
             expected_identity=identity,
             drive_letters=dict(drive_letters),
             dry_run=dry_run,
+            runner_options=self._runner_options(),
         )
         return PreparedJob(spec=spec, plan=plan, disk=disk)
 
@@ -767,8 +819,17 @@ class WorkflowController:
                 raise WorkflowError(str(exc)) from exc
         return jobs
 
-    def confirm(self, job_ids: Sequence[str] | None = None) -> list[Job]:
-        """确认等待中的任务；存在阻断项时拒绝执行。"""
+    def confirm(
+        self,
+        job_ids: Sequence[str] | None = None,
+        *,
+        confirm_text: str | None = None,
+    ) -> list[Job]:
+        """确认等待中的任务；存在阻断项时拒绝执行。
+
+        ``typeToConfirm`` 打开时，真实任务还必须提供 ``confirm_text``（盘号或
+        型号），否则拒绝——防止手滑点错盘。
+        """
         jobs = self._select_jobs(job_ids)
         waiting = [job for job in jobs if job.status == JobStatus.WAITING_CONFIRMATION]
         if not waiting:
@@ -781,6 +842,9 @@ class WorkflowController:
                 for job in blocked
             )
             raise WorkflowError(f"计划存在阻断项，拒绝执行：{details}")
+
+        if self._type_to_confirm:
+            self._require_confirm_text(waiting, confirm_text)
 
         try:
             self._manager.confirm_batch(
@@ -808,6 +872,43 @@ class WorkflowController:
         return self._manager.wait_all(timeout=timeout)
 
     # ------------------------------------------------------------------ 内部
+    @staticmethod
+    def confirm_keywords(job: Job) -> tuple[str, ...]:
+        """``typeToConfirm`` 认可的关键词：盘号或型号（大小写、空格不敏感）。"""
+        number = int(job.plan.disk_number)
+        identity = getattr(job.spec, "expected_identity", None) or {}
+        model = str(identity.get("model") or "").strip()
+        keywords = [str(number), f"disk {number}", f"disk{number}", f"硬盘{number}", f"硬盘 {number}"]
+        if model:
+            keywords.append(model)
+        return tuple(keywords)
+
+    def _require_confirm_text(
+        self,
+        jobs: Sequence[Job],
+        confirm_text: str | None,
+    ) -> None:
+        """校验 ``typeToConfirm`` 的手输确认文本。"""
+        real_jobs = [job for job in jobs if not bool(getattr(job.spec, "dry_run", False))]
+        if not real_jobs:
+            return
+        text = " ".join(str(confirm_text or "").split()).casefold()
+        if not text:
+            raise WorkflowError(
+                "已开启“危险操作需输入确认”：请在确认时输入盘号（如 1）或磁盘型号。"
+            )
+        for job in real_jobs:
+            accepted = {
+                " ".join(keyword.split()).casefold()
+                for keyword in self.confirm_keywords(job)
+                if keyword
+            }
+            if text not in accepted:
+                raise WorkflowError(
+                    f"确认文本与硬盘 {job.plan.disk_number} 不匹配"
+                    f"（可输入盘号或型号：{'、'.join(sorted(accepted))}）。"
+                )
+
     def _require_session(self) -> SessionState:
         if self._session is None:
             raise WorkflowError("工作流尚未启动，请先调用 start()")

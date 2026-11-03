@@ -26,7 +26,7 @@ python -m app.gui_web.main --serve --port 8765
 | `POST /api/config/check` | `{config_path}` |
 | `POST /api/prepare` | `{selection, dry_run}`；selection 为盘号数组或盘号到覆盖对象的映射 |
 | `POST /api/submit` | 登记等待确认任务 |
-| `POST /api/confirm` | `{job_ids}` |
+| `POST /api/confirm` | `{job_ids, confirm_text?}`；`typeToConfirm` 开启时 `confirm_text` 必须是盘号或磁盘型号 |
 | `POST /api/cancel` | `{job_id}`，协作式取消 |
 | `GET /api/jobs/{job_id}` | 单任务查询 |
 | `POST /api/events/poll` | `{cursor, limit}`，游标轮询补发 |

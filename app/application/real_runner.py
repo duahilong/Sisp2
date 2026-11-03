@@ -135,13 +135,14 @@ def prune_runner_logs(log_dir: str | os.PathLike[str], retention_days: int) -> i
         return 0
     cutoff = datetime.now().timestamp() - max(1, int(retention_days)) * 86400
     removed = 0
-    for path in directory.glob("disk-runner-*.log"):
-        try:
-            if path.is_file() and path.stat().st_mtime < cutoff:
-                path.unlink()
-                removed += 1
-        except OSError:
-            _LOGGER.warning("无法清理过期执行日志: %s", path, exc_info=True)
+    for pattern in ("disk-runner-*.log", "app.log.*"):
+        for path in directory.glob(pattern):
+            try:
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                _LOGGER.warning("无法清理过期执行日志: %s", path, exc_info=True)
     return removed
 
 
@@ -212,6 +213,9 @@ class WindowsDiskRunner:
         }
         log = _CommandLog(self.log_dir)
         started = datetime.now()
+        # 界面设置注入的可选项：临时目录、应答文件、驱动目录、引导文件目录。
+        options = dict(getattr(spec, "runner_options", None) or {})
+        env = self._runtime_env(options, log)
 
         steps: list[StepResult] = []
         failure: str | None = None
@@ -248,10 +252,12 @@ class WindowsDiskRunner:
                     log=log,
                     steps=steps,
                     tracker=tracker,
+                    options=options,
+                    env=env,
                 )
             finally:
                 if tracker["diskpart_ran"]:
-                    self._release_efi_letter(disk_number, letters.get("efi"), log)
+                    self._release_efi_letter(disk_number, letters.get("efi"), log, env=env)
 
         finished = datetime.now()
         duration = (finished - started).total_seconds()
@@ -297,7 +303,10 @@ class WindowsDiskRunner:
         log: _CommandLog,
         steps: list[StepResult],
         tracker: dict[str, bool] | None = None,
+        options: Mapping[str, Any] | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> tuple[list[StepResult], str | None]:
+        options = dict(options or {})
         partitions = payload.get("partition_info")
         info = partitions if isinstance(partitions, Mapping) else {}
         efi_mb = max(int(_to_int(info.get("efi_size_mb")) or 100), 64)
@@ -329,7 +338,7 @@ class WindowsDiskRunner:
         try:
             if tracker is not None:
                 tracker["diskpart_ran"] = True
-            code, output = self._run_diskpart(script, log)
+            code, output = self._run_diskpart(script, log, env=env)
         except Exception as exc:  # noqa: BLE001 - 统一翻成步骤失败
             steps.append(
                 StepResult(
@@ -377,7 +386,7 @@ class WindowsDiskRunner:
 
         image_index = _to_int((payload.get("image_info") or {}).get("image_index")) or 1
         target = f"{letters['windows']}:\\"
-        code, output, elapsed = self._apply_image(image_path, image_index, target, log)
+        code, output, elapsed = self._apply_image(image_path, image_index, target, log, options=options, env=env)
         if code != 0:
             steps.append(
                 StepResult(
@@ -406,7 +415,7 @@ class WindowsDiskRunner:
             steps.append(StepResult(key="boot", title=_STEP_TITLES["boot"], status=STEP_SKIPPED, message="任务已取消"))
             return steps, "任务已取消（镜像已写入，引导未写）"
 
-        code, output, elapsed = self._write_boot(letters, log)
+        code, output, elapsed = self._write_boot(letters, log, options=options, env=env)
         if code != 0:
             steps.append(
                 StepResult(
@@ -469,6 +478,8 @@ class WindowsDiskRunner:
         lines: Sequence[str],
         log: _CommandLog,
         timeout: float = DISKPART_TIMEOUT,
+        *,
+        env: Mapping[str, str] | None = None,
     ) -> tuple[int, str]:
         if not self.diskpart:
             raise RunnerError("找不到 diskpart.exe")
@@ -477,7 +488,7 @@ class WindowsDiskRunner:
         try:
             # diskpart 只认 ANSI 脚本；这里的脚本全是 ASCII。
             Path(path).write_text("\r\n".join(lines) + "\r\n", encoding="ascii")
-            code, output, _elapsed = self._spawn([self.diskpart, "/s", path], timeout, log)
+            code, output, _elapsed = self._spawn([self.diskpart, "/s", path], timeout, log, env=env)
             return code, output
         finally:
             try:
@@ -490,6 +501,8 @@ class WindowsDiskRunner:
         disk_number: int,
         letter: str | None,
         log: _CommandLog,
+        *,
+        env: Mapping[str, str] | None = None,
     ) -> None:
         """任务结束后释放 EFI 盘符。
 
@@ -502,7 +515,7 @@ class WindowsDiskRunner:
         lines = [f"select volume {letter}", f"remove letter={letter}", "exit"]
         log.block("释放 EFI 盘符", "\n".join(lines))
         try:
-            code, _output = self._run_diskpart(lines, log, timeout=LETTER_RELEASE_TIMEOUT)
+            code, _output = self._run_diskpart(lines, log, timeout=LETTER_RELEASE_TIMEOUT, env=env)
         except Exception:  # noqa: BLE001 - 清理失败不能影响任务结果
             log.write(f"释放 EFI 盘符 {letter} 失败（已忽略）")
             return
@@ -517,8 +530,12 @@ class WindowsDiskRunner:
         index: int,
         target: str,
         log: _CommandLog,
+        *,
+        options: Mapping[str, Any] | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> tuple[int, str, float]:
         assert self.dism  # 前置检查已保证
+        options = dict(options or {})
         command = [
             self.dism,
             "/English",
@@ -528,15 +545,57 @@ class WindowsDiskRunner:
             f"/ApplyDir:{target}",
             "/CheckIntegrity",
         ]
-        code, output, elapsed = self._spawn(command, DISM_TIMEOUT, log)
+        # 界面设置里的「无人值守应答文件」和「驱动目录」直接交给 DISM，
+        # 在应用镜像的同一步里生效，失败会让整步失败（不静默省略）。
+        unattend = _to_text(options.get("unattend_path"))
+        if unattend:
+            command.append(f"/Apply-Unattend:{unattend}")
+        drivers = _to_text(options.get("drivers_path"))
+        if drivers:
+            command.extend([f"/Add-Driver:{drivers}", "/Recurse"])
+        code, output, elapsed = self._spawn(command, DISM_TIMEOUT, log, env=env)
         return code, output, elapsed
 
-    def _write_boot(self, letters: Mapping[str, str], log: _CommandLog) -> tuple[int, str, float]:
+    def _write_boot(
+        self,
+        letters: Mapping[str, str],
+        log: _CommandLog,
+        *,
+        options: Mapping[str, Any] | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> tuple[int, str, float]:
         assert self.bcdboot  # 前置检查已保证
+        options = dict(options or {})
         windows = f"{letters['windows']}:\\Windows"
         efi = f"{letters['efi']}:"
-        command = [self.bcdboot, windows, "/s", efi, "/f", "UEFI"]
-        return self._spawn(command, BCDBOOT_TIMEOUT, log)
+        # ``sysBoot`` 是离线引导文件目录：镜像里没有 Windows\Boot 时
+        # （精简/自定义镜像）用它当 bcdboot 的源目录。
+        boot_source = _to_text(options.get("boot_source"))
+        source = boot_source or windows
+        if boot_source:
+            log.write(f"引导源目录来自界面设置：{boot_source}")
+        command = [self.bcdboot, source, "/s", efi, "/f", "UEFI"]
+        return self._spawn(command, BCDBOOT_TIMEOUT, log, env=env)
+
+    @staticmethod
+    def _runtime_env(
+        options: Mapping[str, Any] | None,
+        log: _CommandLog,
+    ) -> dict[str, str]:
+        """子进程环境：界面里的临时目录优先生效（TMP/TEMP）。"""
+        env = dict(os.environ)
+        temp_dir = _to_text((options or {}).get("temp_dir"))
+        if not temp_dir:
+            return env
+        try:
+            Path(temp_dir).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log.write(f"临时目录不可用，改用系统默认：{temp_dir}（{exc}）")
+            return env
+        env["TMP"] = temp_dir
+        env["TEMP"] = temp_dir
+        log.write(f"临时目录：{temp_dir}")
+        return env
 
     def _verify(self, disk_number: int, log: _CommandLog) -> StepResult:
         title = _STEP_TITLES["verify"]
@@ -609,6 +668,8 @@ class WindowsDiskRunner:
         command: Sequence[str],
         timeout: float,
         log: _CommandLog,
+        *,
+        env: Mapping[str, str] | None = None,
     ) -> tuple[int, str, float]:
         started = datetime.now()
         log.write(f"$ {' '.join(command)}")
@@ -619,6 +680,7 @@ class WindowsDiskRunner:
                 timeout=timeout,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 check=False,
+                env=dict(env) if env else None,
             )
         except subprocess.TimeoutExpired as exc:
             output = _decode(exc.stdout) + _decode(exc.stderr)

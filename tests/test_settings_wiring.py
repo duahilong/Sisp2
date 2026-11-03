@@ -1,0 +1,264 @@
+"""界面设置到后端行为的接线测试。
+
+这些设置之前只存在于 ``settings.json`` 和设置页，代码里没人读。
+本文件保证它们真的影响：运行前检查、执行器命令行参数。
+"""
+
+from __future__ import annotations
+
+import threading
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from app.application.real_runner import WindowsDiskRunner
+from app.application.workflow import WorkflowController
+from app.models import WorkerResult
+from app.preflight import CHECK_SETTING_PATHS, CHECK_TOOLS, run_preflight_checks
+
+
+def _preflight(settings: dict[str, Any], tmp_path) -> dict[str, Any]:
+    return run_preflight_checks(
+        None,
+        dry_run=True,
+        admin_checker=lambda: True,
+        command_lookup=lambda name: f"C:/{name}.exe",
+        disk_usage=lambda root: (0, 0, 10 * 1024**3),
+        settings=settings,
+    )
+
+
+def _check(report: dict[str, Any], name: str) -> dict[str, Any]:
+    for item in report["results"]:
+        if item["name"] == name:
+            return item
+    raise AssertionError(f"缺少检查项：{name}")
+
+
+# ------------------------------------------------------------------ 预检
+def test_preflight_without_settings_skips_new_checks(tmp_path) -> None:
+    report = _preflight({}, tmp_path)
+    names = {item["name"] for item in report["results"]}
+    assert CHECK_TOOLS not in names
+    assert CHECK_SETTING_PATHS not in names
+
+
+def test_preflight_reports_missing_configured_tool(tmp_path) -> None:
+    report = _preflight({"ext7z": str(tmp_path / "nope" / "7z.exe")}, tmp_path)
+    item = _check(report, CHECK_TOOLS)
+    assert item["passed"] is False
+    assert "不存在" in item["message"]
+
+
+def test_preflight_accepts_existing_configured_tool(tmp_path) -> None:
+    tool = tmp_path / "7z.exe"
+    tool.write_text("stub", encoding="utf-8")
+    item = _check(_preflight({"ext7z": str(tool)}, tmp_path), CHECK_TOOLS)
+    assert item["passed"] is True
+    assert "7-Zip" in item["message"]
+
+
+def test_preflight_reports_missing_system_wim(tmp_path) -> None:
+    item = _check(
+        _preflight({"sysWim": str(tmp_path / "install.wim")}, tmp_path),
+        CHECK_SETTING_PATHS,
+    )
+    assert item["passed"] is False
+    assert "系统 WIM 文件" in item["message"]
+
+
+def test_preflight_creates_temp_dir_and_passes(tmp_path) -> None:
+    temp = tmp_path / "sisp-temp" / "nested"
+    item = _check(_preflight({"sysTemp": str(temp)}, tmp_path), CHECK_SETTING_PATHS)
+    assert item["passed"] is True
+    assert temp.is_dir()
+
+
+def test_preflight_rejects_wrong_path_kind(tmp_path) -> None:
+    directory = tmp_path / "wim-dir"
+    directory.mkdir()
+    item = _check(_preflight({"sysWim": str(directory)}, tmp_path), CHECK_SETTING_PATHS)
+    assert item["passed"] is False
+    assert "类型不对" in item["message"]
+
+
+# ------------------------------------------------------------------ 工作流
+def test_workflow_maps_settings_to_runner_options() -> None:
+    wf = WorkflowController(
+        service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
+        dry_run=True,
+        preflight_runner=lambda path: {"results": [], "config_payload": {}},
+        settings_provider=lambda: {
+            "sysTemp": r"D:\temp",
+            "sysUnattend": r"D:\answer.xml",
+            "sysDrivers": r"D:\drivers",
+            "sysBoot": r"D:\boot",
+            "unrelated": "ignored",
+        },
+    )
+    assert wf._runner_options() == {
+        "temp_dir": r"D:\temp",
+        "unattend_path": r"D:\answer.xml",
+        "drivers_path": r"D:\drivers",
+        "boot_source": r"D:\boot",
+    }
+
+
+def test_workflow_preflight_receives_settings() -> None:
+    seen: list[dict[str, Any]] = []
+
+    def preflight(config_path=None, *, dry_run=False, settings=None):
+        seen.append(dict(settings or {}))
+        return {"results": [], "config_payload": {}}
+
+    wf = WorkflowController(
+        service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
+        dry_run=True,
+        preflight_runner=preflight,
+        settings_provider=lambda: {"sysTemp": r"D:\temp"},
+    )
+    wf._run_preflight(None)
+    assert seen == [{"sysTemp": r"D:\temp"}]
+
+
+def test_workflow_survives_broken_settings_provider() -> None:
+    def boom() -> dict[str, Any]:
+        raise RuntimeError("设置文件损坏")
+
+    wf = WorkflowController(
+        service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
+        dry_run=True,
+        preflight_runner=lambda path: {"results": [], "config_payload": {}},
+        settings_provider=boom,
+    )
+    assert wf._settings() == {}
+    assert wf._runner_options() == {}
+
+
+# ------------------------------------------------------------------ 执行器
+def _capture_runner() -> tuple[WindowsDiskRunner, list[list[str]]]:
+    runner = WindowsDiskRunner(
+        diskpart="diskpart.exe",
+        dism="dism.exe",
+        bcdboot="bcdboot.exe",
+        powershell="powershell.exe",
+    )
+    commands: list[list[str]] = []
+
+    def fake_spawn(command, timeout, log, *, env=None):
+        commands.append(list(command))
+        return 0, "ok", 0.1
+
+    runner._spawn = fake_spawn  # type: ignore[method-assign]
+    return runner, commands
+
+
+def test_apply_image_passes_unattend_and_drivers() -> None:
+    from app.application.real_runner import _CommandLog
+
+    runner, commands = _capture_runner()
+    code, _out, _elapsed = runner._apply_image(
+        r"D:\images\win11.wim",
+        2,
+        "F:\\",
+        _CommandLog(None),
+        options={"unattend_path": r"D:\answer.xml", "drivers_path": r"D:\drivers"},
+    )
+    assert code == 0
+    command = commands[0]
+    assert "/Apply-Unattend:D:\\answer.xml" in command
+    assert "/Add-Driver:D:\\drivers" in command
+    assert "/Recurse" in command
+
+
+def test_apply_image_without_options_is_unchanged() -> None:
+    from app.application.real_runner import _CommandLog
+
+    runner, commands = _capture_runner()
+    runner._apply_image(r"D:\images\win11.wim", 1, "F:\\", _CommandLog(None))
+    command = commands[0]
+    assert not any("Unattend" in part for part in command)
+    assert not any("Add-Driver" in part for part in command)
+
+
+def test_write_boot_uses_settings_boot_source() -> None:
+    from app.application.real_runner import _CommandLog
+
+    runner, commands = _capture_runner()
+    letters = {"efi": "E", "windows": "F", "data": "G"}
+    runner._write_boot(letters, _CommandLog(None), options={"boot_source": r"D:\boot"})
+    assert commands[0] == ["bcdboot.exe", r"D:\boot", "/s", "E:", "/f", "UEFI"]
+
+
+def test_write_boot_defaults_to_windows_dir() -> None:
+    from app.application.real_runner import _CommandLog
+
+    runner, commands = _capture_runner()
+    letters = {"efi": "E", "windows": "F", "data": "G"}
+    runner._write_boot(letters, _CommandLog(None))
+    assert commands[0] == ["bcdboot.exe", "F:\\Windows", "/s", "E:", "/f", "UEFI"]
+
+
+def test_runtime_env_creates_temp_dir(tmp_path) -> None:
+    from app.application.real_runner import _CommandLog
+
+    temp = tmp_path / "scratch"
+    env = WindowsDiskRunner._runtime_env({"temp_dir": str(temp)}, _CommandLog(None))
+    assert temp.is_dir()
+    assert env["TMP"] == str(temp)
+    assert env["TEMP"] == str(temp)
+
+
+def test_runner_accepts_runner_options_on_spec(tmp_path, monkeypatch) -> None:
+    """整条链路：spec.runner_options 会传到 dism/bcdboot 的命令行。"""
+    image = tmp_path / "tiny.wim"
+    image.write_bytes(b"x")
+    runner = WindowsDiskRunner(
+        diskpart="diskpart.exe",
+        dism="dism.exe",
+        bcdboot="bcdboot.exe",
+        powershell="powershell.exe",
+    )
+    commands: list[list[str]] = []
+
+    def fake_run_diskpart(lines, log, timeout=600.0, *, env=None):
+        commands.append(list(lines))
+        return 0, "ok"
+
+    def fake_spawn(command, timeout, log, *, env=None):
+        commands.append(list(command))
+        return 0, "ok", 0.1
+
+    runner._run_diskpart = fake_run_diskpart  # type: ignore[method-assign]
+    runner._spawn = fake_spawn  # type: ignore[method-assign]
+    runner._verify = lambda disk_number, log: SimpleNamespace(failed=False)  # type: ignore[method-assign]
+
+    spec = SimpleNamespace(
+        disk_number=1,
+        config_payload={
+            "partition_info": {"efi_size_mb": 100, "c_size_gb": 3, "data_size_gb": "auto"},
+            "image_info": {"image_path": str(image), "image_index": 1},
+        },
+        drive_letters={"efi": "E", "windows": "F", "data": "G"},
+        runner_options={"unattend_path": r"D:\answer.xml"},
+    )
+    result = runner.run(spec, threading.Event())
+
+    assert result.success is True, result.error
+    assert any("/Apply-Unattend:D:\\answer.xml" in command for command in commands)
+
+
+@pytest.mark.parametrize("bad", ["", "   "])
+def test_workflow_ignores_blank_setting_values(bad: str) -> None:
+    wf = WorkflowController(
+        service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
+        dry_run=True,
+        preflight_runner=lambda path: {"results": [], "config_payload": {}},
+        settings_provider=lambda: {"sysTemp": bad},
+    )
+    assert wf._runner_options() == {}
+
+
+def _noop(*_args: Any, **_kwargs: Any) -> WorkerResult:
+    return WorkerResult.failure(1, "unused", dry_run=True)

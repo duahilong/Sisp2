@@ -36,6 +36,15 @@
   --selected: #e3ebff;
   --shadow: 0 1px 2px rgba(16, 24, 40, .05), 0 2px 6px rgba(16, 24, 40, .06);
   --radius: 10px;
+  --density-card-pad: 14px 16px;
+  --density-cell-pad: 6px 10px;
+  --density-font: 14px;
+}
+/* 显示密度：紧凑模式只压缩内边距和字号，不动布局。 */
+:root[data-density="compact"] {
+  --density-card-pad: 9px 12px;
+  --density-cell-pad: 3px 8px;
+  --density-font: 13px;
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
@@ -102,7 +111,7 @@ html, body { height: 100%; }
 body {
   margin: 0;
   font-family: var(--font);
-  font-size: 14px;
+  font-size: var(--density-font);
   line-height: 1.5;
   color: var(--text);
   background: var(--bg);
@@ -184,7 +193,7 @@ a { color: var(--accent); }
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  padding: 14px 16px;
+  padding: var(--density-card-pad);
   margin-bottom: 14px;
 }
 .card > h3 {
@@ -449,7 +458,7 @@ input[type="radio"] { accent-color: var(--accent); }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; word-break: break-all; }
 .apitable { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-.apitable th, .apitable td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.apitable th, .apitable td { text-align: left; padding: var(--density-cell-pad); border-bottom: 1px solid var(--border); vertical-align: top; }
 .apitable th { color: var(--muted); font-weight: 500; font-size: 12px; }
 .apitable td.mono { font-family: var(--mono); font-size: 12px; }
 
@@ -574,7 +583,7 @@ input[type="radio"] { accent-color: var(--accent); }
         <div class="dangerbox" id="actualWarn" hidden>
           实际执行会<b>清空目标硬盘全部数据</b>，且不可恢复。请再次核对磁盘编号与型号。
           <div class="mt8">
-            <label class="check"><input type="checkbox" id="actualConfirm"> 我已核对目标磁盘，确认继续实际执行</label>
+            <label class="check" id="actualConfirmRow"><input type="checkbox" id="actualConfirm"> 我已核对目标磁盘，确认继续实际执行</label>
           </div>
         </div>
 
@@ -708,7 +717,7 @@ input[type="radio"] { accent-color: var(--accent); }
     sysDefaultGb: '系统盘 (C:) 默认大小', dataDefaultGb: '数据盘 (D:) 默认大小',
     extDiskpart: 'diskpart.exe', extDism: 'dism.exe', extWimlib: 'wimlib-imagex.exe',
     extVentoy: 'Ventoy2Disk.exe', ext7z: '7z.exe',
-    sysIsoDir: '系统镜像目录', sysWim: '系统 WIM 文件', sysBoot: '引导文件',
+    sysIsoDir: '系统镜像目录', sysWim: '系统 WIM 文件', sysBoot: '引导文件目录',
     sysUnattend: '无人值守应答文件', sysDrivers: '驱动目录', sysTemp: '临时目录',
     protectSystemDisk: '保护系统盘', dryRunByDefault: '默认以演练模式启动',
     blockUnverified: '阻止未校验的镜像', logRetentionDays: '日志保留天数',
@@ -716,14 +725,29 @@ input[type="radio"] { accent-color: var(--accent); }
   };
 
   var FIELD_HINTS = {
-    theme: '选择「跟随系统」时按操作系统的深浅色自动切换。',
+    theme: '选择「跟随系统」时按操作系统的深浅色自动切换，改完立即生效。',
+    density: '紧凑模式收紧内边距与字号，改完立即生效。',
+    language: '目前只有简体中文文案；选 English 只会保存设置，不会切换界面文本。',
     dataDefaultGb: '业务配置未指定 D 盘大小时使用；auto 表示使用硬盘剩余空间。',
     dryRunByDefault: '开启后即使不勾选演练，启动时也强制 dry-run。',
-    sysTemp: '临时目录不能与日志目录相同。',
+    protectSystemDisk: '开启后系统盘/启动盘/包含系统盘符的盘不可选；执行层还会再判一次。',
+    blockUnverified: '开启后缺少 UniqueId 或 SerialNumber 的盘不可选，防止确认后被换盘。',
+    typeToConfirm: '开启后真实执行前必须手动输入盘号（如 1）或磁盘型号。',
+    confirmBeforeStart: '开启后实际执行提交前需先勾选「我已核对目标磁盘」。',
+    rememberWindow: '关闭后每次使用默认窗口大小；状态保存在设置文件同目录的 window.json。',
+    sysTemp: '临时目录不能与日志目录相同；dism/diskpart 的 TMP/TEMP 会指向它，不存在则自动创建。',
     sysDefaultGb: '业务配置未指定 C 盘大小时使用；允许 60–2000 GB。',
+    sysWim: '系统 WIM 文件；预检会检查文件是否存在。',
+    sysIsoDir: 'ISO 镜像目录；预检会检查目录是否存在。',
+    sysBoot: '引导文件目录：镜像里没有 Windows\\Boot 时，用它当 bcdboot 的源目录。',
+    sysUnattend: '无人值守应答文件：真实执行时作为 dism /Apply-Unattend 参数。',
+    sysDrivers: '驱动目录：真实执行时作为 dism /Add-Driver /Recurse 参数。',
     extDiskpart: '留空则使用系统自带 diskpart；仅影响真实执行。',
     extDism: '留空则使用系统自带 dism；仅影响真实执行。',
-    logRetentionDays: '允许 1–3650 天。'
+    extWimlib: '可选；填了就必须存在，否则运行前检查不通过。',
+    extVentoy: '可选；填了就必须存在，否则运行前检查不通过。',
+    ext7z: '可选；填了就必须存在，否则运行前检查不通过。',
+    logRetentionDays: '允许 1–3650 天；启动时按它清理 disk-runner-*.log 与 app.log.* 备份。'
   };
 
   var ENUMS = {
@@ -736,7 +760,7 @@ input[type="radio"] { accent-color: var(--accent); }
   // 与 SettingsStore._PATH_KEYS 保持一致
   var PATH_KINDS = {
     extDiskpart: 'file', extDism: 'file', extWimlib: 'file', extVentoy: 'file', ext7z: 'file',
-    sysIsoDir: 'dir', sysWim: 'file', sysBoot: 'file', sysUnattend: 'file',
+    sysIsoDir: 'dir', sysWim: 'file', sysBoot: 'dir', sysUnattend: 'file',
     sysDrivers: 'dir', sysTemp: 'dir', logDir: 'dir'
   };
 
@@ -876,7 +900,7 @@ input[type="radio"] { accent-color: var(--accent); }
     refresh_disks:       { method: 'GET',    url: '/api/disks' },
     prepare:             { method: 'POST',   url: '/api/prepare', body: function (a) { return { selection: a[0], dry_run: a.length > 1 ? a[1] : null }; } },
     submit:              { method: 'POST',   url: '/api/submit' },
-    confirm:             { method: 'POST',   url: '/api/confirm', body: function (a) { return { job_ids: a[0] || null }; } },
+    confirm:             { method: 'POST',   url: '/api/confirm', body: function (a) { return { job_ids: a[0] || null, confirm_text: a[1] || null }; } },
     cancel:              { method: 'POST',   url: '/api/cancel', body: function (a) { return { job_id: a[0] || null }; } },
     get_job:             { method: 'GET',    url: function (a) { return '/api/jobs/' + encodeURIComponent(a[0]); } },
     poll_events:         { method: 'POST',   url: '/api/events/poll', body: function (a) { return { cursor: a[0] || 0, limit: a[1] || 300 }; } },
@@ -1225,6 +1249,25 @@ input[type="radio"] { accent-color: var(--accent); }
   }
 
   /* ============================================================== 步骤/按钮 */
+  function settingOn(key, fallback) {
+    var settings = state.settings || {};
+    if (Object.prototype.hasOwnProperty.call(settings, key)) { return !!settings[key]; }
+    return fallback !== false;
+  }
+
+  // 真实模式下是否需要先勾选「我已核对目标磁盘」（由 confirmBeforeStart 控制）。
+  function gateRequired() {
+    return state.mode === 'actual' && settingOn('confirmBeforeStart', true) && !state.confirmedActual;
+  }
+
+  function diskNumberOf(item) {
+    if (!item) { return null; }
+    if (item.disk && item.disk.disk_number != null) { return item.disk.disk_number; }
+    if (item.plan && item.plan.disk_number != null) { return item.plan.disk_number; }
+    if (item.spec && item.spec.disk_number != null) { return item.spec.disk_number; }
+    return null;
+  }
+
   function resetFlow() {
     STEPS.forEach(function (step) { state.flow[step.key] = { status: 'pending', note: '' }; });
     renderSteps();
@@ -1235,7 +1278,7 @@ input[type="radio"] { accent-color: var(--accent); }
     renderSteps();
     var flowHint = $('#flowHint');
     if (flowHint) {
-      if (state.mode === 'actual' && !state.confirmedActual) {
+      if (gateRequired()) {
         flowHint.textContent = '实际执行需先勾选「我已核对目标磁盘」。';
       } else if (status === 'failed') {
         flowHint.textContent = '步骤失败：' + (note || '请查看上方错误提示。');
@@ -1274,15 +1317,17 @@ input[type="radio"] { accent-color: var(--accent); }
     }
     if (btnSubmit) {
       var blocked = state.plans.some(isBlocked);
-      var gate = state.mode === 'actual' && !state.confirmedActual;
+      var gate = gateRequired();
       btnSubmit.disabled = !ready || !state.plans.length || blocked || gate;
       btnSubmit.title = blocked ? '计划存在阻断项，不能提交' : (gate ? '实际执行前需要先勾选确认' : '提交计划，进入等待确认');
     }
     if (btnConfirm) {
-      var gate2 = state.mode === 'actual' && !state.confirmedActual;
+      var gate2 = gateRequired();
       btnConfirm.disabled = !ready || !state.pendingJobIds.length || gate2;
       btnConfirm.title = gate2 ? '实际执行前需要先勾选确认' : '确认并启动后台任务';
     }
+    var gateRow = $('#actualConfirmRow');
+    if (gateRow) { gateRow.hidden = !(state.mode === 'actual' && settingOn('confirmBeforeStart', true)); }
     if (btnCancel) {
       btnCancel.disabled = !ready || !state.jobs.length;
     }
@@ -1632,9 +1677,16 @@ input[type="radio"] { accent-color: var(--accent); }
   async function doSubmit() {
     if (!state.plans.length) { notify('warn', '请先生成执行计划。'); return; }
     if (state.plans.some(isBlocked)) { notify('bad', '计划存在阻断项，不能提交。'); return; }
-    if (state.mode === 'actual' && !state.confirmedActual) {
+    if (gateRequired()) {
       notify('warn', '实际执行前请先勾选「我已核对目标磁盘」。');
       return;
+    }
+    if (state.mode === 'actual' && settingOn('confirmBeforeStart', true)) {
+      var disks = state.plans.map(function (item) { return diskNumberOf(item); }).filter(function (n) { return n !== null; });
+      if (!ask('即将为 Disk ' + disks.join('、') + ' 提交真实写盘任务（会清空目标盘）。确定继续？')) {
+        notify('warn', '已取消提交。');
+        return;
+      }
     }
     var jobs = await call('submit');
     var list = asArray(jobs);
@@ -1650,12 +1702,19 @@ input[type="radio"] { accent-color: var(--accent); }
 
   async function doConfirm() {
     if (!state.pendingJobIds.length) { notify('warn', '没有待确认的任务。'); return; }
-    if (state.mode === 'actual' && !state.confirmedActual) {
+    if (gateRequired()) {
       notify('warn', '实际执行前请先勾选「我已核对目标磁盘」。');
       return;
     }
+    var confirmText = null;
+    if (state.mode === 'actual' && settingOn('typeToConfirm', true)) {
+      var typed = window.prompt('危险操作确认：请输入要写入的盘号（如 1）或磁盘型号：', '');
+      if (typed === null) { notify('warn', '已取消执行。'); return; }
+      confirmText = String(typed).trim();
+      if (!confirmText) { notify('warn', '确认文本不能为空。'); return; }
+    }
     var ids = state.pendingJobIds.slice();
-    var jobs = await call('confirm', ids);
+    var jobs = await call('confirm', ids, confirmText);
     setStep('confirm', 'ok', '已确认 ' + ids.length + ' 个任务');
     setStep('run', 'running', '任务已启动，等待事件…');
     state.pendingJobIds = [];
@@ -1695,6 +1754,12 @@ input[type="radio"] { accent-color: var(--accent); }
   function applyTheme(theme) {
     var value = theme === 'light' || theme === 'dark' ? theme : '';
     document.documentElement.setAttribute('data-theme', value);
+  }
+
+  // 显示密度：compact 收紧内边距与字号（见 CSS 变量）。
+  function applyDensity(density) {
+    var value = density === 'compact' ? 'compact' : 'comfortable';
+    document.documentElement.setAttribute('data-density', value);
   }
 
   function fieldControl(key, value) {
@@ -1813,6 +1878,7 @@ input[type="radio"] { accent-color: var(--accent); }
       pathKeys: asArray(data.pathKeys)
     };
     applyTheme(state.settings.theme);
+    applyDensity(state.settings.density);
     renderSettings();
     updateSaveState();
   }
@@ -2132,7 +2198,14 @@ input[type="radio"] { accent-color: var(--accent); }
           updateSaveState();
         }
       });
-      settingsBox.addEventListener('change', function () { updateSaveState(); });
+      settingsBox.addEventListener('change', function (event) {
+        // 主题/密度是即时生效的外观项，不必等「保存更改」。
+        var target = event.target;
+        var key = target && target.getAttribute ? target.getAttribute('data-key') : null;
+        if (key === 'theme') { applyTheme(target.value); }
+        if (key === 'density') { applyDensity(target.value); }
+        updateSaveState();
+      });
       settingsBox.addEventListener('click', function (event) {
         var target = event.target;
         if (!target || !target.getAttribute) { return; }

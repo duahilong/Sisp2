@@ -35,7 +35,7 @@ import inspect
 import json
 import os
 import sys
-from typing import Any, NoReturn, Sequence
+from typing import Any, Mapping, NoReturn, Sequence
 
 from app.gui.elevation import is_admin, relaunch_as_admin
 
@@ -216,6 +216,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="非管理员且要真实写盘时，先通过 UAC 以管理员身份重启（可选）",
     )
+    parser.add_argument(
+        "--settings",
+        metavar="<path>",
+        default=None,
+        help=(
+            "界面设置文件路径（默认 %%APPDATA%%\\Sisp\\settings.json）；"
+            "传入后安全开关、外部工具路径、系统 WIM/ISO 目录等设置对 CLI 也生效"
+        ),
+    )
     return parser
 
 
@@ -281,21 +290,40 @@ def inject_policy_flags(
                 pass
 
 
+def load_settings(path: str | None) -> dict[str, Any]:
+    """读取界面设置；没传路径或模块缺失时返回空字典（全部用默认值）。"""
+    if not path:
+        return {}
+    try:
+        from app.modules.settings.service import SettingsStore
+    except ImportError:
+        return {}
+    try:
+        store = SettingsStore(path)
+    except Exception:  # noqa: BLE001 - 设置文件坏了不能拖死 CLI
+        return {}
+    return dict(store.get())
+
+
 def create_controller(
     *,
     dry_run: bool,
     test_mode: bool,
     allow_disks: Sequence[int] | None,
     log_dir: str | None = None,
+    settings: Mapping[str, Any] | None = None,
 ) -> Any:
     """构造 ``WorkflowController``，并把两个新开关尽力传下去。"""
     workflow_module = _workflow_module()
     controller_class = workflow_module.WorkflowController
 
+    settings = dict(settings or {})
     kwargs: dict[str, Any] = {"dry_run": bool(dry_run)}
     for name, value in (
         ("test_mode", bool(test_mode)),
         ("allow_disks", list(allow_disks) if allow_disks else None),
+        ("protect_system_disk", bool(settings.get("protectSystemDisk", True))),
+        ("block_unverified", bool(settings.get("blockUnverified", True))),
     ):
         if _supports_keyword(controller_class.__init__, name):
             kwargs[name] = value
@@ -305,9 +333,21 @@ def create_controller(
         kwargs["allowed_disk_numbers"] = list(allow_disks)
     if log_dir and _supports_keyword(controller_class.__init__, "log_dir"):
         kwargs["log_dir"] = str(log_dir)
+    # 预检、执行器可选项（临时目录/应答文件/驱动目录/引导源）都来自设置。
+    if settings and _supports_keyword(controller_class.__init__, "settings_provider"):
+        snapshot = dict(settings)
+        kwargs["settings_provider"] = lambda: dict(snapshot)
 
     controller = controller_class(**kwargs)
     inject_policy_flags(controller, test_mode=test_mode, allow_disks=allow_disks)
+    # 日志保留天数：只清理本工具自己的日志文件。
+    if log_dir:
+        try:
+            from app.application.real_runner import prune_runner_logs
+
+            prune_runner_logs(log_dir, int(settings.get("logRetentionDays") or 30))
+        except Exception:  # noqa: BLE001 - 清理失败不影响主流程
+            pass
     return controller
 
 
@@ -534,6 +574,7 @@ def _run(
         test_mode=bool(args.test_mode),
         allow_disks=args.allow_disks,
         log_dir=args.log_dir,
+        settings=load_settings(args.settings),
     )
     try:
         session = controller.start(args.config, dry_run=bool(args.dry_run))
@@ -752,7 +793,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "jobs": [],
         "blockers": [],
         "warnings": [],
-        "would_execute": not args.dry_run,
+        "would_execute": bool(not args.dry_run and not args.list_only),
     }
 
     try:

@@ -42,6 +42,25 @@ CHECK_CONFIG_EXISTS = "配置文件存在性检查"
 CHECK_CONFIG_PARSE = "配置文件可解析性检查"
 CHECK_IMAGE = "镜像文件存在性检查"
 CHECK_FREE_SPACE = "临时目录可用空间检查"
+CHECK_TOOLS = "外部工具可用性检查"
+CHECK_SETTING_PATHS = "设置路径有效性检查"
+
+# 界面设置里的可选外部工具：配了就必须存在，没配就跳过（内置 dism/bcdboot 够用）。
+OPTIONAL_TOOLS: tuple[tuple[str, str], ...] = (
+    ("extWimlib", "wimlib-imagex"),
+    ("extVentoy", "Ventoy"),
+    ("ext7z", "7-Zip"),
+)
+
+# 界面设置里的系统文件路径：(键名, 中文名, 期望类型)
+SETTING_PATHS: tuple[tuple[str, str, str], ...] = (
+    ("sysIsoDir", "ISO 目录", "dir"),
+    ("sysWim", "系统 WIM 文件", "file"),
+    ("sysBoot", "引导文件目录", "dir"),
+    ("sysUnattend", "无人值守应答文件", "file"),
+    ("sysDrivers", "驱动目录", "dir"),
+    ("sysTemp", "临时目录", "dir"),
+)
 
 # 配置文件不存在/不可读；JSON 语法错误；结构不合法。
 ERROR_MISSING = 2
@@ -248,6 +267,7 @@ def run_preflight_checks(
     admin_checker: Callable[[], bool] | None = None,
     command_lookup: Callable[[str], str | None] | None = None,
     disk_usage: Callable[[str], Any] | None = None,
+    settings: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """执行全部运行前检查，返回 ``{"all_passed", "results", ...}``。
 
@@ -331,6 +351,11 @@ def run_preflight_checks(
         ok_space, space_message = _check_free_space(disk_usage)
         add(CHECK_FREE_SPACE, ok_space, space_message)
 
+    # --------------------------------------------------- 界面设置里的工具/路径
+    if settings:
+        _add_tool_checks(add, settings)
+        _add_setting_path_checks(add, settings)
+
     return {
         "all_passed": all(item["passed"] for item in results),
         "dry_run": bool(dry_run),
@@ -338,6 +363,67 @@ def run_preflight_checks(
         "config_path": str(loaded.path) if loaded.path is not None else None,
         "config_payload": payload,
     }
+
+
+def _add_tool_checks(add: Callable[[str, bool, str], None], settings: Mapping[str, Any]) -> None:
+    """外部工具：配了就必须存在，没配就明确说“跳过”。"""
+    configured: list[str] = []
+    missing: list[str] = []
+    for key, label in OPTIONAL_TOOLS:
+        value = _text(settings.get(key))
+        if not value:
+            continue
+        target = Path(value).expanduser()
+        if target.exists():
+            configured.append(f"{label}={target}")
+        else:
+            missing.append(f"{label}={target}")
+    if missing:
+        add(CHECK_TOOLS, False, "配置的外部工具不存在：" + "；".join(missing))
+    elif configured:
+        add(CHECK_TOOLS, True, "外部工具已就绪：" + "；".join(configured))
+    else:
+        add(CHECK_TOOLS, True, "未配置外部工具，使用内置 dism/bcdboot")
+
+
+def _add_setting_path_checks(
+    add: Callable[[str, bool, str], None],
+    settings: Mapping[str, Any],
+) -> None:
+    """系统文件路径（ISO/WIM/引导/应答/驱动/临时目录）。
+
+    ``sysTemp`` 不存在是正常的（执行时会自动创建），其余路径配错了必须报错，
+    否则真实写盘会在半路失败。
+    """
+    problems: list[str] = []
+    present: list[str] = []
+    for key, label, kind in SETTING_PATHS:
+        value = _text(settings.get(key))
+        if not value:
+            continue
+        target = Path(value).expanduser()
+        if key == "sysTemp":
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                problems.append(f"{label}={target} 不可用（{exc}）")
+            else:
+                present.append(f"{label}={target}")
+            continue
+        exists = target.is_file() if kind == "file" else target.is_dir()
+        kind_label = "文件" if kind == "file" else "目录"
+        if exists:
+            present.append(f"{label}={target}")
+        elif target.exists():
+            problems.append(f"{label}={target} 类型不对（需要{kind_label}）")
+        else:
+            problems.append(f"{label}={target} 不存在")
+    if problems:
+        add(CHECK_SETTING_PATHS, False, "；".join(problems))
+    elif present:
+        add(CHECK_SETTING_PATHS, True, "已配置：" + "；".join(present))
+    else:
+        add(CHECK_SETTING_PATHS, True, "未配置系统文件路径，使用默认值")
 
 
 def summarize_failures(report: Mapping[str, Any]) -> list[str]:

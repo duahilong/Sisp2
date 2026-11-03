@@ -37,24 +37,30 @@ Sisp2 有两类配置：业务配置描述装机输入；界面设置保存 GUI 
 
 | 字段 | 默认值 | 校验/已确认行为 |
 |---|---:|---|
-| `language` | `zh-CN` | `zh-CN` / `en-US` |
-| `theme` | `light` | `light` / `dark` / `system` |
-| `density` | `comfortable` | `compact` / `comfortable` |
-| `rememberWindow` | `true` | 布尔值；业务接入待核实 |
-| `confirmBeforeStart` | `true` | 布尔值；workflow 本身默认提交需确认，但此字段是否控制 UI 行为待核实 |
-| `typeToConfirm` | `true` | 布尔值；是否接入执行确认流程待核实 |
+| `language` | `zh-CN` | `zh-CN` / `en-US`；只做持久化，界面文案目前固定为简体中文 |
+| `theme` | `light` | `light` / `dark` / `system`；读取后与设置页修改时立即切换 `data-theme` |
+| `density` | `comfortable` | `compact` / `comfortable`；切换 `data-density`，紧凑模式收紧卡片内边距、表格行距与字号 |
+| `rememberWindow` | `true` | 布尔值；关窗时把窗口位置/大小写入设置文件同目录的 `window.json`，关闭该开关则不保存也不恢复 |
+| `confirmBeforeStart` | `true` | 布尔值；实际执行模式下，未勾选「我已核对目标磁盘」时提交/确认按钮禁用，并在提交前弹一次确认框 |
+| `typeToConfirm` | `true` | 布尔值；真实执行前 `/api/confirm` 必须带匹配的 `confirm_text`（盘号如 `1` 或磁盘型号，忽略大小写与空白），否则 `E_CONFIRM`。CLI 非交互，以 `--allow-disks` 作为确认 |
+| `protectSystemDisk` | `true` | 布尔值；控制系统盘/启动盘/含系统盘符的盘是否不可选，执行层闸门复用同一判定 |
+| `blockUnverified` | `true` | 布尔值；控制缺少 `UniqueId`/`SerialNumber` 的盘是否不可选，执行层闸门同样生效 |
 | `sysDefaultGb` | `120` | 整数 60–2000；作为 `partition_info.c_size_gb` 的默认值，仅在业务 JSON 未提供该字段时生效 |
 | `dataDefaultGb` | `auto` | `auto` 或整数 20–100000；作为 `partition_info.data_size_gb` 的默认值，仅补缺失字段，`auto` 不写入固定值 |
 | `extDiskpart`、`extDism` | 空字符串 | 路径型字段；作为真实执行器的程序路径，空值回退 PATH / System32 探测 |
-| `extWimlib`、`extVentoy`、`ext7z` | 空字符串 | 路径型字段；当前只做路径探测，未接入执行流程 |
-| `sysIsoDir`、`sysWim`、`sysBoot`、`sysUnattend`、`sysDrivers`、`sysTemp` | 空字符串 | 文件/目录路径与探测；对装机流程的接入待核实。 |
-| `protectSystemDisk` | `true` | 布尔值；当前服务确有系统盘保护，但该设置是否控制保护逻辑待核实。 |
-| `dryRunByDefault` | `false` | 布尔值；GUI 启动时与 `--dry-run` 取逻辑或，影响会话模式。 |
-| `blockUnverified` | `true` | 布尔值；具体业务接入待核实，不应视为已启用额外门禁。 |
-| `logRetentionDays` | `30` | 整数 1–3650；GUI 启动时清理 `logDir` 下超过该天数的 `disk-runner-*.log` |
-| `logDir` | 空字符串 | 真实执行器命令日志目录；GUI 启动时按 `logRetentionDays` 清理其中的本工具日志 |
-| `logLevel` | `info` | `debug` / `info` / `warn` / `error`；设置 `app` logger 级别，当前未配置文件 handler，GUI 进程日志不落盘 |
+| `extWimlib`、`extVentoy`、`ext7z` | 空字符串 | 路径型字段；参与运行前检查：一旦填写就必须存在，否则预检不通过（不驱动执行流程） |
+| `sysTemp` | 空字符串 | 目录；作为 dism/diskpart 子进程的 `TMP`/`TEMP`，不存在会自动创建；与 `logDir` 相同会被拒绝 |
+| `sysUnattend` | 空字符串 | 应答文件；真实执行时追加 `dism /Apply-Unattend:<文件>` |
+| `sysDrivers` | 空字符串 | 目录；真实执行时追加 `dism /Add-Driver:<目录> /Recurse` |
+| `sysBoot` | 空字符串 | 目录；设置后作为 `bcdboot` 的源目录（镜像里没有 `Windows\Boot` 时的兜底） |
+| `sysWim`、`sysIsoDir` | 空字符串 | 文件/目录；只参与运行前检查（存在性/类型），不改变镜像来源 |
+| `dryRunByDefault` | `false` | 布尔值；GUI 启动时与 `--dry-run` 取逻辑或，影响会话模式 |
+| `logRetentionDays` | `30` | 整数 1–3650；启动时清理 `logDir` 下超过该天数的 `disk-runner-*.log` 与 `app.log.*` 备份 |
+| `logDir` | 空字符串 | 真实执行器命令日志目录；桌面进程还会在其中写 `app.log`（2 MB × 3 轮转） |
+| `logLevel` | `info` | `debug` / `info` / `warn` / `error`；设置 `app` logger 级别，桌面进程同时落盘到 `logDir/app.log` |
 
-已接入运行时的字段（其余字段只做持久化与路径探测）：`theme`、`dryRunByDefault`、`sysDefaultGb`、`dataDefaultGb`、`extDiskpart`、`extDism`、`logDir`、`logRetentionDays`、`logLevel`。
+CLI 加 `--settings <path>` 后，上表的安全开关（`protectSystemDisk`、`blockUnverified`）、执行器可选项（`sysTemp`、`sysUnattend`、`sysDrivers`、`sysBoot`）、外部工具与系统文件路径同样生效，运行前检查会多出「外部工具可用性检查」「设置路径有效性检查」两项。
 
-`sysDefaultGb + dataDefaultGb` 若两者为数字且总和不大于 60 会被拒绝；`sysTemp` 与 `logDir` 相同也会被拒绝。路径探测只报告存在状态或系统内置命令，不会验证业务兼容性。设置项存在不代表功能已接入。
+仍然只做持久化的字段：`language`（界面文案未做多语言）。其余字段均已接入运行时。
+
+`sysDefaultGb + dataDefaultGb` 若两者为数字且总和不大于 60 会被拒绝；`sysTemp` 与 `logDir` 相同也会被拒绝。路径探测只报告存在状态或系统内置命令，不会验证业务兼容性；预检的单项通过也不代表镜像/引导真的可用。

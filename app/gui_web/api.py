@@ -134,9 +134,13 @@ class WebApi:
             return err("E_SUBMIT", str(exc))
         return ok([job.to_dict() for job in jobs])
 
-    def confirm(self, job_ids: list[str] | None = None) -> dict[str, Any]:
+    def confirm(
+        self,
+        job_ids: list[str] | None = None,
+        confirm_text: str | None = None,
+    ) -> dict[str, Any]:
         try:
-            jobs = self._wf.confirm(job_ids)
+            jobs = self._wf.confirm(job_ids, confirm_text=confirm_text)
         except Exception as exc:  # noqa: BLE001
             return err("E_CONFIRM", str(exc))
         return ok([job.to_dict() for job in jobs])
@@ -155,6 +159,11 @@ class WebApi:
         return ok(job.to_dict())
 
     # ------------------------------------------------------------------ 设置
+    # ------------------------------------------------------------------ 设置
+    def settings_data(self) -> dict[str, Any]:
+        """当前设置快照（供 main.py 读 rememberWindow 等行为开关）。"""
+        return self._settings.get()
+
     def get_settings(self) -> dict[str, Any]:
         try:
             return ok(self._settings.to_dict())
