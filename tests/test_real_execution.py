@@ -150,6 +150,60 @@ def test_prepare_grants_only_selected_disks_when_no_explicit_allowlist():
     assert "选中" in checks["write_allowlist"].message
 
 
+def test_image_blocker_helper_is_pure(tmp_path):
+    """``_image_blocker`` 只看 payload 里的镜像路径，不碰磁盘。"""
+    from app.application.workflow import _image_blocker
+
+    exists = tmp_path / "ok.wim"
+    exists.write_bytes(b"wim")
+    assert _image_blocker(None) is None
+    assert _image_blocker({"image_info": {}}) is None
+    assert _image_blocker({"image_info": {"image_path": str(exists)}}) is None
+    missing = _image_blocker({"image_info": {"image_path": str(tmp_path / "no.wim")}})
+    assert missing and "镜像文件不存在" in missing
+
+
+def test_per_disk_image_override_recomputes_image_blocker(tmp_path):
+    """第 3 步换了镜像之后，计划里的“镜像文件不存在”必须跟着重算。
+
+    会话级预检只在 ``start()`` 里按配置文件算一次；如果计划直接沿用那份阻断项，
+    用户在第 3 步选了一个真实存在的镜像也永远开始不了——第 4 步会一直挂着阻断。
+    """
+    good = tmp_path / "ok.wim"
+    good.write_bytes(b"wim")
+
+    def preflight(config_path=None):
+        return {
+            "results": [
+                {
+                    "name": "镜像文件存在性检查",
+                    "passed": False,
+                    "message": r"镜像文件不存在: D:\images\missing.wim",
+                }
+            ],
+            "config_payload": {
+                "partition_info": {"c_size_gb": 30},
+                "image_info": {"image_path": r"D:\images\missing.wim"},
+            },
+        }
+
+    controller = WorkflowController(
+        service=_FakeService([_disk(1)]),
+        dry_run=True,
+        preflight_runner=preflight,
+    )
+    controller.start(None, dry_run=True)
+
+    stale = controller.prepare({1: {}})[0]
+    assert any("镜像文件不存在" in item for item in stale.plan.blockers)
+
+    fixed = controller.prepare({1: {"win_gho": str(good)}})[0]
+    assert not any("镜像文件不存在" in item for item in fixed.plan.blockers)
+    assert fixed.spec.config_payload["image_info"]["image_path"] == str(good)
+    assert tuple(fixed.plan.blockers) == ()
+    assert fixed.plan.executable is True
+
+
 def test_prepare_keeps_explicit_allowlist_untouched():
     service = _FakeService([_disk(1), _disk(2)])
     controller = WorkflowController(

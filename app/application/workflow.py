@@ -27,6 +27,7 @@ import inspect
 import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 from app.application.contracts import CheckItem, DiskInfo
@@ -198,6 +199,32 @@ def _merge_payload(
                 image_info["image_index"] = int(value)
 
     return payload
+
+
+_IMAGE_CHECK_PREFIX = "镜像文件存在性检查"
+
+
+def _image_blocker(payload: Mapping[str, Any] | None) -> str | None:
+    """按“这块盘实际要用的镜像”重算一次存在性。
+
+    会话级预检只在 ``start()`` 时按配置文件算一次；而向导第 3 步允许每块盘换
+    镜像、换目录，所以计划里的镜像阻断必须按合并后的 payload 重算——否则用户
+    在第 3 步选了一个真实存在的镜像，第 4 步照样挂着“镜像文件不存在”的阻断，
+    永远无法开始。
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    image_info = payload.get("image_info")
+    if not isinstance(image_info, Mapping):
+        return None
+    raw = image_info.get("image_path")
+    text = str(raw).strip() if raw is not None else ""
+    if not text:
+        return None
+    target = Path(text).expanduser()
+    if target.is_file():
+        return None
+    return f"{_IMAGE_CHECK_PREFIX}：镜像文件不存在: {target}"
 
 
 def _apply_partition_defaults(
@@ -718,7 +745,15 @@ class WorkflowController:
         task_payload = payload if payload is not None else (session.config_payload or {})
         identity = build_worker_disk_identity(disk.to_dict())
         checks: list[CheckItem] = []
-        blockers: list[str] = list(session.blockers)
+        # 会话级阻断项里，“镜像文件存在性检查”是按配置文件算的；这块盘可能在第 3 步
+        # 换了镜像，所以先剔掉旧的，等下面按合并后的 payload 重算再补回去。
+        blockers: list[str] = [
+            item for item in session.blockers
+            if not item.startswith(_IMAGE_CHECK_PREFIX)
+        ]
+        image_blocker = _image_blocker(task_payload)
+        if image_blocker:
+            blockers.append(image_blocker)
         warnings: list[str] = []
 
         checks.append(

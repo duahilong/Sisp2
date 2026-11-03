@@ -35,7 +35,9 @@ from app.modules.settings.service import build_store
 _GIB = 1024**3
 _PAYLOAD: dict[str, Any] = {
     "partition_info": {"efi_size_mb": 300, "c_size_gb": 30, "data_size_gb": "auto"},
-    "image_info": {"image_path": r"D:\images\win11.wim", "image_index": 1},
+    # 计划会按 payload 重算镜像存在性，所以这里要用一个真实存在的文件
+    # （只校验存在性，不解析内容）。
+    "image_info": {"image_path": str(Path(__file__).resolve()), "image_index": 1},
 }
 
 
