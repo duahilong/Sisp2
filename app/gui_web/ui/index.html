@@ -747,7 +747,9 @@ input[type="radio"] { accent-color: var(--accent); }
     extWimlib: '可选；填了就必须存在，否则运行前检查不通过。',
     extVentoy: '可选；填了就必须存在，否则运行前检查不通过。',
     ext7z: '可选；填了就必须存在，否则运行前检查不通过。',
-    logRetentionDays: '允许 1–3650 天；启动时按它清理 disk-runner-*.log 与 app.log.* 备份。'
+    logRetentionDays: '允许 1–3650 天；启动时按它清理 disk-runner-*.log 与 app.log.* 备份。',
+    logDir: '真实执行日志与 app.log 的目录；留空则不落盘。改动下次启动生效。',
+    logLevel: '控制 app logger 的详细程度；debug 会记录每条系统命令与输出。改动下次启动生效。'
   };
 
   var ENUMS = {
