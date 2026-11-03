@@ -1,10 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller 打包配置：一次产出两个单文件 exe。
+"""PyInstaller 打包配置：产出单文件图形界面 exe ``dist/Sisp2.exe``。
 
-- ``dist/Sisp2.exe``     —— 图形界面（无控制台窗口，默认双击即用）
-- ``dist/Sisp2-CLI.exe`` —— 命令行（有控制台，参数与 ``python -m app.cli`` 完全一致）
+（命令行入口已经移除，全部能力都在界面里：装机向导、硬盘分区、修复引导。）
 
-两个 exe 共用同一份源码与资源：
+打包内容包括：
 
 - 界面文件 ``app/gui_web/ui/index.html``、业务配置模板 ``json/win11.example.json``
   作为 datas 打进包内，运行时由 ``app/resources.py`` 解析；
@@ -60,14 +59,7 @@ gui = Analysis(
     **COMMON,
 )
 
-cli = Analysis(
-    [os.path.join(ROOT, "app", "cli.py")],
-    hiddenimports=[],
-    **COMMON,
-)
-
 gui_pyz = PYZ(gui.pure)
-cli_pyz = PYZ(cli.pure)
 
 gui_exe = EXE(
     gui_pyz,
@@ -82,28 +74,6 @@ gui_exe = EXE(
     upx=False,
     runtime_tmpdir=None,
     console=False,  # 无控制台窗口；诊断信息走 app.log
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=ICON,
-    version=VERSION_FILE,
-)
-
-cli_exe = EXE(
-    cli_pyz,
-    cli.scripts,
-    cli.binaries,
-    cli.datas,
-    [],
-    name="Sisp2-CLI",
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
-    runtime_tmpdir=None,
-    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

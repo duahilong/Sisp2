@@ -8,9 +8,11 @@ Python 环境，双击即用。
 | 文件 | 说明 | 实测体积 |
 | --- | --- | --- |
 | `dist/Sisp2.exe` | 图形界面（无控制台窗口），双击打开「硬盘工具箱」 | 17.8 MB（Python 3.14.6）/ 18.1 MB（Python 3.15.2） |
-| `dist/Sisp2-CLI.exe` | 命令行，参数与 `python -m app.cli` 完全一致 | 9.1 MB / 9.5 MB |
 
-两个 exe 都是 onefile：启动时会把自己解到 `%TEMP%` 下的临时目录再运行，
+命令行产物 `Sisp2-CLI.exe` 已随 `app/cli.py` 一起移除；扫盘、装机、分区、修复引导、
+镜像索引都在界面里完成。
+
+产物是 onefile：启动时会把自己解到 `%TEMP%` 下的临时目录再运行，
 所以**首次启动约 1–3 秒**（杀毒软件首次扫描时更久），属正常现象。
 
 ## 构建
@@ -50,25 +52,21 @@ python packaging/build.py
 程序不会自动要管理员权限：
 
 - 判断「有没有管理员」是 `app/gui/elevation.py` 的 `IsUserAnAdmin()`；
-- 需要提权时用 `--elevate`：`Sisp2.exe --elevate` / `Sisp2-CLI.exe --elevate`，
+- 需要提权时用 `--elevate`：`Sisp2.exe --elevate`，
   内部走 `ShellExecuteW(..., "runas", ...)`，冻结后重启的是 exe 自身；
 - 不提权也能跑：预检会把「管理员权限检查」标成失败，写盘会失败，dry-run 照常。
 
-## 命令行用法
+## 运行方式
 
 ```powershell
-.\Sisp2-CLI.exe --list                          # 只列出硬盘
-.\Sisp2-CLI.exe --dry-run                       # 演练，不写盘
-.\Sisp2-CLI.exe --allow-disks 1 --test-mode     # 真实写盘（还需管理员）
-.\Sisp2-CLI.exe --json --list                   # 机器可读输出
-.\Sisp2-CLI.exe --settings D:\cfg\settings.json # 指定设置文件
+.\Sisp2.exe                       # 桌面窗口（默认）
+.\Sisp2.exe --dry-run             # 强制演练，永不写盘
+.\Sisp2.exe --serve --port 8765   # 浏览器模式，自己开浏览器访问 127.0.0.1:8765
+.\Sisp2.exe --settings D:\cfg\settings.json   # 指定设置文件
 ```
 
-退出码与源码运行一致：`0` 成功、`1` 内部错误、`2` 预检/阻断、
-`3` 执行失败、`4` 策略拒绝、`130` 用户中断。
-
-图形界面也可以走浏览器模式：`Sisp2.exe --serve --port 8765`，然后自己用浏览器
-打开 `http://127.0.0.1:8765/`（默认只监听回环地址）。
+首启会在 exe 同目录生成可编辑的 `json/win11.json`（模板 `json/win11.example.json`），
+但**没有这个文件也能正常用**：分区大小、默认镜像、禁止操作的硬盘型号都在界面设置里。
 
 ## 验证记录
 
@@ -76,20 +74,10 @@ python packaging/build.py
 和专用测试机（Windows 10 22H2 / Python 3.15.2 / PyInstaller 6.22.3，从仓库源码
 现打）。
 
-**命令行（测试机）**
-
-| 检查 | 结果 |
-| --- | --- |
-| `Sisp2-CLI.exe --list` / `--json --list` | 退出码 0，硬盘列表与源码版逐项一致 |
-| `Sisp2-CLI.exe --dry-run` | 退出码 2（该机只剩系统盘，按设计拒绝） |
-| `Sisp2-CLI.exe --allow-disks 0` | 退出码 4（受保护盘，策略拒绝） |
-| `Sisp2-CLI.exe --bogus` | 退出码 4，与源码版一致 |
-
 **真实写盘（测试机，8 GB 虚拟盘，测完即卸）**
 
-```
-Sisp2-CLI.exe --allow-disks 1 --settings D:\sisp-test\settings-ok.json -j D:\sisp-test\config.json
-```
+通过界面「系统安装」四步向导（勾选磁盘 → 分区大小 → 选镜像与版本 → 生成计划并确认）
+在同一块虚拟盘上跑完，等价于旧的命令行真实执行。
 
 六步全绿：创建 EFI 100 MB（F:）→ Windows 3 GB（G:）→ 数据分区（H:）→
 应用 `test.wim` → 写 UEFI 引导 → 校验分区（#2=100 MB System、#3(G:)=3.00 GB、
@@ -101,10 +89,10 @@ Sisp2-CLI.exe --allow-disks 1 --settings D:\sisp-test\settings-ok.json -j D:\sis
 
 | 检查 | 结果 |
 | --- | --- |
-| `Sisp2.exe --serve --port 8890 --dry-run` | `/health` 200、`/api/info` 版本 1.0.0、会话 8 项预检、设置 31 个键、系统盘按保护规则不可选 |
+| `Sisp2.exe --serve --port 8890 --dry-run` | `/health` 200、`/api/info` 版本 1.0.0、会话 8 项预检、设置 34 个键、系统盘按保护规则不可选 |
 | `Sisp2.exe` 桌面窗口（开发机） | 窗口标题「硬盘工具箱」，磁盘列表完整渲染，右上角「已连接后端」 |
 | 首次运行 | 自动在 exe 同目录生成可编辑的 `json/win11.json` |
-| `pytest tests/ -q` | 测试机 170 passed（含 `test_resources` / `test_packaging`） |
+| `pytest tests/ -q` | 测试机 189 passed（含 `test_resources` / `test_packaging`） |
 
 界面拆成 ES 模块之后，spec 的 `DATAS` 必须把 `ui/css`、`ui/js` 整目录带上，
 否则打出来的 exe 只会显示一个没有样式、也没有脚本的空壳。`tests/test_packaging.py`
@@ -113,9 +101,7 @@ Sisp2-CLI.exe --allow-disks 1 --settings D:\sisp-test\settings-ok.json -j D:\sis
 | 检查 | 结果 |
 | --- | --- |
 | `GET /static/js/main.js`、`/static/css/app.css` | 都返回 200（证明资源真的进了包） |
-| 打包后的界面冒烟（`tools/ui_smoke.mjs` 对 `Sisp2.exe --serve`） | `ok=true`，10 张截图全部 54–105 KB，磁盘树 9 个节点、设置页 31 行、第 4 步计划表 9 行 |
-| `Sisp2-CLI.exe --list` / `--json --list` / `--bogus` | 退出码 0 / 0 / 4 |
-| `Sisp2-CLI.exe --allow-disks 2` 真实写盘 | 8 GB 虚拟盘六步全绿（EFI 100 MB G: → Windows 3 GB H: → 数据 I: → 应用 test.wim → UEFI 引导 → 校验 4 个分区），日志 11.8 KB |
+| 打包后的界面冒烟（`tools/ui_smoke.mjs` 对 `Sisp2.exe --serve`） | `ok=true`，10 张截图全部 54–105 KB，磁盘树 9 个节点、设置页 34 行、第 4 步计划表 9 行 |
 | `Sisp2.exe --serve` 走 REST 真实整盘安装（2 TB 测试盘） | 六步全绿、`progress` 6/6、分区为 MSR/ESP 300 MB/C 120 GB/D 300 GB，日志 11.8 KB 可读 |
 | 同一 exe 的真实分区操作 | `/api/partition/execute` 建 50 GB NTFS 分区成功，日志含 diskpart 输出，temp 目录无残留 |
 

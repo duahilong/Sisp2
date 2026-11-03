@@ -2,7 +2,7 @@
 
 ## 分层
 
-- 入口：`app/cli.py` 与 `app/gui_web/main.py`。CLI 构造控制器并执行完整命令行流程；GUI 装配 WebApi、工作流和 FastAPI。
+- 入口：`app/gui_web/main.py`（唯一入口，桌面窗口与 `--serve` 浏览器模式共用）。它装配 WebApi、工作流和 FastAPI；命令行入口 `app/cli.py` 已移除，全部能力都在界面里。
 - HTTP/UI：`app/gui_web/server.py` 将 REST/SSE 转换为 WebApi 调用；`api.py` 包装响应信封、转发工作流并缓冲事件；`ui/index.html` 是只含布局骨架的薄壳，界面由 `ui/css/app.css` 与 `ui/js/*.js`（ES 模块，`/static` 托管）组成。
 - 专项能力：`modules/partition`（diskpart 分区/格式化脚本、保护分区校验）、`modules/boot`（ESP 扫描 + `bcdboot` 修复）、`modules/image`（WIM/ESD/SWM/ISO 索引探测，ISO 必定卸载）都是只被 REST 层调用的独立模块，写盘仍复用服务层的闸门。
 - 应用：`application/workflow.py` 管理会话、预检结果、扫描快照、计划及确认；`service.py` 提供扫描、配置检查、盘符分配与安全执行门；`jobs.py` 管理状态、调度、取消和事件。
@@ -12,14 +12,14 @@
 
 1. `WorkflowController.start()` 运行预检、加载业务配置并扫描硬盘，应用系统盘/启动盘/离线/只读/系统盘符及型号排除规则。
 2. `refresh_disks()` 可重新扫描；`check_config()` 单独重验配置。
-3. `prepare()` 根据选盘与配置构造分区计划、盘符、身份快照及检查/阻断信息。盘符分配会避开磁盘摘要、系统盘符以及 OS 层已占用/遗留的“幽灵盘符”（例如 EFI 隐藏卷留下的 DriveInfo 条目）。GUI 会把设置中的默认分区大小用于补足业务配置缺失的字段（配置已有的值优先），并把 `extDiskpart` / `extDism` 作为真实执行器的程序路径。GUI 可对单盘覆盖部分分区/镜像参数。
+3. `prepare()` 根据选盘与配置构造分区计划、盘符、身份快照及检查/阻断信息。盘符分配会避开磁盘摘要、系统盘符以及 OS 层已占用/遗留的“幽灵盘符”（例如 EFI 隐藏卷留下的 DriveInfo 条目）。默认分区大小、EFI 大小、数据分区文件系统与默认镜像都来自界面设置（无 `-j` 时设置覆盖业务配置，显式 `-j` 时只补缺失字段）；`extDiskpart` / `extDism` 作为真实执行器的程序路径。GUI 可对单盘覆盖部分分区/镜像参数。
 4. `submit()` 默认创建等待确认的任务；`confirm()` 对无阻断的任务开始调度。
 5. JobManager 调用服务执行任务。真实服务在执行前检查 dry-run 策略、白名单、身份复核及执行器；执行器按分区、镜像、引导、校验步骤调用系统命令，并在任务结束后释放 EFI 盘符（避免隐藏卷盘符在下次清盘后残留成幽灵盘符）。
 6. 运行结果由任务状态和事件返回；取消为协作式，已运行的系统命令不会因此立即中断。
 
-## CLI 与 GUI 的模式差异
+## 演练与真实模式的判定
 
-`SispService` 构造默认 `dry_run=True`，但入口会覆盖其策略。CLI 只有传 `--dry-run` 才在演练分支停止提交；不传时意图进入真实执行，还要求 `--allow-disks`、管理员权限及其他检查。GUI `main.py` 的有效 dry-run 为命令行 `--dry-run` 与 `dryRunByDefault` 的逻辑或；`WorkflowController` 会把构造时的 dry-run 锁定为硬上限，后续 `start()` / `prepare()` 只能降级为演练，不能升级为真实执行。GUI 无显式白名单时，真实模式下 `prepare()` 会把所选盘加入服务白名单。见[安全说明](security.md)。
+`SispService` 构造默认 `dry_run=True`，入口会覆盖其策略。`main.py` 的有效 dry-run 为命令行 `--dry-run` 与设置 `dryRunByDefault` 的逻辑或；`WorkflowController` 会把构造时的 dry-run 锁定为硬上限，后续 `start()` / `prepare()` 只能降级为演练，不能升级为真实执行。真实模式下，`prepare()` / `authorize_disks()` 会把本次勾选并确认过的盘加入服务白名单（没有显式白名单文件）。见[安全说明](security.md)。
 
 ## 前端结构
 

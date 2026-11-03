@@ -1,7 +1,7 @@
 """Windows 提权（UAC）相关的通用工具。
 
 只依赖标准库（``ctypes`` / ``subprocess`` / ``sys``），不 import 任何业务模块，
-因此可以同时被 GUI 入口（``app.gui_web.main``）、命令行入口（``app.cli``）
+因此被 GUI 入口（``app.gui_web.main``）
 和单元测试安全地使用。
 
 典型用法::
@@ -56,7 +56,7 @@ def relaunch_as_admin(
         要传给新进程的参数列表；``None`` 表示沿用当前进程的 ``sys.argv[1:]``。
     module:
         以 ``python -m <module>`` 方式重启时要用的模块名；``None`` 时自动推断
-        （``python -m app.cli`` 会推断出 ``app.cli``）。
+        （``python -m app.gui_web.main`` 会推断出 ``app.gui_web.main``）。
     executable:
         要启动的解释器/可执行文件；``None`` 表示 ``sys.executable``。
 
@@ -99,7 +99,7 @@ def relaunch_as_admin(
 def _current_module_name() -> str | None:
     """推断当前进程的模块名，供 ``python -m <module>`` 方式重启。
 
-    ``python -m app.cli`` 运行时 ``__main__.__spec__.name`` 就是 ``app.cli``；
+    ``python -m app.gui_web.main`` 运行时 ``__main__.__spec__.name`` 就是该模块名；
     直接跑脚本文件时没有模块名，返回 ``None``（调用方改用脚本路径重启）。
     """
     main = sys.modules.get("__main__")

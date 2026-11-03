@@ -16,7 +16,6 @@ Sisp2 有两类配置：**界面设置**是日常入口（GUI 全部参数都在
 |---|---|
 | GUI 正常启动（无 `-j`） | **界面设置优先**；业务 JSON 只作可选预设，同名分区字段被设置覆盖 |
 | 显式 `-j/--config` 或 `SISP_CONFIG` | **业务 JSON 优先**；设置只补业务 JSON 缺失的字段（脚本/批量场景） |
-| CLI | 与上面一致；`--settings` 可指定设置文件 |
 
 设置页顶部会显示当前生效来源，改完设置不必猜“为什么计划没变”。
 
@@ -56,7 +55,7 @@ Sisp2 有两类配置：**界面设置**是日常入口（GUI 全部参数都在
 | `density` | `comfortable` | `compact` / `comfortable`；切换 `data-density`，紧凑模式收紧卡片内边距、表格行距与字号 |
 | `rememberWindow` | `true` | 布尔值；关窗时把窗口位置/大小写入设置文件同目录的 `window.json`，关闭该开关则不保存也不恢复 |
 | `confirmBeforeStart` | `true` | 布尔值；实际执行模式下，未勾选「我已核对目标磁盘」时提交/确认按钮禁用，并在提交前弹一次确认框 |
-| `typeToConfirm` | `true` | 布尔值；真实执行前 `/api/confirm` 必须带匹配的 `confirm_text`（盘号如 `1` 或磁盘型号，忽略大小写与空白），否则 `E_CONFIRM`。CLI 非交互，以 `--allow-disks` 作为确认 |
+| `typeToConfirm` | `true` | 布尔值；真实执行前 `/api/confirm` 必须带匹配的 `confirm_text`（盘号如 `1` 或磁盘型号，忽略大小写与空白），否则 `E_CONFIRM`（`1`、`disk 1`、`硬盘1`、型号等写法都接受）|
 | `excludedDiskNames` | `[]` | 字符串数组；一行一个硬盘**型号子串**（不区分大小写），命中即禁止操作该盘：向导置灰、整盘安装被拒、分区与修复引导同样被拒。与业务 JSON 的 `excluded_disk_names` 取并集，且不受任何开关影响 |
 | `protectSystemDisk` | `true` | 布尔值；控制系统盘/启动盘/含系统盘符的盘是否不可选，执行层闸门复用同一判定 |
 | `blockUnverified` | `true` | 布尔值；控制缺少 `UniqueId`/`SerialNumber` 的盘是否不可选，执行层闸门同样生效 |
@@ -77,7 +76,7 @@ Sisp2 有两类配置：**界面设置**是日常入口（GUI 全部参数都在
 | `logDir` | 空字符串 | 真实执行器命令日志目录；桌面进程还会在其中写 `app.log`（2 MB × 3 轮转） |
 | `logLevel` | `info` | `debug` / `info` / `warn` / `error`；设置 `app` logger 级别，桌面进程同时落盘到 `logDir/app.log`；改动在下次启动生效 |
 
-CLI 加 `--settings <path>` 后，上表的安全开关（`protectSystemDisk`、`blockUnverified`）、执行器可选项（`sysTemp`、`sysUnattend`、`sysDrivers`、`sysBoot`）、外部工具与系统文件路径同样生效，运行前检查会多出「外部工具可用性检查」「设置路径有效性检查」两项。
+以上开关（`protectSystemDisk`、`blockUnverified`、`excludedDiskNames`）、执行器可选项（`sysTemp`、`sysUnattend`、`sysDrivers`、`sysBoot`）、外部工具与系统文件路径一旦填写就参与运行：预检会多出「外部工具可用性检查」「设置路径有效性检查」两项，填错路径直接阻断。
 
 `language` 只影响页面 `lang` 属性与持久化，未做多语言文案；其余字段均已接入运行时。
 

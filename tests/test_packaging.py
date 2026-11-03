@@ -37,13 +37,14 @@ def test_version_info_matches_app_version() -> None:
     assert f"StringStruct('ProductVersion', '{__version__}.0')" in text
 
 
-def test_spec_declares_both_executables() -> None:
+def test_spec_declares_single_gui_executable() -> None:
+    """命令行入口已移除，只产出一个图形界面 exe。"""
     text = (PACKAGING / "Sisp2.spec").read_text(encoding="utf-8")
     assert 'name="Sisp2"' in text
-    assert 'name="Sisp2-CLI"' in text
-    # 图形界面必须是无控制台窗口，命令行必须有控制台
+    assert "Sisp2-CLI" not in text
+    assert "app.cli" not in text
+    # 图形界面必须是无控制台窗口
     assert re.search(r'name="Sisp2",(.|\n)*?console=False', text)
-    assert re.search(r'name="Sisp2-CLI",(.|\n)*?console=True', text)
     # pywebview 的 Windows 后端是惰性导入，必须显式声明
     assert "webview.platforms.winforms" in text
     assert "webview.platforms.edgechromium" in text
@@ -79,7 +80,7 @@ def test_spec_bundles_static_assets() -> None:
 def test_build_script_targets_match_spec() -> None:
     text = (PACKAGING / "build.py").read_text(encoding="utf-8")
     assert "Sisp2.exe" in text
-    assert "Sisp2-CLI.exe" in text
+    assert "Sisp2-CLI" not in text
     assert "PyInstaller" in text
 
 

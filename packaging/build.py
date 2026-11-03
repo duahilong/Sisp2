@@ -1,6 +1,6 @@
 """一键打包：``python packaging/build.py``。
 
-步骤：确保图标存在 → 调 PyInstaller 按 ``packaging/Sisp2.spec`` 出两个单文件
+步骤：确保图标存在 → 调 PyInstaller 按 ``packaging/Sisp2.spec`` 出单文件
 exe → 打印产物大小。默认输出到 ``dist/``，构建中间物在 ``build/pyinstaller/``。
 
 常用参数：
@@ -22,7 +22,7 @@ SPEC = HERE / "Sisp2.spec"
 ICON = HERE / "sisp2.ico"
 DIST = ROOT / "dist"
 WORK = ROOT / "build" / "pyinstaller"
-TARGETS = ("Sisp2.exe", "Sisp2-CLI.exe")
+TARGETS = ("Sisp2.exe",)
 
 
 def ensure_icon() -> Path:
