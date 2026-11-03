@@ -280,11 +280,17 @@ def _config_is_explicit(config_path: str | None) -> bool:
 def _apply_image_defaults(
     payload: dict[str, Any],
     settings: Mapping[str, Any] | None,
+    *,
+    override: bool = False,
 ) -> dict[str, Any]:
-    """配置/向导都没给镜像时，用设置里的“系统镜像文件 + 默认版本”兜底。
+    """用设置里的“系统镜像文件 + 默认版本”决定镜像。
 
-    设置页的 ``sysWim`` 原本只参与运行前检查（填了就必须存在），从这里开始它
-    真正成为默认镜像；``imageDefaultIndex`` 为 0 表示“交给 dism 用第一个版本”。
+    ``override=True``（界面设置优先的会话）时，设置里的 ``sysWim`` 直接覆盖配置
+    里的同名字段——否则模板里的占位路径（``D:\\images\\win11.wim``）会一直挂着
+    「镜像文件不存在」的阻断，用户在设置页填了真镜像也不生效。
+    ``override=False``（显式 ``-j`` 的会话）时只补缺失字段，配置优先。
+
+    向导第 3 步的逐盘选择在 ``_merge_payload`` 里合并，晚于这里，所以永远优先。
     """
     if not settings:
         return payload
@@ -292,7 +298,7 @@ def _apply_image_defaults(
     if not isinstance(info, dict):
         info = {}
         payload["image_info"] = info
-    if str(info.get("image_path") or "").strip():
+    if not override and str(info.get("image_path") or "").strip():
         return payload
     wim = str(settings.get("sysWim") or "").strip()
     if not wim:
@@ -304,6 +310,8 @@ def _apply_image_defaults(
         index = 0
     if index > 0:
         info["image_index"] = index
+    else:
+        info.pop("image_index", None)
     return payload
 
 
@@ -701,7 +709,11 @@ class WorkflowController:
         if payload is None:
             payload = {}
             warnings.append("未找到业务配置文件，全部使用界面设置")
-        payload = _apply_image_defaults(payload, self._settings())
+        payload = _apply_image_defaults(
+            payload,
+            self._settings(),
+            override=not _config_is_explicit(config_path),
+        )
         excluded_names = self._merged_excluded_names(payload)
         try:
             disks = tuple(self._service.scan_protected_disks(excluded_names))

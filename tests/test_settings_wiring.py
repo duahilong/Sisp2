@@ -353,22 +353,36 @@ def test_settings_excluded_names_hide_disks_at_start() -> None:
 
 
 def test_default_system_image_from_settings() -> None:
-    wf = _controller({"sysWim": r"D:\images\win11.wim", "imageDefaultIndex": 3})
+    wf = _controller({"sysWim": r"D:\\sisp-test\\test.wim", "imageDefaultIndex": 3})
     wf.start(None, dry_run=True)
     payload = wf.session.config_payload
-    assert payload["image_info"]["image_path"] == r"D:\images\win11.wim"
+    assert payload["image_info"]["image_path"] == r"D:\\sisp-test\\test.wim"
     assert payload["image_info"]["image_index"] == 3
 
 
-def test_config_image_wins_over_settings_default() -> None:
+def test_settings_image_overrides_config_when_config_not_explicit() -> None:
+    """界面设置优先时，sysWim 必须覆盖配置里的占位镜像路径。
+
+    模板里写的是占位路径（``json/win11.example.json``），如果只“补缺失”，
+    用户在设置页填了真镜像也会一直挂着「镜像文件不存在」的阻断。
+    """
     wf = _controller(
-        {"sysWim": r"D:\imagesallback.wim", "imageDefaultIndex": 3},
-        payload={"image_info": {"image_path": r"D:\images\config.wim", "image_index": 1}},
+        {"sysWim": r"D:\\sisp-test\\test.wim", "imageDefaultIndex": 1},
+        payload={"image_info": {"image_path": r"D:\\images\\win11.wim", "image_index": 3}},
     )
     wf.start(None, dry_run=True)
     info = wf.session.config_payload["image_info"]
-    assert info["image_path"] == r"D:\images\config.wim"
+    assert info["image_path"] == r"D:\\sisp-test\\test.wim"
     assert info["image_index"] == 1
+
+
+def test_config_image_wins_when_config_explicit() -> None:
+    wf = _controller(
+        {"sysWim": r"D:\\sisp-test\\test.wim"},
+        payload={"image_info": {"image_path": r"D:\\images\\from-config.wim"}},
+    )
+    wf.start("preset.json", dry_run=True)
+    assert wf.session.config_payload["image_info"]["image_path"] == r"D:\\images\\from-config.wim"
 
 
 def test_image_default_index_zero_keeps_dism_default() -> None:
