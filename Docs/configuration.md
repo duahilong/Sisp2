@@ -37,7 +37,7 @@ Sisp2 有两类配置：业务配置描述装机输入；界面设置保存 GUI 
 
 | 字段 | 默认值 | 校验/已确认行为 |
 |---|---:|---|
-| `language` | `zh-CN` | `zh-CN` / `en-US`；只做持久化，界面文案目前固定为简体中文 |
+| `language` | `zh-CN` | `zh-CN` / `en-US`；界面文案固定为简体中文，但会同步页面 `lang` 属性（影响拼写检查/朗读/字体回退） |
 | `theme` | `light` | `light` / `dark` / `system`；读取后与设置页修改时立即切换 `data-theme` |
 | `density` | `comfortable` | `compact` / `comfortable`；切换 `data-density`，紧凑模式收紧卡片内边距、表格行距与字号 |
 | `rememberWindow` | `true` | 布尔值；关窗时把窗口位置/大小写入设置文件同目录的 `window.json`，关闭该开关则不保存也不恢复 |
@@ -61,7 +61,7 @@ Sisp2 有两类配置：业务配置描述装机输入；界面设置保存 GUI 
 
 CLI 加 `--settings <path>` 后，上表的安全开关（`protectSystemDisk`、`blockUnverified`）、执行器可选项（`sysTemp`、`sysUnattend`、`sysDrivers`、`sysBoot`）、外部工具与系统文件路径同样生效，运行前检查会多出「外部工具可用性检查」「设置路径有效性检查」两项。
 
-仍然只做持久化的字段：`language`（界面文案未做多语言）。其余字段均已接入运行时。
+`language` 只影响页面 `lang` 属性与持久化，未做多语言文案；其余字段均已接入运行时。
 
 生效时机分三档：界面外观（`theme`、`density`）与安全开关（`protectSystemDisk`、`blockUnverified`、`typeToConfirm`）保存后立即生效；`confirmBeforeStart` 是界面交互开关，下一次提交/确认就读新值；日志器相关（`logDir`、`logLevel`）在进程启动时装配，改动下次启动生效（`logRetentionDays` 的清理也发生在启动时）。
 

@@ -727,7 +727,7 @@ input[type="radio"] { accent-color: var(--accent); }
   var FIELD_HINTS = {
     theme: '选择「跟随系统」时按操作系统的深浅色自动切换，改完立即生效。',
     density: '紧凑模式收紧内边距与字号，改完立即生效。',
-    language: '目前只有简体中文文案；选 English 只会保存设置，不会切换界面文本。',
+    language: '界面文案目前只有简体中文；选 English 会把页面 lang 标成 en-US（影响拼写检查/朗读），文案本身不切换。',
     dataDefaultGb: '业务配置未指定 D 盘大小时使用；auto 表示使用硬盘剩余空间。',
     dryRunByDefault: '开启后即使不勾选演练，启动时也强制 dry-run。',
     protectSystemDisk: '开启后系统盘/启动盘/包含系统盘符的盘不可选；执行层还会再判一次。',
@@ -1762,6 +1762,13 @@ input[type="radio"] { accent-color: var(--accent); }
     document.documentElement.setAttribute('data-density', value);
   }
 
+  // 界面语言：文案目前只有简体中文，但 lang 属性会跟着设置走，
+  // 让 WebView2 的拼写检查/朗读/字体回退用对语言。
+  function applyLanguage(language) {
+    var value = language === 'en-US' ? 'en-US' : 'zh-CN';
+    document.documentElement.setAttribute('lang', value);
+  }
+
   function fieldControl(key, value) {
     var label = FIELD_LABELS[key] || key;
     var hint = FIELD_HINTS[key] || '';
@@ -1879,6 +1886,7 @@ input[type="radio"] { accent-color: var(--accent); }
     };
     applyTheme(state.settings.theme);
     applyDensity(state.settings.density);
+    applyLanguage(state.settings.language);
     renderSettings();
     updateSaveState();
   }
@@ -2204,6 +2212,7 @@ input[type="radio"] { accent-color: var(--accent); }
         var key = target && target.getAttribute ? target.getAttribute('data-key') : null;
         if (key === 'theme') { applyTheme(target.value); }
         if (key === 'density') { applyDensity(target.value); }
+        if (key === 'language') { applyLanguage(target.value); }
         updateSaveState();
       });
       settingsBox.addEventListener('click', function (event) {
