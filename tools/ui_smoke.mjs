@@ -15,7 +15,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -29,10 +29,14 @@ const URL_ = argOf('url', 'http://127.0.0.1:8901/');
 const OUT = argOf('out', 'build/shots');
 // 端口默认随机抽一个：固定端口一旦有残留的 headless Chrome 占着，就会连到上一轮的浏览器上。
 const PORT = Number(argOf('port', String(9300 + Math.floor(Math.random() * 600))));
-const CHROME = argOf(
-  'chrome',
+// 自动找一个 Chromium 内核的浏览器：开发机上通常是 Chrome，干净的测试机可能只有 Edge。
+const BROWSER_CANDIDATES = [
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
-);
+  'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+];
+const CHROME = argOf('chrome', BROWSER_CANDIDATES.find((path) => existsSync(path)) || BROWSER_CANDIDATES[0]);
 const WIDTH = Number(argOf('width', '1440'));
 const HEIGHT = Number(argOf('height', '900'));
 
@@ -124,6 +128,14 @@ async function main() {
   );
 
   const problems = [];
+  // 浏览器起不来（路径不对/没装）时直接给一句人话，别甩一棵 spawn 堆栈。
+  chrome.on('error', (error) => {
+    console.error(JSON.stringify({
+      ok: false,
+      problems: [`起不来浏览器：${CHROME}（${error.message}）`],
+    }, null, 2));
+    process.exit(1);
+  });
   let client;
   try {
     await waitForHttp(`http://127.0.0.1:${PORT}/json/version`);
