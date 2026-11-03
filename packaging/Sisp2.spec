@@ -42,7 +42,27 @@ GUI_HIDDEN = UVICORN_HIDDEN + [
     "webview.platforms.edgechromium",
 ]
 
-EXCLUDES = ["tkinter", "pytest", "_pytest", "tests", "PyInstaller"]
+EXCLUDES = [
+    "tkinter",
+    "pytest",
+    "_pytest",
+    "tests",
+    "PyInstaller",
+    # pywebview 在 Windows 上只用 winforms + edgechromium，其他后端不打进包
+    "PyQt5",
+    "PyQt6",
+    "PySide2",
+    "PySide6",
+    "gi",
+    "cefpython3",
+    "sip",
+    # 本工具一行都不用、但会被构建机上无关的包拖进来的大件；不排掉的话
+    # 同一份源码在“装了 numpy/Pillow 的机器”上会打出 57 MB，干净机器只有 18 MB
+    "numpy",
+    "PIL",
+    "tzdata",
+    "bcrypt",
+]
 
 COMMON = dict(
     pathex=[ROOT],
@@ -61,16 +81,11 @@ gui = Analysis(
 
 gui_pyz = PYZ(gui.pure)
 
-# 构建模式：默认 onefile（单个 exe，启动时解包到 %TEMP%）；
-# 设 ``SISP2_BUILD_MODE=onedir`` 则产出目录版（不解包，启动快数倍）。
-# 由 ``packaging/build.py --onedir`` 设置，不直接手改。
-ONEDIR = os.environ.get("SISP2_BUILD_MODE", "").strip().lower() == "onedir"
-
 gui_exe = EXE(
     gui_pyz,
     gui.scripts,
-    gui.binaries if ONEDIR else [],
-    gui.datas if ONEDIR else [],
+    gui.binaries,
+    gui.datas,
     [],
     name="Sisp2",
     debug=False,
@@ -86,16 +101,4 @@ gui_exe = EXE(
     entitlements_file=None,
     icon=ICON,
     version=VERSION_FILE,
-    exclude_binaries=ONEDIR,
 )
-
-if ONEDIR:
-    # onedir：exe 只是引导器，依赖与资源放在 exe 同目录（_internal/）
-    Sisp2 = COLLECT(
-        gui_exe,
-        gui.binaries,
-        gui.datas,
-        strip=False,
-        upx=False,
-        name="Sisp2",
-    )

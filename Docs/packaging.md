@@ -23,8 +23,6 @@ python packaging/build.py
 ```
 
 - `python packaging/build.py --no-clean`：跳过 PyInstaller `--clean`，快一些；
-- `python packaging/build.py --onedir`：产出目录版 `dist/Sisp2/`（`Sisp2.exe` + `_internal/`），
-  **不解包、启动快数倍**，代价是分发时要整目录带走（可再用 Inno Setup 打成安装包）；
 - `python packaging/build.py --clean-only`：只清理 `dist/` 与 `build/pyinstaller/`；
 - 图标缺失时会自动调用 `packaging/make_icon.py` 生成 `packaging/sisp2.ico`；
 - 版本号只有 `app/version.py` 一个来源，`packaging/version_info.txt` 必须与之
@@ -109,16 +107,19 @@ python packaging/build.py
 
 ## 启动耗时
 
-onefile 与 onedir 的差别只在“要不要解包”，计时方式统一为：
-从进程创建到 `GET /health` 返回 200（`--serve --dry-run`），VM 上跑三次取中位数。
+单文件 exe 每次启动都要把包解到 `%TEMP%\_MEIxxxxxx`，所以首启比源码运行慢。
+计时口径：从进程创建到 `GET /health` 返回 200（`--serve --dry-run`）。
 
-| 模式 | 冷启（首次，缓存空） | 热启（紧接着再启动） |
-| --- | --- | --- |
-| onefile `dist/Sisp2.exe` | 待测 | 待测 |
-| onedir `dist/Sisp2/Sisp2.exe` | 待测 | 待测 |
+| 场景 | 观察值 |
+| --- | --- |
+| 单文件 exe（本机 Python 3.13.2 / PyInstaller 6.12） | 约 2.6–2.7 s（同一台机器上连续两次启动） |
+| 目录版（曾试验过，现已回退） | 约 0.6 s |
+
+> 目录版（onedir）曾实现并在本机验证过启动更快，但为了先保证「单文件 exe 稳定可运行」
+> 已回退；需要时可按 `Docs/packaging.md` 的历史提交重新引入（`54bd719`）。
 
 桌面窗口模式（不带 `--serve`）还要额外付出 pywebview + WebView2 初始化与建窗的时间，
-比上表再慢一档；需要精确数字时用同一套方法量（把探测目标换成窗口出现）。
+比上表再慢一档。
 
 ## 已知限制
 
@@ -128,6 +129,11 @@ onefile 与 onedir 的差别只在“要不要解包”，计时方式统一为�
   `%TEMP%\_MEIxxxx`，再加载解释器与 FastAPI，杀软还会扫一遍新写出的文件。
   要快就 `--onedir`（不解包），或把 exe 交给安装器分发；`--runtime-tmpdir` 换到
   固定 SSD 路径能省一点，但省不掉解包本身。具体耗时见上面「启动耗时」一节。
+- **个别受策略管理的目录里，单文件 exe 起不来**：现象是弹窗
+  `Could not create temporary directory!`（PyInstaller bootloader 无法在 `%TEMP%`
+  建解包目录）。把**同一个 exe** 换个目录（例如 `D:\sisp2-release\`）就能正常运行，
+  说明与产物本身无关，而是那台机器的目录/沙箱策略。遇到时先换目录，再考虑给
+  `%TEMP%` 加白名单。
 - **`app.log` 是唯一日志出口**：`--windowed` 没有控制台，`print` 的内容会进
   `os.devnull`，排查问题请看设置里 `logDir` 下的 `app.log`。
 - **不能跨平台**：产物含 Windows 专属的 WebView2 / WinForms 组件。

@@ -106,15 +106,3 @@ def test_make_icon_produces_valid_ico(tmp_path: Path) -> None:
     bi_size, bi_width, bi_height = struct.unpack("<Iii", raw[offset : offset + 12])
     assert bi_size == 40
     assert (bi_width, bi_height) == (256, 512)  # 高度含 AND 掩码
-
-
-def test_spec_supports_onedir_build() -> None:
-    """--onedir 要真的能出目录版：spec 里必须有 COLLECT 与开关。"""
-    spec = (PACKAGING / "Sisp2.spec").read_text(encoding="utf-8")
-    assert "SISP2_BUILD_MODE" in spec
-    assert "COLLECT(" in spec
-    assert "exclude_binaries=ONEDIR" in spec
-
-    build = (PACKAGING / "build.py").read_text(encoding="utf-8")
-    assert "--onedir" in build
-    assert "SISP2_BUILD_MODE" in build
