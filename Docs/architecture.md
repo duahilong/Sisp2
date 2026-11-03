@@ -3,7 +3,8 @@
 ## 分层
 
 - 入口：`app/cli.py` 与 `app/gui_web/main.py`。CLI 构造控制器并执行完整命令行流程；GUI 装配 WebApi、工作流和 FastAPI。
-- HTTP/UI：`app/gui_web/server.py` 将 REST/SSE 转换为 WebApi 调用；`api.py` 包装响应信封、转发工作流并缓冲事件；`ui/index.html` 为单文件前端。
+- HTTP/UI：`app/gui_web/server.py` 将 REST/SSE 转换为 WebApi 调用；`api.py` 包装响应信封、转发工作流并缓冲事件；`ui/index.html` 是只含布局骨架的薄壳，界面由 `ui/css/app.css` 与 `ui/js/*.js`（ES 模块，`/static` 托管）组成。
+- 专项能力：`modules/partition`（diskpart 分区/格式化脚本、保护分区校验）、`modules/boot`（ESP 扫描 + `bcdboot` 修复）、`modules/image`（WIM/ESD/SWM/ISO 索引探测，ISO 必定卸载）都是只被 REST 层调用的独立模块，写盘仍复用服务层的闸门。
 - 应用：`application/workflow.py` 管理会话、预检结果、扫描快照、计划及确认；`service.py` 提供扫描、配置检查、盘符分配与安全执行门；`jobs.py` 管理状态、调度、取消和事件。
 - 执行与能力：`real_runner.py` 调用 Windows 系统工具；`preflight.py` 读配置并做启动检查；磁盘扫描、设置、盘符分配等位于 `modules/` 与 `drive_letters.py`。
 
@@ -19,6 +20,16 @@
 ## CLI 与 GUI 的模式差异
 
 `SispService` 构造默认 `dry_run=True`，但入口会覆盖其策略。CLI 只有传 `--dry-run` 才在演练分支停止提交；不传时意图进入真实执行，还要求 `--allow-disks`、管理员权限及其他检查。GUI `main.py` 的有效 dry-run 为命令行 `--dry-run` 与 `dryRunByDefault` 的逻辑或；`WorkflowController` 会把构造时的 dry-run 锁定为硬上限，后续 `start()` / `prepare()` 只能降级为演练，不能升级为真实执行。GUI 无显式白名单时，真实模式下 `prepare()` 会把所选盘加入服务白名单。见[安全说明](security.md)。
+
+## 前端结构
+
+三个视图（主页面、系统安装、设置）+ 一个外壳，不引入框架、也没有构建步骤：
+
+- `js/state.js` 是唯一可变状态：磁盘快照、选中项、设置草稿、任务、执行计划、向导进度；写状态后调 `notify()`。
+- `js/view-*.js` 只读状态并返回/写入 DOM；`js/shell.js` 包掉菜单、工具栏、日志坞、状态栏、toast、弹窗、主题与密度；`js/derive.js` 是纯函数层（容量格式化、分区地图切片、盘符建议、大小校验），能在 `node` 里直接跑。
+- 主页面只读：分区地图与明细表都来自 `GET /api/disks` 的快照，不允许在这里发起写盘。
+- 写盘只有一条链路：`POST /api/prepare` → `submit` → `confirm`。界面不自己拼 diskpart/dism 命令，也不自己算盘符：向导第 4 步显示的盘符来自 `plan.drive_letters`，第 2 步填的大小只是 `prepare` 的入参，后端 `_check_partition_fit` 还会再验一次。
+- 进度不是前端“估”的：执行器通过 `on_step` 回调把每个步骤的状态交给 `JobManager`，变成 `job.step` 事件和 `Job.progress`（详见 [Web API 文档](web-api.md)）。
 
 ## 状态与部署
 

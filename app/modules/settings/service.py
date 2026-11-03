@@ -38,12 +38,18 @@ DEFAULTS: dict[str, Any] = {
     "theme": "light",
     "density": "comfortable",
     "rememberWindow": True,
+    "autoRefresh": True,
+    "startView": "main",
     # 安装默认值
     "confirmBeforeStart": True,
     "typeToConfirm": True,
+    "confirmDelete": True,
     "sysDefaultGb": 120,
     "dataDefaultGb": "auto",
+    "defaultFs": "NTFS",
     # 外部程序（空 = 用系统自带或 PATH 里的）
+    "extEnabled": True,
+    "extConfirm": False,
     "extDiskpart": "",
     "extDism": "",
     "extWimlib": "",
@@ -93,11 +99,15 @@ _BUILTIN_COMMANDS: dict[str, tuple[str, ...]] = {
 
 _BOOL_KEYS = {
     "rememberWindow",
+    "autoRefresh",
     "confirmBeforeStart",
     "typeToConfirm",
+    "confirmDelete",
     "protectSystemDisk",
     "dryRunByDefault",
     "blockUnverified",
+    "extEnabled",
+    "extConfirm",
 }
 
 _ENUM_KEYS: dict[str, tuple[str, ...]] = {
@@ -105,6 +115,8 @@ _ENUM_KEYS: dict[str, tuple[str, ...]] = {
     "theme": ("light", "dark", "system"),
     "density": ("compact", "comfortable"),
     "logLevel": ("debug", "info", "warn", "error"),
+    "startView": ("main", "install", "settings"),
+    "defaultFs": ("NTFS", "exFAT"),
 }
 
 _INT_RANGES: dict[str, tuple[int, int]] = {
@@ -347,6 +359,8 @@ class SettingsStore:
             "efi_size_mb": 100,
             "c_size_gb": sys_gb,
             "data_size_gb": data_size,
+            # 数据分区的文件系统：diskpart ``format quick fs=`` 直接用它。
+            "data_fs": str(self._data.get("defaultFs") or "NTFS"),
         }
 
     def to_dict(self) -> dict[str, Any]:

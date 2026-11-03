@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import threading
@@ -43,7 +44,22 @@ from app.models import WorkerResult
 _LOGGER = logging.getLogger(__name__)
 
 # 回调签名：executor(spec, cancel_event) -> WorkerResult
-Executor = Callable[["JobSpec", threading.Event], WorkerResult]
+# 执行器也可以额外接受 ``on_step`` 关键字参数来上报进度；
+# 只收两个参数的旧执行器继续可用（见 ``JobManager._execute``）。
+Executor = Callable[..., WorkerResult]
+
+# 进度回调能看到的状态：running 表示“这一步正在做”，其余表示“这一步结束了”。
+STEP_RUNNING = "running"
+
+
+def _step_total() -> int:
+    """一次真实写盘的总步数（六步）；真实执行器不可用时退回 6。"""
+    try:
+        from app.application.real_runner import STEP_TITLES
+
+        return len(STEP_TITLES)
+    except Exception:  # noqa: BLE001 - 进度显示不能拖死任务
+        return 6
 
 
 def _now() -> str:
@@ -153,6 +169,14 @@ class Job:
         self.finished_at: str | None = None
         self.cancel_reason: str | None = None
         self.cancel_event = threading.Event()
+        # 进度：只放小字段，界面直接画进度条/阶段列表。
+        self.progress: dict[str, Any] = {
+            "total": 0,
+            "completed": [],
+            "current": None,
+            "percent": 0,
+            "message": "",
+        }
         # 同一任务只允许被 confirm_batch 认领一次，防止双击/重试导致重复写同一块盘。
         self.scheduled = False
 
@@ -183,6 +207,7 @@ class Job:
             "updated_at": self.updated_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "progress": dict(self.progress),
         }
 
 
@@ -415,10 +440,51 @@ class JobManager:
         finally:
             semaphore.release()
 
+    def _make_reporter(self, job: Job) -> Callable[..., None]:
+        """构造 ``on_step`` 回调：更新 ``Job.progress`` 并广播 ``job.step``。"""
+        total = _step_total()
+
+        def report(key: str, status: str, message: str = "") -> None:
+            with self._lock:
+                completed = list(job.progress.get("completed") or [])
+                if status == STEP_RUNNING:
+                    current: str | None = key
+                else:
+                    current = None
+                    if key not in completed:
+                        completed.append(key)
+                percent = int(round(len(completed) * 100 / total)) if total else 0
+                job.progress = {
+                    "total": total,
+                    "completed": completed,
+                    "current": current,
+                    "percent": min(percent, 100),
+                    "message": message,
+                }
+                job.updated_at = _now()
+                snapshot = dict(job.progress)
+            self._emit(
+                "job.step",
+                job,
+                key=key,
+                status=status,
+                message=message,
+                progress=snapshot,
+            )
+
+        return report
+
     def _execute(self, job: Job) -> WorkerResult:
         executor = self._executor or self._default_executor()
         if executor is None:
             raise RuntimeError("No executor")
+        reporter = self._make_reporter(job)
+        try:
+            accepts_step = "on_step" in inspect.signature(executor).parameters
+        except (TypeError, ValueError):
+            accepts_step = False
+        if accepts_step:
+            return executor(job.spec, job.cancel_event, on_step=reporter)
         return executor(job.spec, job.cancel_event)
 
     def _default_executor(self) -> Executor | None:
@@ -443,6 +509,10 @@ class JobManager:
             job.error = error
             job.finished_at = _now()
             job.updated_at = job.finished_at
+            if status == JobStatus.OK:
+                job.progress = {**job.progress, "current": None, "percent": 100}
+            else:
+                job.progress = {**job.progress, "current": None}
         self._emit(
             "job.finished",
             job,

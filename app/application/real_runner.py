@@ -44,6 +44,44 @@ from app.models import STEP_FAILED, STEP_OK, STEP_SKIPPED, StepResult, WorkerRes
 
 _LOGGER = logging.getLogger(__name__)
 
+# diskpart ``format quick fs=`` 只认小写全名；界面存的是 NTFS / exFAT。
+_FS_TOKENS = {"ntfs": "ntfs", "exfat": "exfat", "fat32": "fat32"}
+
+
+def data_fs_token(payload: Mapping[str, Any]) -> str:
+    """数据分区文件系统：``partition_info.data_fs`` → diskpart 参数。
+
+    非法/缺失时退回 ``ntfs``（与历史行为一致），绝不把用户输入直接拼进脚本。
+    """
+    info = payload.get("partition_info") if isinstance(payload, Mapping) else None
+    raw = str((info or {}).get("data_fs") or "NTFS").strip().lower()
+    return _FS_TOKENS.get(raw, "ntfs")
+
+
+class _StepSink(list):
+    """``list[StepResult]``：每 append 一步就向外报一次进度。
+
+    六个步骤的代码路径散落在 ``_run_steps`` 里，用列表子类收集进度比在每个
+    append 后面手写回调更不容易漏；``extend`` 也走 append，保证失败分支同样上报。
+    """
+
+    def __init__(self, reporter: Any = None) -> None:
+        super().__init__()
+        self._reporter = reporter
+
+    def append(self, step: Any) -> None:  # type: ignore[override]
+        super().append(step)
+        if self._reporter is None:
+            return
+        try:
+            self._reporter(step.key, step.status, step.message)
+        except Exception:  # noqa: BLE001 - 进度回调失败不能影响写盘
+            _LOGGER.warning("进度回调失败", exc_info=True)
+
+    def extend(self, items: Any) -> None:  # type: ignore[override]
+        for item in items:
+            self.append(item)
+
 DISKPART_TIMEOUT = 600.0
 LETTER_RELEASE_TIMEOUT = 120.0
 DISM_TIMEOUT = 3 * 3600.0
@@ -52,7 +90,7 @@ VERIFY_TIMEOUT = 120.0
 
 # 与 service.py 的分区顺序保持一致：EFI → Windows → Data。
 _STEP_ORDER = ("efi", "windows", "data")
-_STEP_TITLES = {
+STEP_TITLES = {
     "efi": "创建 EFI 分区",
     "windows": "创建 Windows 分区",
     "data": "创建数据分区",
@@ -211,10 +249,21 @@ class WindowsDiskRunner:
         self.powershell = powershell or self._which("powershell.exe")
 
     # ------------------------------------------------------------------ 入口
-    def __call__(self, spec: Any, cancel_event: threading.Event) -> WorkerResult:
-        return self.run(spec, cancel_event)
+    def __call__(
+        self,
+        spec: Any,
+        cancel_event: threading.Event,
+        on_step: Any = None,
+    ) -> WorkerResult:
+        return self.run(spec, cancel_event, on_step=on_step)
 
-    def run(self, spec: Any, cancel_event: threading.Event | None = None) -> WorkerResult:
+    def run(
+        self,
+        spec: Any,
+        cancel_event: threading.Event | None = None,
+        *,
+        on_step: Any = None,
+    ) -> WorkerResult:
         cancel_event = cancel_event or threading.Event()
         disk_number = _to_int(getattr(spec, "disk_number", None)) or 0
         payload = dict(getattr(spec, "config_payload", None) or {})
@@ -229,12 +278,13 @@ class WindowsDiskRunner:
         options = dict(getattr(spec, "runner_options", None) or {})
         env = self._runtime_env(options, log)
 
-        steps: list[StepResult] = []
+        steps: list[StepResult] = _StepSink(on_step)
         failure: str | None = None
         image_path = self._image_path(payload)
 
         log.write(f"任务开始：disk={disk_number} dry_run=False letters={letters}")
         log.write(f"配置：{json.dumps(payload, ensure_ascii=False)[:2000]}")
+        self._notify(on_step, "efi", "running", "清盘并重建分区表")
 
         # 前置条件：缺工具/缺盘符/缺镜像都在动盘之前拦住。
         missing = [
@@ -249,7 +299,7 @@ class WindowsDiskRunner:
         if missing:
             failure = f"缺少系统工具：{'、'.join(missing)}（真实写盘需要管理员环境里的这些命令）"
             for key in _STEP_ORDER + ("image", "boot"):
-                steps.append(StepResult(key=key, title=_STEP_TITLES[key], status=STEP_SKIPPED, message="前置条件不满足"))
+                steps.append(StepResult(key=key, title=STEP_TITLES[key], status=STEP_SKIPPED, message="前置条件不满足"))
         else:
             # tracker 用来保证：只要 diskpart 开始动盘，就尝试释放 EFI 盘符，
             # 避免隐藏 EFI 卷的盘符在下次 clean 后变成幽灵盘符。
@@ -266,6 +316,7 @@ class WindowsDiskRunner:
                     tracker=tracker,
                     options=options,
                     env=env,
+                    on_step=on_step,
                 )
             finally:
                 if tracker["diskpart_ran"]:
@@ -309,6 +360,16 @@ class WindowsDiskRunner:
             duration_seconds=duration,
         )
 
+    @staticmethod
+    def _notify(on_step: Any, key: str, status: str, message: str = "") -> None:
+        """上报“某一步正在执行”；进度回调可选，异常一律吞掉。"""
+        if on_step is None:
+            return
+        try:
+            on_step(key, status, message)
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("进度回调失败", exc_info=True)
+
     # ------------------------------------------------------------------ 六步
     def _run_steps(
         self,
@@ -323,6 +384,7 @@ class WindowsDiskRunner:
         tracker: dict[str, bool] | None = None,
         options: Mapping[str, Any] | None = None,
         env: Mapping[str, str] | None = None,
+        on_step: Any = None,
     ) -> tuple[list[StepResult], str | None]:
         options = dict(options or {})
         temp_dir = _existing_dir(options.get("temp_dir"))
@@ -350,6 +412,7 @@ class WindowsDiskRunner:
             data_gb=data_gb,
             letters=letters,
             log=log,
+            data_fs=data_fs_token(payload),
         )
         if cancel_event.is_set():
             return steps, "任务已取消（未开始写盘）"
@@ -362,7 +425,7 @@ class WindowsDiskRunner:
             steps.append(
                 StepResult(
                     key="efi",
-                    title=_STEP_TITLES["efi"],
+                    title=STEP_TITLES["efi"],
                     status=STEP_FAILED,
                     message=f"无法执行 diskpart：{exc}",
                 )
@@ -373,7 +436,7 @@ class WindowsDiskRunner:
             steps.extend(
                 StepResult(
                     key=key,
-                    title=_STEP_TITLES[key],
+                    title=STEP_TITLES[key],
                     status=STEP_FAILED if key == "efi" else STEP_SKIPPED,
                     message=(
                         f"diskpart 失败（退出码 {code}）：{_tail(output, 800)}"
@@ -391,7 +454,7 @@ class WindowsDiskRunner:
             steps.append(
                 StepResult(
                     key=key,
-                    title=_STEP_TITLES[key],
+                    title=STEP_TITLES[key],
                     status=STEP_OK,
                     message=f"已创建并格式化（{size_text}，盘符 {letters[key]}）",
                     details={"letter": letters[key], "size": size_text},
@@ -400,9 +463,10 @@ class WindowsDiskRunner:
 
         # 4：应用镜像
         if cancel_event.is_set():
-            steps.append(StepResult(key="image", title=_STEP_TITLES["image"], status=STEP_SKIPPED, message="任务已取消"))
+            steps.append(StepResult(key="image", title=STEP_TITLES["image"], status=STEP_SKIPPED, message="任务已取消"))
             return steps, "任务已取消（分区已建好，镜像未应用）"
 
+        self._notify(on_step, "image", "running", "应用镜像（dism）")
         image_index = _to_int((payload.get("image_info") or {}).get("image_index")) or 1
         target = f"{letters['windows']}:\\"
         code, output, elapsed = self._apply_image(image_path, image_index, target, log, options=options, env=env)
@@ -410,19 +474,19 @@ class WindowsDiskRunner:
             steps.append(
                 StepResult(
                     key="image",
-                    title=_STEP_TITLES["image"],
+                    title=STEP_TITLES["image"],
                     status=STEP_FAILED,
                     message=f"dism 失败（退出码 {code}）：{_tail(output, 800)}",
                     details={"exit": code, "image": image_path, "index": image_index, "seconds": round(elapsed, 1)},
                 )
             )
-            steps.append(StepResult(key="boot", title=_STEP_TITLES["boot"], status=STEP_SKIPPED, message="镜像未应用成功，跳过引导"))
+            steps.append(StepResult(key="boot", title=STEP_TITLES["boot"], status=STEP_SKIPPED, message="镜像未应用成功，跳过引导"))
             return steps, f"应用镜像失败（dism 退出码 {code}）"
 
         steps.append(
             StepResult(
                 key="image",
-                title=_STEP_TITLES["image"],
+                title=STEP_TITLES["image"],
                 status=STEP_OK,
                 message=f"已应用 {Path(image_path).name}（索引 {image_index}）到 {target}",
                 details={"image": image_path, "index": image_index, "seconds": round(elapsed, 1), "tail": _tail(output, 1200)},
@@ -431,15 +495,16 @@ class WindowsDiskRunner:
 
         # 5：写引导
         if cancel_event.is_set():
-            steps.append(StepResult(key="boot", title=_STEP_TITLES["boot"], status=STEP_SKIPPED, message="任务已取消"))
+            steps.append(StepResult(key="boot", title=STEP_TITLES["boot"], status=STEP_SKIPPED, message="任务已取消"))
             return steps, "任务已取消（镜像已写入，引导未写）"
 
+        self._notify(on_step, "boot", "running", "写入 UEFI 引导（bcdboot）")
         code, output, elapsed = self._write_boot(letters, log, options=options, env=env)
         if code != 0:
             steps.append(
                 StepResult(
                     key="boot",
-                    title=_STEP_TITLES["boot"],
+                    title=STEP_TITLES["boot"],
                     status=STEP_FAILED,
                     message=f"bcdboot 失败（退出码 {code}）：{_tail(output, 800)}",
                     details={"exit": code, "seconds": round(elapsed, 1)},
@@ -450,7 +515,7 @@ class WindowsDiskRunner:
         steps.append(
             StepResult(
                 key="boot",
-                title=_STEP_TITLES["boot"],
+                title=STEP_TITLES["boot"],
                 status=STEP_OK,
                 message=f"已写入 UEFI 引导（{letters['efi']}: ← {letters['windows']}:\\Windows）",
                 details={"exit": code, "seconds": round(elapsed, 1), "tail": _tail(output, 800)},
@@ -458,6 +523,7 @@ class WindowsDiskRunner:
         )
 
         # 6：校验
+        self._notify(on_step, "verify", "running", "校验分区与引导")
         steps.append(self._verify(disk_number, log))
         if steps[-1].failed:
             return steps, "分区校验失败"
@@ -473,6 +539,7 @@ class WindowsDiskRunner:
         data_gb: int | None,
         letters: Mapping[str, str],
         log: _CommandLog,
+        data_fs: str = "ntfs",
     ) -> list[str]:
         lines = [
             f"select disk {disk_number}",
@@ -485,7 +552,7 @@ class WindowsDiskRunner:
             "format quick fs=ntfs label=Windows",
             f"assign letter={letters['windows']}",
             "create partition primary" if not data_gb else f"create partition primary size={data_gb * 1024}",
-            "format quick fs=ntfs label=Data",
+            f"format quick fs={data_fs} label=Data",
             f"assign letter={letters['data']}",
             "exit",
         ]
@@ -620,7 +687,7 @@ class WindowsDiskRunner:
         return env
 
     def _verify(self, disk_number: int, log: _CommandLog) -> StepResult:
-        title = _STEP_TITLES["verify"]
+        title = STEP_TITLES["verify"]
         if not self.powershell:
             return StepResult(
                 key="verify",

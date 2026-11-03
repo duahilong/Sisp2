@@ -12,7 +12,32 @@ python -m pytest tests/ -q
 - 测试使用替身扫描器/执行器和注入依赖，不碰真实磁盘；
 - SSE 测试会在后台线程启动真实 uvicorn（随机空闲端口），因此依赖 `uvicorn`；
 - 覆盖重点：任务状态机、重复提交、取消、演练硬上限、盘符规划、设置校验与 BOM、CLI 输出、SSE 帧。
-- 当前基线：106 passed（本机 Python 3.14；专用 VM 上 Python 3.15.2 同为 106 passed）。
+- 当前基线：165 passed（本机 Python 3.14；专用 VM 上 Python 3.15.2 同口径）。其中前端相关三组：
+  `tests/test_ui_assets.py`（资源引用、薄壳、设置页字段对账、CSS 与纯函数约定）、
+  `tests/test_partition_boot_image.py`（分区/引导/镜像三个模块的纯逻辑）、
+  `tests/test_web_api.py` 新增的静态托管、日志尾部、分区确认、会话模式等用例。
+
+## 1.1 前端：静态检查与浏览器冒烟
+
+前端没有构建步骤，所以检查也分两层：
+
+```powershell
+python tools/ui_check.py                                               # node --check + 引用 + derive.js 行为
+node tools/ui_smoke.mjs --url http://127.0.0.1:8765/ --out build/shots  # headless Chrome 走一遍
+```
+
+- `tools/ui_check.py`：每个 `ui/js/*.js` 过 `node --check`；`index.html` 里的 `/static/...`
+  引用必须存在；相对 `import` 必须能解析；把 `derive.js` 复制成 `.mjs` 在 node 里真实跑
+  一遍，断言容量格式化、分区切片、盘符建议、大小校验（含 EFI 预留）。
+  `tests/test_ui_assets.py::test_frontend_static_check` 会代调它。
+- `tools/ui_smoke.mjs`：CDP 直连 headless Chrome（不依赖 Playwright），依次走主页面、
+  四步向导、设置页、操作菜单和修复引导弹窗，收集 `Runtime.exceptionThrown` /
+  `Log.entryAdded`，截图 10 张，并对 `.dsel`/`.tgt`/`select[data-image]`/计划行数/
+  `#startBtn`/`.set-row` 做计数断言；**截图小于 20 KB 视为空白直接判失败**（曾经因为
+  `.fatal` 的 `display:flex` 盖掉了 `[hidden]`，整块遮罩把界面糊成纯背景色，十张截图
+  全是空白而且脚本还“通过”了）。
+- 两项都需要 PATH 里有 `node`；没有时 `ui_check.py` 打印跳过并以 0 退出，
+  `test_frontend_static_check` 用 `skipif` 跳过。
 
 ## 2. 专用 VM：只读与 dry-run
 
@@ -138,7 +163,7 @@ diskpart /s $env:TEMP\detach.txt
 ```powershell
 python packaging/build.py
 .\dist\Sisp2-CLI.exe --list
-.uild\smoke.py 8890        # 先起 .\dist\Sisp2.exe --serve --port 8890 --dry-run
+.build\smoke.py 8890        # 先起 .\dist\Sisp2.exe --serve --port 8890 --dry-run
 ```
 
 - 专用 VM 上用 Python 3.15.2 现打现测：`--list` / `--dry-run` / `--allow-disks 0`

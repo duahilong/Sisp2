@@ -29,15 +29,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+
+from app.resources import ui_path
 
 _LOGGER = logging.getLogger(__name__)
 
-UI_FILE = Path(__file__).resolve().parent / "ui" / "index.html"
+# 界面目录统一走 app/resources.py：源码、onefile（sys._MEIPASS）、onedir 都成立，
+# 不受 ``__file__`` 在冻结后指向哪里影响。
+UI_DIR = ui_path().parent
+UI_FILE = UI_DIR / "index.html"
 
 # Host 头里允许出现的主机名（不含端口）。
 LOOPBACK_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
@@ -85,6 +90,11 @@ def create_app(
             return await call_next(request)
 
     # ------------------------------------------------------------- 静态
+    # 前端拆成 ES 模块 + 样式表后由 StaticFiles 直接托管（同源，无需 CORS）。
+    # 目录不存在时（例如裁剪过的部署）跳过挂载，避免应用起不来。
+    if UI_DIR.is_dir():
+        app.mount("/static", StaticFiles(directory=str(UI_DIR)), name="static")
+
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def index() -> HTMLResponse:
         return HTMLResponse(UI_FILE.read_text(encoding="utf-8"))
@@ -101,7 +111,10 @@ def create_app(
     @app.post("/api/session")
     def start_session(body: dict[str, Any] | None = None) -> dict[str, Any]:
         body = body or {}
-        return api.start_session(body.get("config_path"), bool(body.get("dry_run")))
+        raw = body.get("dry_run")
+        return api.start_session(
+            body.get("config_path"), None if raw is None else bool(raw)
+        )
 
     @app.get("/api/disks")
     def refresh_disks() -> dict[str, Any]:
@@ -130,9 +143,55 @@ def create_app(
     def cancel(body: dict[str, Any] | None = None) -> dict[str, Any]:
         return api.cancel((body or {}).get("job_id"))
 
+    @app.get("/api/jobs")
+    def list_jobs() -> dict[str, Any]:
+        return api.list_jobs()
+
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str) -> dict[str, Any]:
         return api.get_job(job_id)
+
+    @app.get("/api/jobs/{job_id}/log")
+    def get_job_log(job_id: str, tail: int = 200) -> dict[str, Any]:
+        """任务日志尾部；只允许读日志目录里的 *.log（路径越界返回 E_PATH）。"""
+        return api.job_log(job_id, tail)
+
+    # ------------------------------------------------------------- 镜像探测
+    @app.post("/api/images")
+    def probe_images(body: dict[str, Any] | None = None) -> dict[str, Any]:
+        """列镜像目录（``directory``）或读取某个 WIM/ISO 的索引（``path``）。"""
+        payload = body or {}
+        return api.probe_images(payload.get("directory"), payload.get("path"))
+
+    # ------------------------------------------------------------- 引导修复
+    @app.get("/api/boot/report")
+    def boot_report() -> dict[str, Any]:
+        return api.boot_report()
+
+    @app.post("/api/boot/repair")
+    def boot_repair(body: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = body or {}
+        return api.boot_repair(
+            payload.get("disk_number"),
+            payload.get("identity"),
+            payload.get("dry_run"),
+        )
+
+    # ------------------------------------------------------------- 分区操作
+    @app.post("/api/partition/plan")
+    def partition_plan(body: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = body or {}
+        return api.partition_plan(payload.get("disk_number"), payload.get("actions"))
+
+    @app.post("/api/partition/execute")
+    def partition_execute(body: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = body or {}
+        return api.partition_execute(
+            payload.get("disk_number"),
+            payload.get("actions"),
+            payload.get("identity"),
+            payload.get("confirm_text"),
+        )
 
     # ------------------------------------------------------------- 事件：轮询兜底
     @app.post("/api/events/poll")

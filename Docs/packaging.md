@@ -35,7 +35,7 @@ python packaging/build.py
 
 | 内容 | 位置 | 说明 |
 | --- | --- | --- |
-| 界面 `index.html`、默认配置模板 | exe 内部资源 | 只读，随包发布 |
+| 界面 `ui/index.html` + `ui/css` + `ui/js`、默认配置模板 | exe 内部资源 | 只读，随包发布（spec 的 `DATAS` 必须整目录带上，否则 exe 只剩空壳） |
 | 业务配置 `json/win11.json` | **exe 同目录** | 首次运行自动从模板复制一份，之后可随意编辑 |
 | 设置 `settings.json` | `%APPDATA%\Sisp\` | 与源码运行完全一致，exe 升级不会丢 |
 | 窗口位置 `window.json` | `%APPDATA%\Sisp\` | 受 `rememberWindow` 控制 |

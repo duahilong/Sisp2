@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -43,6 +44,7 @@ from app.application.contracts import (
     format_size,
 )
 from app.models import STEP_SKIPPED, StepResult, WorkerResult
+from app.application.real_runner import data_fs_token
 from app.orchestrator import build_worker_disk_identity, identity_matches, is_strong_identity
 from app.preflight import load_config, resolve_config_path
 
@@ -52,6 +54,9 @@ _LOGGER = logging.getLogger(__name__)
 AVAILABLE_DRIVE_LETTERS = list("EFGHIJKLMNOPQRSTUVWXYZ")
 LETTERS_PER_DISK = 3
 DRIVE_LETTER_ROLES = ("efi", "windows", "data")
+
+# 进度回调签名：on_step(step_key, status, message)；status 取 app.models.STEP_*。
+StepReporter = Callable[..., None]
 
 POWERSHELL_TIMEOUT = 60.0
 BYTES_PER_MB = 1024 * 1024
@@ -83,6 +88,23 @@ $items = foreach ($disk in Get-Disk) {
 }
 @($items) | ConvertTo-Json -Depth 4 -Compress
 """
+
+
+def _call_runner(
+    runner: Callable[..., WorkerResult],
+    spec: Any,
+    cancel_event: threading.Event,
+    on_step: StepReporter | None,
+) -> WorkerResult:
+    """按执行器签名决定要不要传进度回调（兼容只收两个参数的旧执行器）。"""
+    if on_step is not None:
+        try:
+            accepts = "on_step" in inspect.signature(runner).parameters
+        except (TypeError, ValueError):
+            accepts = False
+        if accepts:
+            return runner(spec, cancel_event, on_step=on_step)
+    return runner(spec, cancel_event)
 
 
 def _text(value: Any) -> str | None:
@@ -411,11 +433,16 @@ class SispService:
         self,
         spec: Any,
         cancel_event: threading.Event | None = None,
+        on_step: StepReporter | None = None,
     ) -> WorkerResult:
         """执行（或演练）一个 ``JobSpec``。
 
         dry-run 只生成步骤预览；真实执行必须通过五道闸门，否则抛
         ``PermissionError``——失败信息会直接显示在任务状态里。
+
+        ``on_step(key, status, message)`` 是可选的进度回调：真实执行时由
+        ``WindowsDiskRunner`` 在每一步开始/结束时调用，界面据此画进度条；
+        不传就完全不感知进度（CLI 场景）。
         """
         if spec is None:
             raise ValueError("缺少任务输入 JobSpec")
@@ -424,7 +451,7 @@ class SispService:
         spec_dry_run = bool(getattr(spec, "dry_run", False))
 
         if spec_dry_run:
-            return self._dry_run_result(spec, disk_number, cancel_event)
+            return self._dry_run_result(spec, disk_number, cancel_event, on_step)
         if self.dry_run:
             # 明确拒绝，而不是悄悄降级成 dry-run：否则任务会显示“成功”，
             # 使用者会误以为盘已经写过了。
@@ -440,7 +467,26 @@ class SispService:
                 "未注入 real_runner：SispService 不内置写盘实现，"
                 "真实执行需要调用方显式提供执行器"
             )
-        return runner(spec, cancel_event or threading.Event())
+        return _call_runner(runner, spec, cancel_event or threading.Event(), on_step)
+
+    def require_disk_writable(
+        self,
+        disk_number: int,
+        expected_identity: Mapping[str, Any] | None = None,
+        *,
+        excluded_names: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        """非整盘任务（分区操作、修复引导）复用的同一条写盘闸门。
+
+        判定链与 ``_require_write_allowed`` 完全一致：dry-run → 白名单 →
+        强身份 → **重新扫描后复核身份** → 保护规则。返回最新的硬盘摘要，
+        调用方据此再决定具体命令，避免“界面上看到的盘”和“实际要动的盘”不是同一块。
+        """
+        return self._gate_target(
+            int(disk_number),
+            dict(expected_identity or {}),
+            {"excluded_disk_names": list(excluded_names or ())},
+        )
 
     def _require_write_allowed(self, spec: Any) -> None:
         """真实写盘的五道闸门；任何一道不通都抛 ``PermissionError``。
@@ -450,7 +496,19 @@ class SispService:
         已经有同样的判定，这里是执行层的纵深防御，防止绕过 ``confirm()``
         直接调 ``execute_spec``。
         """
-        disk_number = int(getattr(spec, "disk_number", 0) or 0)
+        self._gate_target(
+            int(getattr(spec, "disk_number", 0) or 0),
+            dict(getattr(spec, "expected_identity", None) or {}),
+            dict(getattr(spec, "config_payload", None) or {}),
+        )
+
+    def _gate_target(
+        self,
+        disk_number: int,
+        expected: Mapping[str, Any],
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """五道闸门的实现；返回重新扫描到的硬盘摘要。"""
         if self.dry_run:
             raise PermissionError(
                 "SispService 处于 dry-run 模式，拒绝执行任何写盘操作；"
@@ -462,7 +520,6 @@ class SispService:
                 f"（当前白名单: {sorted(self.allowed_disk_numbers) or '空'}）"
             )
 
-        expected = getattr(spec, "expected_identity", None) or {}
         if not is_strong_identity(expected):
             raise PermissionError(
                 f"硬盘 {disk_number} 的期望身份缺少 UniqueId/SerialNumber，拒绝写盘"
@@ -472,12 +529,11 @@ class SispService:
         if summary is None:
             raise PermissionError(f"硬盘 {disk_number} 当前不存在，拒绝写盘")
         actual = build_worker_disk_identity(summary)
-        if not identity_matches(expected, actual, require_strong=True):
+        if not identity_matches(dict(expected), actual, require_strong=True):
             raise PermissionError(
                 f"硬盘 {disk_number} 身份与确认时不一致，拒绝写盘"
             )
 
-        payload = dict(getattr(spec, "config_payload", None) or {})
         excluded = [
             str(name).strip().casefold()
             for name in (payload.get("excluded_disk_names") or ())
@@ -488,6 +544,7 @@ class SispService:
             raise PermissionError(
                 f"硬盘 {disk_number} 受保护，拒绝写盘：{'、'.join(reasons)}"
             )
+        return summary
 
     def _find_disk_summary(self, disk_number: int) -> dict[str, Any] | None:
         for summary in self.scan_disks():
@@ -504,6 +561,7 @@ class SispService:
         spec: Any,
         disk_number: int,
         cancel_event: threading.Event | None,
+        on_step: StepReporter | None = None,
     ) -> WorkerResult:
         """dry-run：产出计划步骤和 diskpart 预览，绝不执行命令。"""
         if cancel_event is not None and cancel_event.is_set():
@@ -543,6 +601,9 @@ class SispService:
                 details={"script": script},
             ),
         )
+        if on_step is not None:
+            for step in steps:
+                on_step(step.key, step.status, step.message)
         return WorkerResult.dry_run_plan(
             disk_number,
             steps=steps,
@@ -615,7 +676,7 @@ class SispService:
             lines.append(f"create partition primary size={int(data_gb * 1024)}")
         else:
             lines.append("create partition primary")
-        lines.append('format quick fs=ntfs label="Data"')
+        lines.append(f'format quick fs={data_fs_token(payload)} label="Data"')
         if letters.get("data"):
             lines.append(f"assign letter={letters['data']}")
         lines.append("exit")
