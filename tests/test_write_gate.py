@@ -195,3 +195,73 @@ def test_confirm_without_text_when_gate_disabled() -> None:
     jobs = wf.wait_all(timeout=5)
     assert jobs
     assert all(job.status.value != "waiting_confirmation" for job in jobs)
+
+
+# ------------------------------------------------------------------ 设置热更新
+def test_settings_provider_updates_protection_live() -> None:
+    """设置页关掉系统盘保护后，无需重启即可重新扫描出可选盘。"""
+    settings: dict[str, Any] = {
+        "protectSystemDisk": True,
+        "blockUnverified": True,
+        "typeToConfirm": True,
+    }
+    service = _service(_summary(0, is_system=True), allowed_disk_numbers=[0])
+    wf = WorkflowController(
+        service=service,
+        dry_run=False,
+        settings_provider=lambda: dict(settings),
+    )
+
+    assert service.protect_system_disk is True
+    (disk,) = service.scan_protected_disks()
+    assert disk.is_selectable is False
+
+    settings["protectSystemDisk"] = False
+    settings["blockUnverified"] = False
+    wf._apply_live_safety_flags()
+
+    assert service.protect_system_disk is False
+    assert service.block_unverified is False
+    (disk,) = service.scan_protected_disks()
+    assert disk.is_selectable is True
+
+
+def test_confirm_follows_live_type_to_confirm_setting() -> None:
+    settings: dict[str, Any] = {"typeToConfirm": True}
+    service = _service(_summary(), allowed_disk_numbers=[1])
+    wf = WorkflowController(
+        service=service,
+        dry_run=False,
+        preflight_runner=_preflight,
+        type_to_confirm=False,
+        worker_interval=0.0,
+        settings_provider=lambda: dict(settings),
+    )
+    wf.start(None, dry_run=False)
+    jobs = wf.submit(wf.prepare([1], dry_run=False), require_confirmation=True)
+    job_ids = [job.id for job in jobs]
+
+    with pytest.raises(WorkflowError):
+        wf.confirm(job_ids)
+
+    settings["typeToConfirm"] = False
+    wf.confirm(job_ids)
+    assert all(job.status.value != "waiting_confirmation" for job in wf.wait_all(timeout=5))
+
+
+def test_refresh_disks_applies_live_protection_setting() -> None:
+    """点「重新扫描」时也要读最新设置，不能等重启。"""
+    settings: dict[str, Any] = {"protectSystemDisk": True}
+    service = _service(_summary(0, is_system=True), allowed_disk_numbers=[0])
+    wf = WorkflowController(
+        service=service,
+        dry_run=False,
+        preflight_runner=_preflight,
+        settings_provider=lambda: dict(settings),
+    )
+    session = wf.start(None, dry_run=True)
+    assert session.disks[0].is_selectable is False
+
+    settings["protectSystemDisk"] = False
+    disks = wf.refresh_disks()
+    assert disks[0].is_selectable is True

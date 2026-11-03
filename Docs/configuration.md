@@ -45,6 +45,8 @@ Sisp2 有两类配置：业务配置描述装机输入；界面设置保存 GUI 
 | `typeToConfirm` | `true` | 布尔值；真实执行前 `/api/confirm` 必须带匹配的 `confirm_text`（盘号如 `1` 或磁盘型号，忽略大小写与空白），否则 `E_CONFIRM`。CLI 非交互，以 `--allow-disks` 作为确认 |
 | `protectSystemDisk` | `true` | 布尔值；控制系统盘/启动盘/含系统盘符的盘是否不可选，执行层闸门复用同一判定 |
 | `blockUnverified` | `true` | 布尔值；控制缺少 `UniqueId`/`SerialNumber` 的盘是否不可选，执行层闸门同样生效 |
+
+这三个开关是**热生效**的：保存后无需重启，下一次「重新扫描硬盘」、生成计划、提交或确认都会重新读取设置；扫描与执行层（`SispService`）的开关会同步刷新，不会出现界面说可选、执行层仍拒绝的不一致。
 | `sysDefaultGb` | `120` | 整数 60–2000；作为 `partition_info.c_size_gb` 的默认值，仅在业务 JSON 未提供该字段时生效 |
 | `dataDefaultGb` | `auto` | `auto` 或整数 20–100000；作为 `partition_info.data_size_gb` 的默认值，仅补缺失字段，`auto` 不写入固定值 |
 | `extDiskpart`、`extDism` | 空字符串 | 路径型字段；作为真实执行器的程序路径，空值回退 PATH / System32 探测 |

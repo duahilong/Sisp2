@@ -337,6 +337,32 @@ class WorkflowController:
         self._sync_service_policy(dry_run=bool(getattr(spec, "dry_run", False)))
         return self._service.execute_spec(spec, cancel_event)
 
+    def _apply_live_safety_flags(self) -> None:
+        """设置页改了安全开关后就生效，不必重启进程。
+
+        只覆盖设置里确实存在的键；没有设置提供者（纯代码构造）时保持构造参数。
+        """
+        settings = self._settings()
+        if not settings:
+            return
+        changed = False
+        if "protectSystemDisk" in settings:
+            value = bool(settings.get("protectSystemDisk"))
+            if value != self._protect_system_disk:
+                self._protect_system_disk = value
+                changed = True
+        if "blockUnverified" in settings:
+            value = bool(settings.get("blockUnverified"))
+            if value != self._block_unverified:
+                self._block_unverified = value
+                changed = True
+        if "typeToConfirm" in settings:
+            self._type_to_confirm = bool(settings.get("typeToConfirm"))
+        if changed:
+            # 执行层重算保护原因时看的是 service 上的开关，要保持一致。
+            self._service.protect_system_disk = self._protect_system_disk
+            self._service.block_unverified = self._block_unverified
+
     def _explicit_allowlist(self) -> frozenset[int] | None:
         """显式白名单优先；也认 ``cli.inject_policy_flags`` 挂上的 ``allow_disks``。"""
         if self._allowed_disk_numbers is not None:
@@ -462,6 +488,8 @@ class WorkflowController:
         """执行运行前检查、读取配置并扫描硬盘。"""
         if dry_run is not None:
             self._dry_run = self._resolve_dry_run(dry_run)
+        # 扫描前先对齐设置里的保护开关，否则刚改的设置要重启才生效。
+        self._apply_live_safety_flags()
 
         try:
             report = self._run_preflight(config_path)
@@ -525,6 +553,7 @@ class WorkflowController:
         session = self._require_session()
         if session.config_payload is None:
             raise WorkflowError("配置不可用，无法刷新硬盘列表")
+        self._apply_live_safety_flags()
 
         try:
             disks = tuple(
@@ -568,6 +597,7 @@ class WorkflowController:
         session = self._require_session()
         if session.config_payload is None:
             raise WorkflowError("配置不可用，无法生成执行计划")
+        self._apply_live_safety_flags()
 
         overrides: dict[int, dict[str, Any]] = {}
         if isinstance(selected_disk_numbers, Mapping):
@@ -835,6 +865,7 @@ class WorkflowController:
         if not waiting:
             return jobs
 
+        self._apply_live_safety_flags()
         blocked = [job for job in waiting if job.plan.blockers]
         if blocked:
             details = "；".join(
