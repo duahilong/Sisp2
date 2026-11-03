@@ -594,6 +594,27 @@ class SispService:
                 details={"letter": letters.get("data"), "size_gb": self._data_size_gb(payload)},
             ),
             StepResult(
+                key="image",
+                title="应用镜像",
+                status=STEP_SKIPPED,
+                message="dry-run 未执行",
+                details={"image_path": self._image_path(payload)},
+            ),
+            StepResult(
+                key="boot",
+                title="写入 UEFI 引导",
+                status=STEP_SKIPPED,
+                message="dry-run 未执行",
+                details={},
+            ),
+            StepResult(
+                key="verify",
+                title="校验分区与引导",
+                status=STEP_SKIPPED,
+                message="dry-run 未执行",
+                details={},
+            ),
+            StepResult(
                 key="diskpart_preview",
                 title="diskpart 脚本预览",
                 status=STEP_SKIPPED,
@@ -630,6 +651,13 @@ class SispService:
             return float(raw)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _image_path(payload: Mapping[str, Any]) -> str:
+        info = payload.get("image_info")
+        if not isinstance(info, Mapping):
+            return ""
+        return str(info.get("image_path") or "")
 
     def _data_size_gb(self, payload: Mapping[str, Any]) -> float | str | None:
         raw = self._partition_info(payload).get("data_size_gb")

@@ -632,3 +632,76 @@ def test_cancelled_job_reports_cancelled_even_if_executor_fails():
 
     assert job.status == JobStatus.CANCELLED
     assert job.result is not None and "已取消" in (job.result.error or "")
+
+# ------------------------------------------------------ 进度事件（job.step）
+_STAGES = ("efi", "windows", "data", "image", "boot", "verify")
+
+
+def _step_manager() -> tuple[JobManager, Job, list[tuple[str, str]]]:
+    """构造一个会逐阶段上报的 JobManager（不碰磁盘）。"""
+    seen: list[tuple[str, str]] = []
+
+    def executor(spec: Any, cancel_event: threading.Event, on_step=None) -> WorkerResult:
+        if on_step is not None:
+            for key in _STAGES:
+                on_step(key, "running", f"执行 {key}")
+                on_step(key, "ok", f"{key} 完成")
+                seen.append((key, "ok"))
+            # 演练期的附加步骤：会发事件，但不该算进进度
+            on_step("diskpart_preview", "skipped", "仅预览")
+        return WorkerResult(disk_number=spec.disk_number, success=True, message="ok", dry_run=True)
+
+    manager = JobManager(executor=executor)
+    job = manager.submit(
+        JobSpec(disk_number=1, dry_run=True),
+        ExecutionPlan(disk_number=1, dry_run=True),
+    )
+    manager.confirm_batch([job.id])
+    manager.wait_all(5)
+    return manager, job, seen
+
+
+def test_progress_counts_only_real_stages():
+    """``diskpart_preview`` 这种演练步骤不能把进度顶到 7/6。"""
+    _, job, seen = _step_manager()
+
+    assert [key for key, _ in seen] == list(_STAGES)
+    assert job.progress["total"] == len(_STAGES)
+    assert job.progress["completed"] == list(_STAGES)
+    assert job.progress["percent"] == 100
+    assert job.status == JobStatus.OK
+
+
+def test_step_events_are_broadcast_for_every_stage():
+    """每个阶段都要广播 ``job.step``——进度页靠它点亮阶段条。"""
+    import queue
+
+    seen: "queue.Queue" = queue.Queue()
+    manager = JobManager()
+
+    def executor(spec: Any, cancel_event: threading.Event, on_step=None) -> WorkerResult:
+        on_step("efi", "running", "开始")
+        on_step("efi", "ok", "完成")
+        on_step("diskpart_preview", "skipped", "仅预览")
+        return WorkerResult(disk_number=spec.disk_number, success=True, message="ok", dry_run=True)
+
+    manager.executor = executor  # type: ignore[assignment]
+    manager.subscribe(seen.put)
+    job = manager.submit(
+        JobSpec(disk_number=1, dry_run=True),
+        ExecutionPlan(disk_number=1, dry_run=True),
+    )
+    manager.confirm_batch([job.id])
+    manager.wait_all(5)
+
+    events = []
+    while not seen.empty():
+        events.append(seen.get())
+    keyed = [
+        (event.type, event.payload.get("key"))
+        for event in events
+        if event.type == "job.step"
+    ]
+    assert ("job.step", "efi") in keyed
+    assert ("job.step", "diskpart_preview") in keyed
+    assert job.to_dict()["progress"]["percent"] == 100

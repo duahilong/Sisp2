@@ -52,14 +52,19 @@ Executor = Callable[..., WorkerResult]
 STEP_RUNNING = "running"
 
 
-def _step_total() -> int:
-    """一次真实写盘的总步数（六步）；真实执行器不可用时退回 6。"""
+def _step_keys() -> tuple[str, ...]:
+    """真实执行器的阶段键（``efi/windows/data/image/boot/verify``）。"""
     try:
         from app.application.real_runner import STEP_TITLES
 
-        return len(STEP_TITLES)
+        return tuple(STEP_TITLES)
     except Exception:  # noqa: BLE001 - 进度显示不能拖死任务
-        return 6
+        return ()
+
+
+def _step_total() -> int:
+    """一次真实写盘的总步数（六步）；真实执行器不可用时退回 6。"""
+    return len(_step_keys()) or 6
 
 
 def _now() -> str:
@@ -441,13 +446,21 @@ class JobManager:
             semaphore.release()
 
     def _make_reporter(self, job: Job) -> Callable[..., None]:
-        """构造 ``on_step`` 回调：更新 ``Job.progress`` 并广播 ``job.step``。"""
+        """构造 ``on_step`` 回调：更新 ``Job.progress`` 并广播 ``job.step``。
+
+        只有真实写盘的六个阶段算进度；像 ``diskpart_preview`` 这种演练期
+        附加步骤照样发事件，但不进 ``completed``，否则进度条会显示成 7/6。
+        """
         total = _step_total()
+        stages = set(_step_keys())
 
         def report(key: str, status: str, message: str = "") -> None:
+            counted = not stages or key in stages
             with self._lock:
                 completed = list(job.progress.get("completed") or [])
-                if status == STEP_RUNNING:
+                if not counted:
+                    current = job.progress.get("current")
+                elif status == STEP_RUNNING:
                     current: str | None = key
                 else:
                     current = None
