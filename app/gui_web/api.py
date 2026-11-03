@@ -22,6 +22,7 @@ import json
 import platform
 import sys
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -406,13 +407,37 @@ class WebApi:
             "size_display": summary.get("size_display"),
         }
 
+    def _excluded_names(self) -> list[str]:
+        """当前生效的“禁止操作”的硬盘型号名单。
+
+        两个来源并存：设置页的 ``excludedDiskNames``（用户在界面上维护）与会话
+        业务配置里的 ``excluded_disk_names``（``-j`` 指定的配置文件）。取并集、
+        去重、丢空项；大小写不在这里处理，``_protection_reasons`` 自己 casefold。
+        """
+        session = getattr(self._wf, "session", None)
+        payload = getattr(session, "config_payload", None) if session is not None else None
+        sources = (
+            self._settings.get().get("excludedDiskNames"),
+            payload.get("excluded_disk_names") if isinstance(payload, Mapping) else None,
+        )
+        names: list[str] = []
+        for source in sources:
+            if isinstance(source, (list, tuple)):
+                names.extend(str(item).strip() for item in source if str(item).strip())
+        return list(dict.fromkeys(names))
+
     def _gate(self, disk_number: int, identity: dict[str, Any]) -> Any:
-        """分区/引导共用的写盘闸门；dry-run 下由各 runner 自己短路。"""
+        """分区/引导共用的写盘闸门；dry-run 下由各 runner 自己短路。
+
+        ``excluded_names`` 必须带上：``require_disk_writable`` 的第 5 道判定只认
+        入参里的名单，不读全局状态；漏传等于让“排除名单”在分区与修复引导两条
+        旁路上完全失效（整盘安装走的是 ``spec.config_payload``，不受影响）。
+        """
         service = self._wf.service
         gate = getattr(service, "require_disk_writable", None)
         if gate is None:  # 测试替身没有该方法时退回“只读扫描”
             return _scan_summary(disk_number)
-        return gate(disk_number, identity)
+        return gate(disk_number, identity, excluded_names=self._excluded_names())
 
     def _service_dry_run(self) -> bool:
         return bool(getattr(self._wf.service, "dry_run", True))

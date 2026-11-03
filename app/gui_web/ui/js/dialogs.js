@@ -150,7 +150,9 @@ async function planPartition(disk) {
   out.innerHTML = '<div class="hint" style="margin-top:10px">正在校验…</div>';
   try {
     const result = await api.partitionPlan(disk.disk_number, actionsPayload());
-    $('#execBtn').disabled = false;
+    // 被保护的盘（系统盘 / 排除名单 / 离线 / 只读）只允许看演练脚本：真实执行一定
+    // 过不了写盘闸门，不如在界面上先关掉按钮，避免白点一次。
+    $('#execBtn').disabled = !isSelectable(disk);
     out.innerHTML = `<div class="codebox">${esc((result.script || []).join('\n'))}</div>
       <div class="hint" style="margin-top:6px">${esc(result.message || '演练：只生成脚本，没有执行')}</div>`;
   } catch (exc) {
@@ -193,16 +195,26 @@ function bootBodyHtml(report) {
       <span class="fb"><span class="ft">${esc(item.title || '')}</span><br>${esc(item.detail || '')}</span>
     </div>`).join('') || '<div class="finding ok"><span class="fk">ok</span><span class="fb">引导看起来正常</span></div>';
 
-  const targets = (report.targets || []).map((target) => `<tr>
+  const targets = (report.targets || []).map((target) => {
+    const disk = (state.disks || []).find((item) => Number(item.disk_number) === Number(target.disk_number));
+    // 被保护的盘（系统盘 / 排除名单 / 离线 / 只读）不给修复按钮：后端闸门会拒，
+    // 这里先拦下来，省掉一次“点了才报错”。
+    const locked = disk ? !isSelectable(disk) : false;
+    let action = `<span class="dim">${esc(target.reason || '不可修复')}</span>`;
+    if (locked) {
+      action = `<span class="dim">受保护：${esc(protectionText(disk))}</span>`;
+    } else if (target.repairable) {
+      action = `<button class="tbtn" data-repair="${esc(target.disk_number)}">${target.boot_ok ? '重写引导' : '修复引导'}</button>`;
+    }
+    return `<tr>
       <td class="num">${esc(target.disk_number)}</td>
       <td>${esc(target.model || '')}</td>
       <td>${esc(target.windows_letter ? `${target.windows_letter}:` : '—')}</td>
       <td>${esc(target.esp_partition === null || target.esp_partition === undefined ? '—' : `分区 ${target.esp_partition}`)}</td>
       <td>${target.boot_ok ? '<span class="pstate ok">已就绪</span>' : '<span class="pstate miss">缺引导</span>'}</td>
-      <td>${target.repairable
-        ? `<button class="tbtn" data-repair="${esc(target.disk_number)}">${target.boot_ok ? '重写引导' : '修复引导'}</button>`
-        : `<span class="dim">${esc(target.reason || '不可修复')}</span>`}</td>
-    </tr>`).join('');
+      <td>${action}</td>
+    </tr>`;
+  }).join('');
 
   return `<div class="findings">${findings}</div>
     <div class="opsum" style="margin-top:12px">

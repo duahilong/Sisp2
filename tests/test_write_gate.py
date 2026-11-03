@@ -29,10 +29,11 @@ def _summary(
     is_system: bool = False,
     unique_id: str | None = "unique-1",
     serial_number: str | None = "SN-1",
+    model: str = "test disk",
 ) -> dict[str, Any]:
     return {
         "disk_number": number,
-        "model": "test disk",
+        "model": model,
         "serial_number": serial_number,
         "unique_id": unique_id,
         "size_bytes": 60 * _GIB,
@@ -305,3 +306,76 @@ def test_prepare_without_selection_fails_when_all_protected() -> None:
     with pytest.raises(WorkflowError) as excinfo:
         wf.prepare(dry_run=True)
     assert "没有可操作" in str(excinfo.value)
+
+
+# ------------------------------------------------------- 排除名单（分区/引导旁路）
+def _gate_api(
+    disks: list[dict[str, Any]],
+    payload: dict[str, Any] | None = None,
+    settings_patch: dict[str, Any] | None = None,
+    tmp_path: Path | None = None,
+):
+    """构造一个真实 SispService + 真实会话的 WebApi，只为了调 ``_gate``。"""
+    from app.gui_web.api import WebApi
+    from app.modules.settings.service import build_store
+
+    def preflight(config_path=None, **kwargs):  # noqa: ANN001, ANN003
+        return {
+            "results": [{"name": "运行前检查", "passed": True, "message": "ok"}],
+            "config_payload": payload if payload is not None else {},
+        }
+
+    service = SispService(
+        disk_scanner=lambda: list(disks), dry_run=False, allowed_disk_numbers=[1]
+    )
+    wf = WorkflowController(
+        service=service, dry_run=False, preflight_runner=preflight, worker_interval=0.0
+    )
+    wf.start(None, dry_run=False)
+    store = build_store((tmp_path or Path.cwd()) / "settings.json")
+    if settings_patch:
+        store.update(settings_patch)
+    return WebApi(wf, settings=store)
+
+
+_IDENTITY = {"unique_id": "unique-1", "serial_number": "SN-1", "model": "test disk"}
+
+
+def test_gate_rejects_disk_matching_config_excluded_names(tmp_path: Path) -> None:
+    """分区/修复引导走的闸门必须吃配置里的 excluded_disk_names。
+
+    这条旁路曾经完全不生效：网页里的 gate 只传两个参数，
+    ``excluded_names`` 默认成空列表，于是排除名单在“硬盘分区”“修复引导”
+    两条路径上形同虚设（整盘安装走 spec.config_payload，一直是生效的）。
+    """
+    api = _gate_api(
+        [_summary(model="Samsung SSD 980 PRO 1TB")],
+        payload={"excluded_disk_names": ["980 PRO"]},
+        tmp_path=tmp_path,
+    )
+    with pytest.raises(PermissionError) as excinfo:
+        api._gate(1, dict(_IDENTITY))
+    assert "排除名单" in str(excinfo.value)
+
+
+def test_gate_allows_disk_not_matching_excluded_names(tmp_path: Path) -> None:
+    """名单写了但型号不匹配时必须放行，不能误伤。"""
+    api = _gate_api(
+        [_summary(model="test disk")],
+        payload={"excluded_disk_names": ["Some Other SSD"]},
+        tmp_path=tmp_path,
+    )
+    summary = api._gate(1, dict(_IDENTITY))
+    assert summary["disk_number"] == 1
+
+
+def test_gate_without_excluded_names_still_checks_other_rules(tmp_path: Path) -> None:
+    """名单为空不代表闸门不工作：系统盘仍然要被拒。"""
+    api = _gate_api(
+        [_summary(is_system=True)],
+        payload={"excluded_disk_names": []},
+        tmp_path=tmp_path,
+    )
+    with pytest.raises(PermissionError) as excinfo:
+        api._gate(1, dict(_IDENTITY))
+    assert "系统盘" in str(excinfo.value)
