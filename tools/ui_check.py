@@ -33,7 +33,7 @@ _IMPORT_RE = re.compile(r"""from\s+['"]\./([\w.-]+\.js)['"]""")
 _ATTR_RE = re.compile(r"""(?:href|src)="(/static/[^"]+)\"""")
 
 DERIVE_SCRIPT = """
-import { fmtSize, fsClass, segments, checkSizes, checkLayout, unallocatedBytes, partShortName, suggestLetter } from './derive.js';
+import { fmtSize, fsClass, segments, checkSizes, checkLayout, unallocatedBytes, partShortName, suggestLetter, fitLayout, reserveGb, trailingSpareGb, lastPartitionEatsRest, EAT_REST_GB } from './derive.js';
 
 const GB = 1024 ** 3;
 const esp = { partition_number: 1, size_bytes: 100 * 1024 * 1024,
@@ -64,6 +64,49 @@ const out = {
   layout_rest: unallocatedBytes(1000 * GB, 120, 380, [{ sizeGb: 200 }]) > 0,
   layout_zero_extra: checkLayout(1000 * GB, 120, 380, [{ sizeGb: 0 }]) !== '',
   layout_overflow: checkLayout(500 * GB, 120, 380, [{ sizeGb: 200 }]) !== '',
+  // 快捷容量（100/120/150/200）必须把 E 一起重算：以前只算 C 和 D，
+  // 于是 C=200 + D=275.9 + E=71.7 在 477 GB 的盘上超了一大截。
+  // 并且剩下的容量要由 D / E 平分，不能全给 D。
+  fit_preset: (() => {
+    const fit = fitLayout(476.9, 200, [71.7], { even: true });
+    return [fit.sysGb, fit.dataGb, fit.extrasGb];
+  })(),
+  fit_no_extra: (() => {
+    const fit = fitLayout(476.9, 120, []);
+    return [fit.sysGb, fit.dataGb];
+  })(),
+  // 预留余量 = EFI + 对齐，不再是固定 1 GB：“剩余”不应该白扔一整 GB
+  // “最后一个数据分区吃剩余空间”的判据：界面文案与 payload 必须共用
+  trailing_spare: +trailingSpareGb(476.9, 150, 163.3, [163.3]).toFixed(2),
+  eats_rest_filled: lastPartitionEatsRest(476.9, 150, 163.3, [163.3]),
+  eats_rest_gap: lastPartitionEatsRest(476.9, 120, 100, []),
+  eat_rest_threshold: EAT_REST_GB,
+  reserve_default: reserveGb(),
+  reserve_efi300: reserveGb(300),
+  // 无论怎么点，C + D + E + 预留余量都不能超过盘容量
+  fit_never_over: [
+    [476.9, 200, [71.7]], [476.9, 100, [178]], [476.9, 150, []],
+    [477, 60, [420]], [476.9, 200, [400]], [100, 60, []],
+  ].every(([totalGb, sysGb, extrasGb]) => [false, true].every((even) => {
+    const fit = fitLayout(totalGb, sysGb, extrasGb, { even });
+    const used = fit.sysGb + fit.dataGb + reserveGb()
+      + fit.extrasGb.reduce((sum, gb) => sum + gb, 0);
+    return used <= totalGb + 1e-6;
+  })),
+  // 平分：D、E 的数字必须完全一样（零头留作未分配）
+  fit_even_split: [
+    [476.9, 200, [71.7]], [477, 60, [420]], [465.7, 200, [177.9]],
+  ].every(([totalGb, sysGb, extrasGb]) => {
+    const fit = fitLayout(totalGb, sysGb, extrasGb, { even: true });
+    return fit.extrasGb.length > 0 && fit.extrasGb.every((gb) => gb === fit.dataGb);
+  }),
+  // 下限不能被 fitLayout 自己踩掉，否则会出现「20 GB 的系统分区」
+  fit_keeps_mins: [
+    [477, 60, [420]], [476.9, 200, [400]], [100, 60, []],
+  ].every(([totalGb, sysGb, extrasGb]) => {
+    const fit = fitLayout(totalGb, sysGb, extrasGb);
+    return fit.sysGb >= 60 && fit.dataGb >= 20 && fit.extrasGb.every((gb) => gb >= 1);
+  }),
 };
 console.log(JSON.stringify(out));
 """
@@ -86,6 +129,17 @@ EXPECTED = {
     "layout_rest": True,
     "layout_zero_extra": True,
     "layout_overflow": True,
+    "fit_preset": [200, 138.3, [138.3]],
+    "fit_no_extra": [120, 356.6],
+    "trailing_spare": 0.3,
+    "eats_rest_filled": True,
+    "eats_rest_gap": False,
+    "eat_rest_threshold": 1,
+    "reserve_default": 0.3,
+    "reserve_efi300": 0.49,
+    "fit_never_over": True,
+    "fit_even_split": True,
+    "fit_keeps_mins": True,
 }
 
 

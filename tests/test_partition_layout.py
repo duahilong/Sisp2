@@ -18,24 +18,100 @@ import pytest
 from app.application.contracts import DiskInfo
 from app.application.partitions import (
     MAX_DATA_PARTITIONS,
+    MSR_GPT,
     PartitionLayoutError,
     check_layout,
     data_partition_count,
     diskpart_lines,
     plan_partitions,
+    strip_msr_lines,
     unallocated_bytes,
 )
 from app.application.real_runner import WindowsDiskRunner, _CommandLog, _verify_verdict
+from app.application.service import SispService
 from app.application.workflow import WorkflowController
 from app.drive_letters import build_drive_letter_allocations
 
 GIB = 1024 ** 3
 
 
-def _legacy_runner_script(parts: list[Any], disk_number: int = 2) -> list[str]:
-    return WindowsDiskRunner()._diskpart_script(
-        disk_number=disk_number, parts=parts, log=_CommandLog(None)
+def _legacy_runner_script(
+    parts: list[Any],
+    disk_number: int = 2,
+    msr_partition: int | None = None,
+) -> list[str]:
+    """执行器现在分两段 diskpart：清盘段 + 布局段（可带删 MSR）。
+
+    这里把两段拼起来（去掉第二次的 ``select disk`` / ``exit``），方便和重构前
+    的单段脚本逐字对比。
+    """
+    runner = WindowsDiskRunner()
+    log = _CommandLog(None)
+    wipe = runner._wipe_script(disk_number=disk_number, log=log)
+    layout = runner._diskpart_script(
+        disk_number=disk_number, parts=parts, log=log, msr_partition=msr_partition
     )
+    return [*wipe[:-1], *layout[1:-1], layout[-1]]
+
+
+# ------------------------------------------------------------------ MSR 处理
+
+
+@pytest.mark.parametrize("value", [None, "", "auto", 0, -1, "abc", True])
+def test_strip_msr_lines_ignores_bad_numbers(value: Any) -> None:
+    """查不到 MSR 分区号时不删任何东西（don't guess）。"""
+    assert strip_msr_lines(value) == []
+
+
+def test_strip_msr_lines_deletes_by_number() -> None:
+    assert strip_msr_lines(1) == ["select partition 1", "delete partition override"]
+    assert strip_msr_lines("3") == ["select partition 3", "delete partition override"]
+
+
+def test_layout_script_deletes_msr_before_creating_partitions() -> None:
+    """``convert gpt`` 自动建的 MSR 要在建 EFI 之前删掉，最终布局 EFI+C+D。"""
+    parts = plan_partitions(
+        {"partition_info": {"efi_size_mb": 100, "c_size_gb": 120}},
+        letters={"efi": "F", "windows": "G", "data": "H"},
+    )
+    runner = WindowsDiskRunner()
+    log = _CommandLog(None)
+
+    wipe = runner._wipe_script(disk_number=1, log=log)
+    assert wipe == ["select disk 1", "clean", "convert gpt", "exit"]
+
+    layout = runner._diskpart_script(disk_number=1, parts=parts, log=log, msr_partition=1)
+    assert layout[:3] == ["select disk 1", "select partition 1", "delete partition override"]
+    # 删 MSR 必须在第一个 create 之前
+    assert layout.index("delete partition override") < layout.index("create partition efi size=100")
+    assert layout[-1] == "exit"
+
+    # 没有 MSR 时脚本里不该出现删除动作
+    plain = runner._diskpart_script(disk_number=1, parts=parts, log=log, msr_partition=None)
+    assert "delete partition override" not in plain
+
+
+def test_dry_run_preview_shows_both_phases() -> None:
+    """演练预览要如实展示“清盘一段 + 删 MSR 再建分区一段”。"""
+    service = SispService(disk_scanner=list, dry_run=True)
+    text = service.build_diskpart_preview(
+        1,
+        {"partition_info": {"efi_size_mb": 100, "c_size_gb": 120}},
+        {"efi": "F", "windows": "G", "data": "H"},
+    )
+    lines = text.splitlines()
+    assert "REM === 第一段：清盘 + 转 GPT ===" in lines
+    assert "REM === 第二段：删掉 convert gpt 自动生成的 MSR，再建分区 ===" in lines
+    # 第一段：clean + convert gpt
+    assert lines[lines.index("clean") - 1] == "select disk 1"
+    assert "convert gpt" in lines
+    # 第二段里 MSR 的两条命令只以 REM 形式出现（预览时不知道真实分区号）
+    assert "REM select partition <MSR 分区号>" in lines
+    assert "REM delete partition override" in lines
+    assert not any(line.startswith("delete partition") for line in lines)
+    # 布局照旧
+    assert "create partition efi size=100" in lines
+    assert "create partition primary" in lines
 
 
 # --------------------------------------------------------------------- 默认布局
@@ -126,8 +202,8 @@ def test_extra_partition_appends_data2() -> None:
     assert "assign letter=H" in lines
 
 
-@pytest.mark.parametrize("size", [None, 0, "auto", "abc", -5])
-def test_extra_partition_requires_explicit_size(size: Any) -> None:
+@pytest.mark.parametrize("size", [0, "abc", -5])
+def test_data_partition_rejects_bad_size(size: Any) -> None:
     with pytest.raises(PartitionLayoutError) as excinfo:
         plan_partitions(
             {
@@ -138,6 +214,63 @@ def test_extra_partition_requires_explicit_size(size: Any) -> None:
             }
         )
     assert "第 2 个数据分区" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("size", [None, "", "auto", "AUTO"])
+def test_last_data_partition_may_eat_remaining_space(size: Any) -> None:
+    """最后一个数据分区可以不写大小：diskpart 不写 ``size=`` 就会吃掉剩余空间。
+
+    这比我们自己算“总容量 − C − EFI − 对齐余量”更准，也不会出现
+    “算得刚刚好、diskpart 却报空间不足”。
+    """
+    parts = plan_partitions(
+        {
+            "partition_info": {
+                "c_size_gb": 120,
+                "data_partitions": [{"size_gb": 200}, {"size_gb": size}],
+            }
+        }
+    )
+    assert parts[2].size_mb == 200 * 1024
+    assert parts[3].size_mb is None          # 吃掉剩余空间
+    assert parts[3].size_text == "剩余空间"
+
+    lines = diskpart_lines(parts)
+    assert "create partition primary size=204800" in lines
+    # 不带 size= 的那一行 = 用掉全部剩余空间
+    assert "create partition primary" in lines
+    assert lines.count("create partition primary") == 1
+
+
+def test_only_last_data_partition_may_eat_remaining_space() -> None:
+    """第一个数据分区不能 auto——否则它会把后面的分区的地盘也吃光。"""
+    with pytest.raises(PartitionLayoutError) as excinfo:
+        plan_partitions(
+            {
+                "partition_info": {
+                    "c_size_gb": 120,
+                    "data_partitions": [{"size_gb": "auto"}, {"size_gb": 100}],
+                }
+            }
+        )
+    assert "第 1 个数据分区" in str(excinfo.value)
+
+
+def test_layout_with_auto_partition_only_checks_explicit_sizes() -> None:
+    """有分区吃剩余空间时，仍要拦住“显式指定的那几块就超容量”的情况。"""
+    payload = {
+        "partition_info": {
+            "c_size_gb": 900,
+            "data_partitions": [{"size_gb": 200}, {"size_gb": "auto"}],
+        }
+    }
+    parts = plan_partitions(payload)
+    # EFI 100MB + C 900GB + D 200GB = 1100 GB，1 TB 盘放不下（auto 那块也得有地方）
+    assert check_layout(parts, 1024 * 1024**3) != []
+    # 同样的布局换成 2 TB 盘就合法
+    assert check_layout(parts, 2048 * 1024**3) == []
+    # 有 auto 分区时算不出未分配空间，返回 0（界面据此不提示“容量闲置”）
+    assert unallocated_bytes(parts, 2048 * 1024**3) == 0
 
 
 def test_extra_partition_rejects_fat32() -> None:
@@ -262,14 +395,33 @@ def _verify_payload(count: int) -> dict[str, Any]:
 def test_verify_requires_planned_partition_count() -> None:
     ok, message, _ = _verify_verdict(_verify_payload(3), min_partitions=4)
     assert ok is False
-    assert "期望至少 4" in message
+    assert "期望 4 个" in message
 
 
-def test_verify_accepts_auto_msr_partition() -> None:
-    """实际盘上有 diskpart 自动建的 16MB MSR，所以 5 个分区满足“至少 4 个”。"""
-    ok, message, _ = _verify_verdict(_verify_payload(5), min_partitions=4)
-    assert ok is True
-    assert "GPT" in message
+def test_verify_rejects_leftover_msr_partition() -> None:
+    """``convert gpt`` 自动建的 MSR 必须在建分区前删掉；多出来一个就判失败。"""
+    payload = _verify_payload(4)
+    payload["partitions"].append(
+        {
+            "number": 5,
+            "size_bytes": 16 * 1024 * 1024,
+            "drive_letter": None,
+            "type": "Reserved",
+            "gpt_type": f"{{{MSR_GPT}}}",
+        }
+    )
+    ok, message, details = _verify_verdict(payload, min_partitions=4)
+    assert ok is False
+    assert "保留分区（MSR）" in message
+    assert "预期布局是 EFI + C + D(+E)" in message
+    assert details["problems"]
+
+    # 只有 MSR 类型/名称，没有多余分区时也照样拦
+    payload2 = _verify_payload(4)
+    payload2["partitions"][0]["type"] = "Reserved"
+    ok2, message2, _ = _verify_verdict(payload2, min_partitions=4)
+    assert ok2 is False
+    assert "保留分区" in message2
 
 
 # --------------------------------------------------------------------- 工作流接入

@@ -42,10 +42,12 @@ from typing import Any
 
 from app.application.contracts import format_size
 from app.application.partitions import (
+    MSR_GPT,
     PartitionLayoutError,
     PlannedPartition,
     diskpart_lines,
     plan_partitions,
+    strip_msr_lines,
 )
 from app.models import STEP_FAILED, STEP_OK, STEP_SKIPPED, StepResult, WorkerResult
 
@@ -94,6 +96,7 @@ LETTER_RELEASE_TIMEOUT = 120.0
 DISM_TIMEOUT = 3 * 3600.0
 BCDBOOT_TIMEOUT = 120.0
 VERIFY_TIMEOUT = 120.0
+MSR_QUERY_TIMEOUT = 60.0
 
 # 与 service.py 的分区顺序保持一致：EFI → Windows → Data。
 _STEP_ORDER = ("efi", "windows", "data")
@@ -213,6 +216,19 @@ def _tail(text: str, limit: int = 4000) -> str:
     return "…（前略）\n" + text[-limit:]
 
 
+def _is_reserved_partition(part: Mapping[str, Any]) -> bool:
+    """这个分区是不是 MSR / 保留分区。
+
+    ``convert gpt`` 会自动在盘首建一个 16 MB MSR，执行器在建分区前按 GPT 类型
+    删掉它（见 ``_find_msr_partition``）。verify 里再查一次：多出来一个 Reserved
+    就说明删除没生效或者 MSR 又回来了。
+    """
+    gpt = str(part.get("gpt_type") or "").strip().lower().strip("{}")
+    if gpt == MSR_GPT:
+        return True
+    return str(part.get("type") or "").strip().lower() == "reserved"
+
+
 def _verify_verdict(
     payload: Mapping[str, Any],
     min_partitions: int = 3,
@@ -222,6 +238,9 @@ def _verify_verdict(
     只靠“GPT + 分区数”是不够的：bcdboot 可能退出码 0 但没写入任何文件，镜像
     也可能只应用了一半。所以这里四个条件都查：分区表、分区数、EFI 引导文件、
     Windows 系统文件。纯函数，方便用假 payload 测失败分支。
+
+    “分区数”是**相等**而不是“至少”：``convert gpt`` 自动建的那个 16 MB MSR
+    应该在建分区前被删掉，盘上多一个 Reserved 分区就说明删除没生效。
     """
     parts = payload.get("partitions") or []
     if isinstance(parts, Mapping):
@@ -241,11 +260,13 @@ def _verify_verdict(
     problems: list[str] = []
     if style != "GPT":
         problems.append(f"分区表不是 GPT（{style}）")
-    # 盘上还有 diskpart 自动保留的 16MB MSR，所以只比“计划里的分区数”更少才算异常。
-    if len(parts) < max(3, int(min_partitions)):
-        problems.append(
-            f"分区数不足（期望至少 {max(3, int(min_partitions))} 个，实际 {len(parts)} 个）"
-        )
+    # 分区数必须与计划一致：MSR 已被删掉，多一个/少一个都是问题。
+    expected = max(3, int(min_partitions))
+    if len(parts) != expected:
+        problems.append(f"分区数与计划不符（期望 {expected} 个，实际 {len(parts)} 个）")
+    reserved = [part for part in parts if _is_reserved_partition(part)]
+    if reserved:
+        problems.append("盘上还有保留分区（MSR），预期布局是 EFI + C + D(+E)")
     if not boot_file:
         problems.append("EFI 分区里没有 bootmgfw.efi（bcdboot 没写进去）")
     if not system_file:
@@ -494,14 +515,68 @@ class WindowsDiskRunner:
         if not Path(image_path).is_file():
             return steps, f"镜像文件不存在: {image_path}"
 
-        # 1-3：清盘 + 建分区（一条 diskpart 脚本，失败即整步失败）
-        script = self._diskpart_script(disk_number=disk_number, parts=parts, log=log)
+        # 1-3：清盘 + 建分区。分两段 diskpart：
+        #   ① clean + convert gpt —— 这一步 Windows 会自动在盘首塞一个 16 MB MSR；
+        #   ② 按 GPT 类型找到那个 MSR 并删掉，然后建 EFI/C/D(+E)，
+        #      最终布局里没有 MSR（产品要求 EFI + C + D(+E)）。
+        wipe = self._wipe_script(disk_number=disk_number, log=log)
         if cancel_event.is_set():
             return steps, "任务已取消（未开始写盘）"
 
         try:
             if tracker is not None:
                 tracker["diskpart_ran"] = True
+            code, output = self._run_diskpart(wipe, log, env=env, temp_dir=temp_dir)
+        except Exception as exc:  # noqa: BLE001 - 统一翻成步骤失败
+            steps.append(
+                StepResult(
+                    key="efi",
+                    title=STEP_TITLES["efi"],
+                    status=STEP_FAILED,
+                    message=f"无法执行 diskpart：{exc}",
+                )
+            )
+            return steps, f"无法执行 diskpart：{exc}"
+
+        if code != 0:
+            steps.extend(
+                StepResult(
+                    key=key,
+                    title=STEP_TITLES[key],
+                    status=STEP_FAILED if key == "efi" else STEP_SKIPPED,
+                    message=(
+                        f"diskpart 失败（退出码 {code}）：{_tail(output, 800)}"
+                        if key == "efi"
+                        else "diskpart 失败，后续步骤未执行"
+                    ),
+                    details={"diskpart_exit": code, "diskpart_tail": _tail(output)},
+                )
+                for key in _STEP_ORDER
+            )
+            return steps, f"diskpart 失败（退出码 {code}）"
+
+        # 找 ``convert gpt`` 自动建出来的 MSR。找不到就不删；查询本身失败则中止，
+        # 绕不盲删（``select partition`` 猜错会删掉真分区）。
+        try:
+            msr_partition = self._find_msr_partition(disk_number, log)
+        except Exception as exc:  # noqa: BLE001 - 查不了就别动盘
+            steps.append(
+                StepResult(
+                    key="efi",
+                    title=STEP_TITLES["efi"],
+                    status=STEP_FAILED,
+                    message=f"无法确认 MSR 分区，已中止（避免误删）：{exc}",
+                )
+            )
+            return steps, f"无法确认 MSR 分区，已中止：{exc}"
+
+        script = self._diskpart_script(
+            disk_number=disk_number,
+            parts=parts,
+            log=log,
+            msr_partition=msr_partition,
+        )
+        try:
             code, output = self._run_diskpart(script, log, env=env, temp_dir=temp_dir)
         except Exception as exc:  # noqa: BLE001 - 统一翻成步骤失败
             steps.append(
@@ -656,17 +731,57 @@ class WindowsDiskRunner:
         disk_number: int,
         parts: Sequence[PlannedPartition],
         log: _CommandLog,
+        msr_partition: int | None = None,
     ) -> list[str]:
-        """拼出完整的 diskpart 脚本（select/clean/convert + 布局 + exit）。"""
+        """拼出“建分区”那一段 diskpart 脚本（先删 MSR，再按布局建分区）。"""
         lines = [
             f"select disk {disk_number}",
-            "clean",
-            "convert gpt",
+            *strip_msr_lines(msr_partition),
             *diskpart_lines(parts),
             "exit",
         ]
-        log.block("diskpart 脚本", "\n".join(lines))
+        log.block("diskpart 脚本（删 MSR + 建分区）", "\n".join(lines))
         return lines
+
+    def _wipe_script(self, *, disk_number: int, log: _CommandLog) -> list[str]:
+        """第一段 diskpart：清盘并转 GPT。
+
+        ``convert gpt`` 会顺手在盘首建一个 16 MB 的 MSR（Windows 的行为，不是
+        我们脚本里的命令），所以这一段之后要再查一次并删掉它。
+        """
+        lines = [f"select disk {disk_number}", "clean", "convert gpt", "exit"]
+        log.block("diskpart 脚本（清盘 + 转 GPT）", "\n".join(lines))
+        return lines
+
+    def _find_msr_partition(self, disk_number: int, log: _CommandLog) -> int | None:
+        """按 GPT 类型找出 ``convert gpt`` 自动生成的 MSR 分区号；没有则返回 None。
+
+        必须按类型查、不能假设“分区 1 就是 MSR”：万一某些系统不自动建，
+        ``select partition 1`` 会让后面的布局脚本整条中止。
+        """
+        if not self.powershell:
+            raise RunnerError("找不到 powershell.exe，无法确认 MSR 分区")
+        script = (
+            "$ErrorActionPreference = 'Stop'; "
+            f"$part = Get-Partition -DiskNumber {int(disk_number)} -ErrorAction SilentlyContinue | "
+            f"Where-Object {{ $_.GptType -like '*{MSR_GPT}*' }} | "
+            "Select-Object -First 1 -ExpandProperty PartitionNumber; "
+            "if ($part) { [int]$part }"
+        )
+        code, output, _elapsed = self._spawn(
+            [self.powershell, "-NoProfile", "-NonInteractive", "-Command", script],
+            MSR_QUERY_TIMEOUT,
+            log,
+        )
+        if code != 0:
+            raise RunnerError(f"查询 MSR 分区失败（退出码 {code}）：{_tail(output, 400)}")
+        text = (output or "").strip()
+        number = _to_int(text.splitlines()[-1]) if text else None
+        if number is None:
+            log.write("没有发现自动生成的 MSR 分区，跳过删除")
+            return None
+        log.write(f"发现自动生成的 MSR 分区 #{number}，将在建分区前删除")
+        return number
 
     def _run_diskpart(
         self,

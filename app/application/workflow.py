@@ -40,6 +40,7 @@ from app.application.partitions import (
     normalise_data_partitions,
     plan_partitions,
     unallocated_bytes,
+    with_auto_estimates,
 )
 from app.application.real_runner import build_real_runner
 from app.application.service import SispService
@@ -1072,6 +1073,9 @@ class WorkflowController:
         planned_parts: list[Any] = []
         try:
             planned_parts = plan_partitions(task_payload, letters=drive_letters)
+            # 界面显示用：让“吃剩余空间”的那个分区也能显示“约 X GB”，
+            # 但 size_mb 仍然是 None —— diskpart 依旧不带 size= 执行。
+            planned_parts = with_auto_estimates(planned_parts, disk.size_bytes)
         except PartitionLayoutError as exc:
             blockers.append(f"硬盘 {disk.disk_number} 分区配置无效：{exc}")
 

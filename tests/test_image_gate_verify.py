@@ -19,13 +19,14 @@ from app.preflight import CHECK_IMAGE_TYPE, run_preflight_checks
 
 _GIB = 1024**3
 
+# 期望布局就是 EFI + C + D：``convert gpt`` 自动建的 16 MB MSR 会被执行器删掉，
+# 所以 verify 只认 3 个分区（多一个 Reserved 就判失败，见 test_partition_layout）。
 _OK_VERIFY_PAYLOAD: dict[str, Any] = {
     "partition_style": "GPT",
     "partitions": [
-        {"number": 1, "size_bytes": 16 * 1024**2},
-        {"number": 2, "size_bytes": 300 * 1024**2},
-        {"number": 3, "size_bytes": 120 * _GIB, "drive_letter": "G"},
-        {"number": 4, "size_bytes": 300 * _GIB, "drive_letter": "J"},
+        {"number": 1, "size_bytes": 100 * 1024**2, "type": "System"},
+        {"number": 2, "size_bytes": 120 * _GIB, "drive_letter": "G"},
+        {"number": 3, "size_bytes": 300 * _GIB, "drive_letter": "J"},
     ],
     "boot_file": r"F:\EFI\Microsoft\Boot\bootmgfw.efi",
     "system_file": r"G:\Windows\System32\config\SYSTEM",

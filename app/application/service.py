@@ -697,9 +697,16 @@ class SispService:
 
         lines = [
             "REM === dry-run 预览：以下命令不会被执行 ===",
+            "REM === 第一段：清盘 + 转 GPT ===",
             f"select disk {disk_number}",
             "clean",
             "convert gpt",
+            "exit",
+            "REM === 第二段：删掉 convert gpt 自动生成的 MSR，再建分区 ===",
+            f"select disk {disk_number}",
+            "REM 实际执行时这里会按 GPT 类型查出 MSR 分区号（查不到就跳过）：",
+            "REM select partition <MSR 分区号>",
+            "REM delete partition override",
         ]
         try:
             parts = plan_partitions(payload, letters=letters)

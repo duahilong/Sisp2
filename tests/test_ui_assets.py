@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -119,14 +120,22 @@ def test_every_field_has_section_and_kind() -> None:
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="没有 node")
 def test_partition_defaults_reserve_space_for_efi() -> None:
-    """默认数据分区大小要给 EFI 和对齐留余量，否则一进第 4 步就被后端判容量不足。"""
+    """默认数据分区大小要给 EFI 和对齐留余量，否则一进第 4 步就被后端判容量不足。
+
+    余量不再是固定 1 GB：``reserveGb(efiMb) = EFI + 0.2 GB 对齐开销``。固定 1 GB 会让
+    界面上白挂着“剩余 1.0 GB”（用户会问“这 1 GB 花哪去了”），按真实 EFI 算只剩 ~0.3 GB。
+    """
     derive = (JS / "derive.js").read_text(encoding="utf-8")
     state = (JS / "state.js").read_text(encoding="utf-8")
     install = (JS / "view-install.js").read_text(encoding="utf-8")
-    assert "export const RESERVE_GB" in derive
+    assert "export function reserveGb" in derive
+    assert "export const ALIGN_GB" in derive
+    assert "export const DEFAULT_EFI_MB" in derive
     assert "efiMb = 100" in derive
-    assert "RESERVE_GB" in state
-    assert "RESERVE_GB" in install
+    # 三处都要用同一个口径：默认值、加/删 E、快捷容量与拖动
+    assert "reserveGb" in state
+    assert "reserveGb" in install
+    assert "RESERVE_GB" not in derive + state + install
 
 
 def test_install_wizard_can_add_extra_partition() -> None:
@@ -148,13 +157,63 @@ def test_install_wizard_can_add_extra_partition() -> None:
     assert "data_partitions" in state_js
     assert "addExtraPartition" in state_js
     assert "removeExtraPartition" in state_js
-    # 加 E 时与 D 平分容量；文件系统统一走 dataFs()
-    assert "available / 2" in state_js
+    # 加 E 时与 D 平分容量（走 fitLayout 的 even 分支，和快捷容量同一套算法）；
+    # 文件系统统一走 dataFs()
+    assert "even: true" in state_js
     assert "export function dataFs()" in state_js
 
     css = (UI / "css" / "app.css").read_text(encoding="utf-8")
     assert ".addpart" in css
     assert ".szrow.extra" in css
+
+
+def test_quick_size_presets_rebalance_extra_partitions(tmp_path: Path) -> None:
+    """快捷容量按钮（100/120/150/200）必须把 E 一起重算，而且剩余容量要平分。
+
+    复现过的两个坏状态（477 GB 的盘）：
+
+    1. C=200、D=275.9、E=71.7，相加 547.6 GB——D 拿走了「除 C 以外的全部容量」，
+       E 还是旧值；
+    2. 只修第 1 个还不够：用户的预期是“系统 200，剩下的 300 由 D / E 一人一半”，
+       而不是“E 保持原值、剩下全给 D”。
+
+    现在快捷容量走 ``derive.fitLayout(..., { even: true })``：零头（< 0.1 GB）留作
+    未分配，D 与 E 的数字**完全相等**。
+    """
+    install = (JS / "view-install.js").read_text(encoding="utf-8")
+    handler = re.search(r"\$\$\('#wzBody \.presets button'\).*?\n  \}\);", install, re.S)
+    assert handler, "view-install.js 里找不到快捷容量按钮的处理逻辑"
+    body = handler.group(0)
+    assert "fitLayout" in body, "快捷容量按钮没有走 fitLayout，E 不会跟着重算"
+    assert "even: true" in body, "快捷容量按钮没有要求 D/E 平分，剩余会全给 D"
+    # 老写法：dataGb 直接等于 totalGb - sysGb - RESERVE_GB，把 E 的份额也吞了
+    assert "totalGb - target.sysGb - RESERVE_GB" not in body
+
+    derive = (JS / "derive.js").read_text(encoding="utf-8")
+    script = tmp_path / "fit_layout_check.mjs"
+    script.write_text(
+        "import { fitLayout } from './derive_copy.mjs';\n"
+        "const cases = [[476.9, 200, [71.7]], [477, 60, [420]], [465.7, 200, [177.9]], [476.9, 120, []]];\n"
+        "const out = cases.map(([total, sys, extras]) => {\n"
+        "  const fit = fitLayout(total, sys, extras, { even: true });\n"
+        "  return [fit.sysGb, fit.dataGb, fit.extrasGb];\n"
+        "});\n"
+        "console.log(JSON.stringify(out));\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "derive_copy.mjs").write_text(derive, encoding="utf-8")
+    proc = subprocess.run(
+        [shutil.which("node"), str(script)],
+        cwd=str(tmp_path), capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    got = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert got == [
+        [200, 138.3, [138.3]],
+        [60, 208.3, [208.3]],
+        [200, 132.7, [132.7]],
+        [120, 356.6, []],
+    ], got
 
 
 def test_extra_partition_limit_matches_backend() -> None:
@@ -178,3 +237,103 @@ def test_frontend_static_check() -> None:
         check=False,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="没有 node")
+def test_removing_extra_partition_gives_space_back_to_data(tmp_path: Path) -> None:
+    """删掉 E 之后，容量要还给 D，退回「C 指定大小 + D 吃掉剩余」的两分区状态。
+
+    复现过的坏状态：477 GB 的盘上 C=150、加了 E 之后 D=163/E=163，再把 E 删掉，
+    D 还停在 163，剩下 164 GB 白变成“未分配”——用户只是想撤销“我要加 E”这件事。
+    """
+    for name in ("derive.js", "state.js"):
+        (tmp_path / name.replace(".js", "_copy.mjs")).write_text(
+            (JS / name).read_text(encoding="utf-8").replace("'./derive.js'", "'./derive_copy.mjs'"),
+            encoding="utf-8",
+        )
+    script = tmp_path / "remove_extra_check.mjs"
+    script.write_text(
+        "import { state, resetWizard, addTarget, addExtraPartition, removeExtraPartition, targetOf }\n"
+        "  from './state_copy.mjs';\n"
+        "const GB = 1024 ** 3;\n"
+        "state.disks = [{ disk_number: 1, size_bytes: Math.round(477 * GB), model: 'X',\n"
+        "  partition_style: 'GPT', partitions: [] }];\n"
+        "state.settings = { sysDefaultGb: 150, dataDefaultGb: 'auto', defaultFs: 'NTFS' };\n"
+        "resetWizard();\n"
+        "addTarget(1);\n"
+        "const target = targetOf(1);\n"
+        "const before = { sys: target.sysGb, data: target.dataGb };\n"
+        "addExtraPartition(1);\n"
+        "const withExtra = { sys: target.sysGb, data: target.dataGb, extra: target.extras[0].sizeGb };\n"
+        "removeExtraPartition(1, 0);\n"
+        "const after = { sys: target.sysGb, data: target.dataGb, extras: target.extras.length };\n"
+        "const spare = 477 - after.sys - after.data;\n"
+        "console.log(JSON.stringify({ before, withExtra, after, spare: +spare.toFixed(1) }));\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [shutil.which("node"), str(script)],
+        cwd=str(tmp_path), capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    got = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    # 加 E：与 D 平分（163.3 / 163.3）
+    assert got["withExtra"]["data"] == got["withExtra"]["extra"] == 163.3
+    # 删 E：D 吃掉全部剩余容量，只剩 EFI + 对齐的余量（约 0.3 GB）
+    assert got["after"]["extras"] == 0
+    assert got["after"]["data"] >= 326.0, got
+    assert got["spare"] <= 0.5, got
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="没有 node")
+def test_last_data_partition_is_sent_as_auto(tmp_path: Path) -> None:
+    """把盘填满时，最后一个数据分区发 ``"auto"``，由 diskpart 自己吃剩余空间。
+
+    ``create partition primary``（不带 ``size=``）会用掉全部剩余空间，比我们在界面上
+    算「总容量 − C − EFI − 对齐余量」更准；用户故意把 D 调小、留一大块空盘时，
+    仍然发显式大小（尊重“留白”的意图）。
+    """
+    for name in ("derive.js", "state.js"):
+        (tmp_path / name.replace(".js", "_copy.mjs")).write_text(
+            (JS / name).read_text(encoding="utf-8").replace("'./derive.js'", "'./derive_copy.mjs'"),
+            encoding="utf-8",
+        )
+    script = tmp_path / "selection_payload.mjs"
+    script.write_text(
+        "import { state, resetWizard, addTarget, addExtraPartition, selectionPayload, targetOf }\n"
+        "  from './state_copy.mjs';\n"
+        "const GB = 1024 ** 3;\n"
+        "state.disks = [{ disk_number: 1, size_bytes: Math.round(477 * GB), model: 'X',\n"
+        "  partition_style: 'GPT', partitions: [] }];\n"
+        "state.settings = { sysDefaultGb: 120, dataDefaultGb: 'auto', defaultFs: 'NTFS' };\n"
+        "resetWizard();\n"
+        "addTarget(1);\n"
+        "const filled = selectionPayload()['1'];\n"
+        "addExtraPartition(1);\n"
+        "const withExtra = selectionPayload()['1'];\n"
+        "const target = targetOf(1);\n"
+        "target.dataGb = 100;   // 用户故意只给 D 100 GB，留一大块空盘\n"
+        "target.extras.length = 0;\n"
+        "const shrunk = selectionPayload()['1'];\n"
+        "console.log(JSON.stringify({ filled, withExtra, shrunk }));\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [shutil.which("node"), str(script)],
+        cwd=str(tmp_path), capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    got = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    # 默认两分区：D 发 auto（盘本来就是填满的）
+    assert got["filled"]["data_size"] == "auto"
+    assert "data_partitions" not in got["filled"]
+    # 加了 E：D 显式、最后一份（E）发 auto
+    parts = got["withExtra"]["data_partitions"]
+    assert len(parts) == 2
+    assert parts[0]["size_gb"] == 178.3
+    assert parts[-1]["size_gb"] == "auto"
+    assert all(entry["file_system"] == "NTFS" for entry in parts)
+    # 用户手动把 D 调小、留下 250 GB 不分配：必须是显式数字，不能偷偷吃掉
+    assert got["shrunk"]["data_size"] == 100

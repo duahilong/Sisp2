@@ -273,6 +273,9 @@ async function main() {
       summary.steps.push({
         step2extra: JSON.parse(await evaluate(`(function () {
           const row = document.querySelector('#wzBody .szrow.extra');
+          const restText = String((document.querySelector('#wzBody .trest [data-rest]') || {}).textContent || '');
+          const freeSeg = document.querySelector('#wzBody .wseg.free');
+          const footText = String((document.querySelector('#wzBody [data-err]') || {}).textContent || '');
           const nameEl = row && row.querySelector('.szname');
           const inputs = Array.from(document.querySelectorAll('#wzBody .szrow input[data-size]'));
           const dataInput = inputs.find((el) => el.dataset.size === 'data');
@@ -291,9 +294,75 @@ async function main() {
             splitOk: dataGb > 0 && extraGb > 0 && Math.abs(dataGb - extraGb) <= 1.5,
             error: (document.querySelector('#wzBody .errmsg') || {}).textContent || '',
             canAddMore: Boolean(document.querySelector('#wzBody button[data-add]')),
+            restText: restText,
+            restHidden: Boolean(document.querySelector('#wzBody .trest .restbox[hidden]')),
+            freeWidth: freeSeg ? freeSeg.style.width : '',
+            footText: footText,
           });
         })()`)),
       });
+      // 快捷容量（100/120/150/200）：以前只算 C、D，E 保持原值，于是 C+D+E 会
+      // 超过盘容量、界面报「超过磁盘容量」。现在走 derive.fitLayout，E 跟着重算。
+      const preset = await evaluate(`(function () {
+        const readValues = () => {
+          const out = {};
+          document.querySelectorAll('#wzBody .szrow input[data-size]').forEach((el) => {
+            out[el.dataset.size] = Number(el.value);
+          });
+          return out;
+        };
+        const sum = (v) => Math.round(((v.sys || 0) + (v.data || 0) + (v.extra || 0)) * 10) / 10;
+        const capacityGb = parseFloat(String((document.querySelector('#wzBody .trest [data-total]') || {}).textContent || '')) || 0;
+        const before = readValues();
+        const button = document.querySelector('#wzBody .presets button[data-preset="200"]');
+        if (button) button.click();
+        const after = readValues();
+        return JSON.stringify({
+          clicked: Boolean(button),
+          sysBefore: before.sys,
+          sysAfter: after.sys,
+          dataBefore: before.data,
+          dataAfter: after.data,
+          extraBefore: before.extra,
+          extraAfter: after.extra,
+          sumAfter: sum(after),
+          capacityGb: capacityGb,
+          over: sum(after) > capacityGb,
+          evenSplit: after.extra !== undefined && Math.abs(after.data - after.extra) <= 0.1,
+          error: String((document.querySelector('#wzBody .errmsg') || {}).textContent || ''),
+          nextDisabled: Boolean((document.querySelector('#wzNext') || {}).disabled),
+        });
+      })()`);
+      await sleep(250);
+      summary.shots.push(await shoot('05b1-install-step2-preset'));
+      const presetResult = JSON.parse(preset);
+      summary.steps.push({ step2preset: presetResult });
+      if (!presetResult.clicked) problems.push('第 2 步找不到快捷容量按钮 200');
+      if (presetResult.over) problems.push('快捷容量 200 之后 C+D+E 超过了盘容量');
+      if (!presetResult.evenSplit) {
+        problems.push(`快捷容量 200 之后 D(${presetResult.dataAfter}) 与 E(${presetResult.extraAfter}) 没有平分剩余容量`);
+      }
+      if (presetResult.error) problems.push(`快捷容量 200 之后出现错误提示: ${presetResult.error}`);
+      if (presetResult.nextDisabled) problems.push('快捷容量 200 之后“下一步”被禁用（说明布局不合法）');
+
+      // 第 2 步的「剩余」必须与执行计划一致：最后一个数据分区会吃掉零头时，
+      // 最后一个数据分区总会吃满整盘，所以这里不再显示“剩余”（永远是 0，没信息量）；
+      // 进度条也不留灰色未分配段，脚注写“+ 剩余 …（并入 X）”。
+      const step2Extra = summary.steps.find((item) => item.step2extra)?.step2extra;
+      if (!step2Extra) {
+        problems.push('没采集到第 2 步加 E 之后的状态');
+      } else {
+        if (step2Extra.restText !== '' || !step2Extra.restHidden) {
+          problems.push(`加 E 之后不该再显示“剩余”（永远是 0），实际：text='${step2Extra.restText}' hidden=${step2Extra.restHidden}`);
+        }
+        if (step2Extra.freeWidth && parseFloat(step2Extra.freeWidth) > 0) {
+          problems.push(`加 E 之后进度条还留着未分配段（width=${step2Extra.freeWidth}）`);
+        }
+        if (/剩余/.test(step2Extra.footText)) {
+          problems.push(`加 E 之后脚注不该再提“剩余”（零头归 E），实际：${step2Extra.footText}`);
+        }
+      }
+
       // 两条分隔条：C|D 与 D|E。拖 D|E 只挪比例（总量不变），拖 C|D 到最右也不能超盘。
       const dragged = await evaluate(`(function () {
         const bar = document.querySelector('#wzBody .wzbar');
@@ -359,11 +428,35 @@ async function main() {
       })()`);
       await sleep(200);
       summary.steps.push({
-        step2extraRemoved: JSON.parse(await evaluate(`JSON.stringify({
-          clicked: ${removed ? 'true' : 'false'},
-          rows: document.querySelectorAll('#wzBody .szrow.extra').length,
-        })`)),
+        step2extraRemoved: JSON.parse(await evaluate(`(function () {
+          const readValues = () => {
+            const out = {};
+            document.querySelectorAll('#wzBody .szrow input[data-size]').forEach((el) => {
+              out[el.dataset.size] = Number(el.value);
+            });
+            return out;
+          };
+          const values = readValues();
+          const capacityGb = parseFloat(String((document.querySelector('#wzBody .trest [data-total]') || {}).textContent || '')) || 0;
+          return JSON.stringify({
+            clicked: ${removed ? 'true' : 'false'},
+            rows: document.querySelectorAll('#wzBody .szrow.extra').length,
+            sysGb: values.sys,
+            dataGb: values.data,
+            capacityGb: capacityGb,
+            // 删掉 E 之后 D 要把容量吃回来，不能留一大块“未分配”
+            spareGb: Math.round((capacityGb - (values.sys || 0) - (values.data || 0)) * 10) / 10,
+            error: String((document.querySelector('#wzBody .errmsg') || {}).textContent || ''),
+          });
+        })()`)),
       });
+      const removedResult = summary.steps[summary.steps.length - 1].step2extraRemoved;
+      if (removedResult.rows !== 0) problems.push('删掉 E 之后还留着 E 的输入行');
+      if (removedResult.spareGb > 2) {
+        problems.push(`删掉 E 之后 D 没有吃掉容量：未分配 ${removedResult.spareGb} GB`);
+      }
+      if (removedResult.error) problems.push(`删掉 E 之后报错: ${removedResult.error}`);
+      summary.shots.push(await shoot('05b3-install-step2-extra-removed'));
 
       // 再加回去，让后面第 3、4 步和真实写盘都是“四个分区”的路径
       await evaluate(`(function () {

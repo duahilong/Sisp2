@@ -255,8 +255,29 @@ export function suggestLetter(disks, exclude = []) {
   return '';
 }
 
-/** 默认分区大小里给 EFI / 对齐预留的余量（GB）。 */
-export const RESERVE_GB = 1;
+/** EFI（ESP）分区的默认大小（MB）：与设置里的 ``efiDefaultMb`` 默认值一致。 */
+export const DEFAULT_EFI_MB = 100;
+
+/**
+ * 分区对齐 + GPT 头/备份 GPT + diskpart 取整的余量（GB）。
+ *
+ * 这部分是硬开销：每个分区要按 1 MB 边界对齐，GPT 主/备表各占 33 个扇区，
+ * ``diskpart create partition size=`` 也按扇区向上取整。0.2 GB 足够而且不浪费。
+ */
+export const ALIGN_GB = 0.2;
+
+/**
+ * 给“分区能不能放下”预留的余量（GB）= EFI 分区 + 对齐开销。
+ *
+ * 以前这里固定写 1 GB，用户会在界面上看到“剩余 1.0 GB”却不知道花在哪里。
+ * EFI 大小其实是已知的（设置里的 ``efiDefaultMb``，第 4 步的计划里也有真值），
+ * 按真值预留就只剩约 0.3 GB，不会再出现一整 GB 白放着的情况。
+ */
+export function reserveGb(efiMb = DEFAULT_EFI_MB) {
+  const mb = Number(efiMb);
+  const safe = Number.isFinite(mb) && mb > 0 ? mb : DEFAULT_EFI_MB;
+  return Math.round((safe / 1024 + ALIGN_GB) * 100) / 100;
+}
 
 /** 分区地图标尺刻度：0 / 25% / 50% / 75% / 100%，最后一个是总容量。 */
 export function rulerTicks(totalBytes) {
@@ -311,6 +332,90 @@ export function checkLayout(totalBytes, sysGb, dataGb, extras = [], efiMb = 100)
 /** 兼容老调用方：没有额外分区时就是原来的两分区校验。 */
 export function checkSizes(totalBytes, sysGb, dataGb, efiMb = 100) {
   return checkLayout(totalBytes, sysGb, dataGb, [], efiMb);
+}
+
+/** 向下取整到 0.1 GB：重新分配时永远不吃掉最后 0.1 GB，总和不会超过真实容量。
+ *
+ * 加 1e-9 的容差：`476.9 - 200 - 0.3` 在浮点下是 `276.59999999999997`，直接 floor
+ * 会凭空少 0.1 GB（界面上的数字会跳来跳去），加一个远小于 0.1 GB 的容差即可。
+ */
+export const floor1Gb = (value) => Math.floor((Number(value) || 0) * 10 + 1e-9) / 10;
+
+/** 剩余容量低于这个值（GB）时，就让最后一个数据分区“吃掉剩余空间”。 */
+export const EAT_REST_GB = 1;
+
+/** 扣掉 C、D、E 之后还剩多少 GB（可以为负 = 已经超容量）。 */
+export function trailingSpareGb(totalGb, sysGb, dataGb, extrasGb = []) {
+  const extras = (extrasGb || []).reduce((sum, gb) => sum + (Number(gb) || 0), 0);
+  return (Number(totalGb) || 0) - (Number(sysGb) || 0) - (Number(dataGb) || 0) - extras;
+}
+
+/**
+ * 最后一个数据分区是否会“吃掉剩余空间”（不写 `size=`，由 diskpart 决定）。
+ *
+ * 抽成纯函数是因为两个地方必须同口径：`selectionPayload()` 据此发 `"auto"`，
+ * 界面上的「剩余」文案据此显示「0（并入 E）」。否则会出现“第 2 步说还剩 348 MB、
+ * 第 4 步却把它全给了 E”这种自相矛盾的显示。
+ */
+export function lastPartitionEatsRest(totalGb, sysGb, dataGb, extrasGb = []) {
+  return trailingSpareGb(totalGb, sysGb, dataGb, extrasGb) < EAT_REST_GB;
+}
+
+/**
+ * 应用「系统分区 = wantedSysGb」之后的完整布局，保证各分区之和不超过盘容量。
+ *
+ * 两种分配规则：
+ *   - 默认（拖动 C|D 分隔条）：能不动 E 就不动它，剩下的全给 D；只有当 D 会被
+ *     压到下限（``MIN_DATA_GB``）以下时，才从 E 里扣，最多扣到 E 的下限。
+ *   - ``{ even: true }``（快捷容量按钮）：剩下的容量由 D 和 E **平分**。
+ *     用户点「200」的预期是“系统 200，剩下的 300 由 D/E 一人一半”，
+ *     而不是“D 先把 300 吞完、E 还是原来的数”。
+ *
+ * 快捷容量按钮（100/120/150/200）以前只算了 C 与 D，E 保持原值，于是出现
+ * 「C 200 + D 275.9 + E 71.7 = 547.6 GB，而盘只有 477 GB」这种自相矛盾的界面。
+ * **所有“只改系统分区大小”的入口都必须走这里**，别自己拼 totalGb - sysGb。
+ *
+ * @param {number} totalGb 整块盘的容量（GB）
+ * @param {number} wantedSysGb 想要的系统分区大小（GB）
+ * @param {number[]} extrasGb 额外数据分区（E、F…）当前大小（GB）
+ * @param {{even?: boolean, efiMb?: number}} [options]
+ *        ``even`` 为真时数据分区平分剩余容量；``efiMb`` 是 EFI 分区大小（MB），
+ *        决定预留多少余量（默认 ``DEFAULT_EFI_MB`` + ``ALIGN_GB``）。
+ * @returns {{sysGb:number, dataGb:number, extrasGb:number[]}}
+ */
+export function fitLayout(totalGb, wantedSysGb, extrasGb = [], options = {}) {
+  const total = Number(totalGb) || 0;
+  const extras = (extrasGb || []).map((gb) => Math.max(0, Number(gb) || 0));
+  const extraMin = extras.length * MIN_EXTRA_GB;
+  const reserve = reserveGb(options.efiMb);
+  // 先夹 C：要给 D 和每个 E 的下限留够位置，再留余量给 EFI/对齐
+  const maxSys = Math.max(MIN_SYS_GB, floor1Gb(total - reserve - MIN_DATA_GB - extraMin));
+  const sysGb = clamp(Number(wantedSysGb) || MIN_SYS_GB, MIN_SYS_GB, maxSys);
+  // D + E 能分到的总量
+  const budget = Math.max(0, floor1Gb(total - sysGb - reserve));
+  if (budget < MIN_DATA_GB + extraMin) {
+    // 盘小到连下限都放不下：先给下限，剩下的交给 checkLayout 报错
+    return { sysGb, dataGb: MIN_DATA_GB, extrasGb: extras.map(() => MIN_EXTRA_GB) };
+  }
+  if (options.even && extras.length) {
+    // 平分：每一份向下取整，剩下的零头（最多 0.1 GB × 份数）留作未分配，
+    // 换到的结果是 D 和 E 的数字完全一样
+    const each = floor1Gb(budget / (1 + extras.length));
+    if (each >= MIN_DATA_GB && each >= MIN_EXTRA_GB) {
+      return { sysGb, dataGb: each, extrasGb: extras.map(() => each) };
+    }
+  }
+  const kept = extras.map((gb) => Math.max(MIN_EXTRA_GB, floor1Gb(gb)));
+  // E 先按原样留着，其余全给 D（dataGb 与 kept 之和恒等于 budget）
+  let dataGb = floor1Gb(budget - kept.reduce((sum, gb) => sum + gb, 0));
+  // E 占太多把 D 挤到下限以下：从最后一个 E 开始扣，扣到它的下限为止
+  for (let index = kept.length - 1; index >= 0 && dataGb < MIN_DATA_GB; index -= 1) {
+    const take = Math.min(kept[index] - MIN_EXTRA_GB, floor1Gb(MIN_DATA_GB - dataGb));
+    if (!(take > 0)) continue;
+    kept[index] = floor1Gb(kept[index] - take);
+    dataGb = floor1Gb(dataGb + take);
+  }
+  return { sysGb, dataGb: Math.max(MIN_DATA_GB, dataGb), extrasGb: kept };
 }
 
 /** 按计划建完分区后剩下的未分配字节数（0 表示正好用完）。 */

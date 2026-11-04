@@ -7,8 +7,8 @@
  */
 
 import {
-  clamp, freeBytes, isSelectable, checkLayout,
-  MIN_DATA_GB, MIN_EXTRA_GB, MAX_EXTRAS, RESERVE_GB, toGb,
+  clamp, freeBytes, isSelectable, checkLayout, fitLayout, reserveGb as reserveGbFor,
+  lastPartitionEatsRest, DEFAULT_EFI_MB, MIN_DATA_GB, MIN_EXTRA_GB, MAX_EXTRAS, toGb,
 } from './derive.js';
 
 export const STEP_LABELS = {
@@ -182,16 +182,38 @@ export function targetOf(diskNumber) {
   return state.wizard.targets.find((target) => Number(target.diskNumber) === Number(diskNumber)) || null;
 }
 
+/** 第 2 步能拿到的 EFI 分区大小（MB）。
+ *
+ * 优先用执行计划的真实值（第 4 步会回填 ``config_payload.partition_info``），
+ * 其次用设置里的 ``efiDefaultMb``，都没有才用默认 100 MB。
+ * 它决定给 EFI/对齐预留多少余量，所以值不准只会多一点或少一点“未分配”，
+ * 不会让计划变得不合法（后端 `_check_partition_fit` 会再验一次）。
+ */
+export function reserveEfiMb() {
+  const item = (state.plans || []).find((plan) => plan.spec && plan.spec.config_payload);
+  const info = item && item.spec.config_payload.partition_info;
+  const fromPlan = Number(info && info.efi_size_mb);
+  if (fromPlan > 0) return fromPlan;
+  const fromSettings = Number(state.settings && state.settings.efiDefaultMb);
+  return fromSettings > 0 ? fromSettings : DEFAULT_EFI_MB;
+}
+
+/** 要预留的容量（GB）= EFI 分区 + 对齐开销；界面所有“分多少”的地方都用它。 */
+export function reserveGb() {
+  return reserveGbFor(reserveEfiMb());
+}
+
 export function defaultSizes(disk) {
   const total = Number(disk && disk.size_bytes) || 0;
   const totalGb = total / (1024 ** 3);
+  const reserve = reserveGb();
   const wanted = Math.round(Number((state.settings && state.settings.sysDefaultGb) || 120));
   const sys = clamp(wanted, 60, Math.max(60, Math.floor(totalGb - 20)));
   const dataDefault = state.settings ? state.settings.dataDefaultGb : 'auto';
-  // 留 1 GB 给 EFI 分区和对齐，否则默认值会把盘算到最后一字节，后端直接判容量不足。
-  let data = Math.round((totalGb - sys - RESERVE_GB) * 10) / 10;
+  // 留出 EFI 与对齐的余量，否则默认值会把盘算到最后一字节，后端直接判容量不足。
+  let data = Math.round((totalGb - sys - reserve) * 10) / 10;
   if (dataDefault !== 'auto' && Number(dataDefault) > 0) {
-    data = clamp(Number(dataDefault), 20, Math.max(20, Math.floor(totalGb - sys - RESERVE_GB)));
+    data = clamp(Number(dataDefault), 20, Math.max(20, Math.floor(totalGb - sys - reserve)));
   }
   data = Math.max(20, data);
   return { sysGb: sys, dataGb: data };
@@ -236,7 +258,7 @@ export function dataFs() {
   return raw === 'EXFAT' ? 'exFAT' : 'NTFS';
 }
 
-/** 加一个数据分区（E）。默认与 D 平分剩余容量；放不下两张下限时返回 false。 */
+/** 加一个数据分区（E）。平分剩余容量；放不下两张下限时返回 false。 */
 export function addExtraPartition(diskNumber) {
   const target = targetOf(diskNumber);
   const disk = diskOf(diskNumber);
@@ -244,31 +266,67 @@ export function addExtraPartition(diskNumber) {
   if (!Array.isArray(target.extras)) target.extras = [];
   if (target.extras.length >= MAX_EXTRAS) return false;
 
-  // 可分配给数据分区的总量 = 总容量 − 系统分区 − 给 EFI/对齐留的余量
-  const totalGb = toGb(disk.size_bytes);
-  const available = Math.round((totalGb - Number(target.sysGb || 0) - RESERVE_GB) * 10) / 10;
-  if (!(available > 0)) return false;
+  // 试算：把这一份当成“已经存在的最小 E”，让 fitLayout 平分一次。
+  // 用同一个函数，所以“加 E 之后的平分”与“点快捷容量之后的平分”永远一致。
+  const trial = [
+    ...target.extras.map((extra) => Number(extra.sizeGb) || 0),
+    MIN_EXTRA_GB,
+  ];
+  const fit = fitLayout(toGb(disk.size_bytes), Number(target.sysGb || 0), trial, {
+    even: true,
+    efiMb: reserveEfiMb(),
+  });
+  // fitLayout 只有真走了“平分”分支才会让所有数据分区一样大；
+  // 盘太小被压回下限时不是平分的，这种情况直接放弃（提示用户没空间了）。
+  const even = fit.extrasGb.length === trial.length
+    && fit.extrasGb.every((gb) => gb === fit.dataGb)
+    && fit.dataGb >= MIN_DATA_GB;
+  if (!even) return false;
 
-  let dataGb = Math.floor((available / 2) * 10) / 10;
-  if (dataGb < MIN_DATA_GB) dataGb = MIN_DATA_GB;
-  let extraGb = Math.floor((available - dataGb) * 10) / 10;
-  if (extraGb < MIN_EXTRA_GB) {
-    extraGb = MIN_EXTRA_GB;
-    dataGb = Math.round((available - extraGb) * 10) / 10;
-  }
-  // 两个分区都有下限（D ≥ 20 GB、E ≥ 1 GB），放不下就放弃
-  if (dataGb < MIN_DATA_GB || extraGb < MIN_EXTRA_GB) return false;
-
-  target.dataGb = dataGb;
-  target.extras.push({ sizeGb: extraGb, fs: dataFs() });
+  target.extras.push({ sizeGb: MIN_EXTRA_GB, fs: dataFs() });
+  applyFit(target, fit);
   state.wizard.ack = false;
   return true;
 }
 
+/** 把 ``derive.fitLayout()`` 的结果写回 target。
+ *
+ * 界面里有好几处“重算容量”（快捷容量、拖动分隔条、加/删 E），全都走这一个回写，
+ * 避免某个入口只改了一半字段（曾经就是这样：删掉 E 之后 D 还停在“平分”时的半个盘）。
+ */
+export function applyFit(target, fit) {
+  if (!target || !fit) return;
+  target.sysGb = fit.sysGb;
+  target.dataGb = fit.dataGb;
+  const extras = Array.isArray(target.extras) ? target.extras : [];
+  extras.forEach((extra, index) => {
+    if (fit.extrasGb[index] !== undefined) extra.sizeGb = fit.extrasGb[index];
+  });
+}
+
+/** 删掉一个额外分区（E）。
+ *
+ * 删完要把解出来的容量还给 D——回到“C 指定大小 + D 吃掉剩余”的两分区状态，
+ * 否则界面会停在「D 只占一半、另一半变成未分配」的怪状态（总容量没少，但用户
+ * 明明只想回到两个分区）。这是用户明确要求的行为：不想加 E 了，删掉就该恢复原样。
+ */
 export function removeExtraPartition(diskNumber, index) {
   const target = targetOf(diskNumber);
   if (!target || !Array.isArray(target.extras)) return;
   target.extras.splice(Number(index), 1);
+  const disk = diskOf(diskNumber);
+  const totalGb = disk ? toGb(disk.size_bytes) : 0;
+  if (totalGb > 0) {
+    applyFit(
+      target,
+      fitLayout(
+        totalGb,
+        Number(target.sysGb) || 0,
+        target.extras.map((extra) => Number(extra.sizeGb) || 0),
+        { efiMb: reserveEfiMb() },
+      ),
+    );
+  }
   state.wizard.ack = false;
 }
 
@@ -277,25 +335,43 @@ export function targetsValid() {
     && state.wizard.targets.every((target) => !targetError(target));
 }
 
-/** 每块盘的通知 payload：POST /api/prepare 的 selection 形态。 */
+/** 每块盘的通知 payload：POST /api/prepare 的 selection 形态。
+ *
+ * **最后一个数据分区默认发 ``"auto"``**（= diskpart 不写 ``size=``，吃掉剩余空间），
+ * 前提是“这块盘本来就是填满的”——即扣掉 C、D、E 之后只剩 EFI/对齐的零头（< 1 GB）。
+ * 这样：
+ *   - 不会再因为我们对对齐余量的估算偏差，出现“界面显示刚好、diskpart 报空间不足”；
+ *   - 用户故意把 D 调小、留下大块空盘时，仍然发显式大小（草重“留白”的意图）。
+ */
 export function selectionPayload() {
   const selection = {};
   const fs = dataFs();
   for (const target of state.wizard.targets) {
-    const entry = { c_size: Number(target.sysGb) };
     const extras = Array.isArray(target.extras) ? target.extras : [];
+    // 布局是否本来就填满盘（只余 EFI/对齐的零头）——判据与界面文案共用 derive
+    const disk = diskOf(target.diskNumber);
+    const eatRest = lastPartitionEatsRest(
+      toGb(disk ? disk.size_bytes : 0),
+      target.sysGb,
+      target.dataGb,
+      extras.map((extra) => Number(extra.sizeGb) || 0),
+    );
+    const entry = { c_size: Number(target.sysGb) };
     if (extras.length) {
       // 有额外分区时必须给出显式列表：第一个是 D，其余是 E/F……
       // 文件系统统一取 dataFs()，界面上的 E 没有选择器（与 D 一致）。
-      entry.data_partitions = [
+      const list = [
         { size_gb: Number(target.dataGb), file_system: fs },
         ...extras.map((extra) => ({
           size_gb: Number(extra.sizeGb),
           file_system: fs,
         })),
       ];
+      // 只有**最后**一项允许 auto（后端会检查，中间项 auto 直接报错）
+      if (eatRest) list[list.length - 1].size_gb = 'auto';
+      entry.data_partitions = list;
     } else {
-      entry.data_size = Number(target.dataGb);
+      entry.data_size = eatRest ? 'auto' : Number(target.dataGb);
     }
     if (target.imagePath) entry.win_gho = target.imagePath;
     if (target.imageIndex) entry.image_index = Number(target.imageIndex);

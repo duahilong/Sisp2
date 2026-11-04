@@ -13,12 +13,12 @@ import { $, $$, esc, on } from './dom.js';
 import {
   fmtSize, segments, fsColor, isSelectable,
   protectionText, clamp, MIN_SYS_GB, MIN_DATA_GB, MIN_EXTRA_GB, MAX_EXTRAS,
-  toGb, fromGb, RESERVE_GB, extraColor, extraLetter, unallocatedBytes,
+  toGb, fromGb, extraColor, extraLetter, unallocatedBytes, fitLayout, lastPartitionEatsRest,
 } from './derive.js';
 import {
   state, diskOf, targetOf, targetError, targetRest, addTarget, removeTarget,
-  addExtraPartition, removeExtraPartition, selectionPayload, resetWizard,
-  dataFs, STEP_LABELS, JOB_STATUS_TEXT,
+  addExtraPartition, removeExtraPartition, selectionPayload, resetWizard, applyFit,
+  reserveGb, reserveEfiMb, dataFs, STEP_LABELS, JOB_STATUS_TEXT,
 } from './state.js';
 import { pushLog, toast, confirmDialog, openModal, jobStatusText } from './shell.js';
 import { lostPartitionsText } from './view-main.js';
@@ -258,7 +258,7 @@ function stepSizeHtml() {
       <div class="tgt-h">
         <span class="tn">磁盘 ${target.diskNumber}</span>
         <span class="tm">${esc(disk.model || '')} · ${esc(disk.partition_style || '')}</span>
-        <span class="trest">总容量 <b data-total>${esc(fmtSize(total))}</b> · 剩余 <b data-rest class="${error ? 'warn' : ''}">${esc(layout.free > 0 ? fmtSize(layout.free) : '不足')}</b></span>
+        <span class="trest">总容量 <b data-total>${esc(fmtSize(total))}</b><span class="restbox"${eatsRest(target) ? ' hidden' : ''}> · 剩余 <b data-rest class="${error ? 'warn' : ''}">${esc(restText(target, targetRest(target)))}</b></span></span>
       </div>
       <div class="szrow">
         <span class="szname"><span class="lbadge" style="background:${fsColor('NTFS')}">C</span>系统分区（Windows）</span>
@@ -278,7 +278,7 @@ function stepSizeHtml() {
         <span class="wseg sys" style="width:${layout.sysPct.toFixed(2)}%"><span>系统 ${esc(target.sysGb)} GB</span></span>
         <span class="wseg dat" style="width:${layout.dataPct.toFixed(2)}%"><span>数据 ${esc(target.dataGb)} GB</span></span>
         ${extraSegs}
-        <span class="wseg free" style="width:${layout.freePct.toFixed(2)}%"><span>${(layout.free / GB) >= 1 ? `未分配 ${Math.round(layout.free / GB)} GB` : ''}</span></span>
+        <span class="wseg free" style="width:${eatsRest(target) ? '0' : layout.freePct.toFixed(2)}%"><span>${!eatsRest(target) && (layout.free / GB) >= 1 ? `未分配 ${Math.round(layout.free / GB)} GB` : ''}</span></span>
         <span class="wgrip" data-grip="sys" style="left:${layout.sysPct.toFixed(2)}%" title="拖动调整系统分区大小"></span>
         ${extras.length ? `<span class="wgrip" data-grip="data" style="left:${(layout.sysPct + layout.dataPct).toFixed(2)}%" title="拖动调整 D / E 容量"></span>` : ''}
       </div>
@@ -293,9 +293,27 @@ function stepSizeHtml() {
 
   return `<div class="wz-inner">
     <h3 class="wz-h">分区与格式化</h3>
-    <p class="wz-p">每块盘会被重新分区：EFI 分区 + 系统分区 + 数据分区，GPT + UEFI。需要的话可以再加一个数据分区（E）。数字只影响分区大小，剩余容量保持未分配，盘上原有数据会全部丢失。</p>
+    <p class="wz-p">每块盘会被重新分区：EFI 分区 + 系统分区 + 数据分区，GPT + UEFI。需要的话可以再加一个数据分区（E）。数字只影响分区大小：<b>最后一个数据分区会占满剩余容量</b>（想留一块空白就把它的数字调小），盘上原有数据会全部丢失。</p>
     ${cards || '<div class="empty-hint">还没有选盘</div>'}
   </div>`;
+}
+
+/** 这块盘的最后一个数据分区会不会吃掉剩余空间（与 selectionPayload 同判据）。 */
+function eatsRest(target) {
+  const disk = diskOf(target.diskNumber);
+  const extras = Array.isArray(target.extras) ? target.extras : [];
+  return lastPartitionEatsRest(
+    toGb(Number(disk && disk.size_bytes) || 0),
+    target.sysGb,
+    target.dataGb,
+    extras.map((extra) => Number(extra.sizeGb) || 0),
+  );
+}
+
+/** 红框里的“剩余”：最后一个数据分区总会吃满盘时**不显示**（永远是 0，没信息量）。 */
+function restText(target, spareBytes) {
+  if (eatsRest(target)) return '';
+  return spareBytes > 0 ? fmtSize(spareBytes) : '不足';
 }
 
 /** 脚注：各分区大小 + 会有多少容量保持未分配。 */
@@ -311,7 +329,10 @@ function layoutText(target) {
     parts.push(`数据(${extraLetter(extras.indexOf(extra))}) ${Math.round(Number(extra.sizeGb) || 0)} GB`);
   }
   const spare = unallocatedBytes(total, target.sysGb, target.dataGb, extras);
-  const tail = spare >= GB / 2 ? ` · 未分配 ${fmtSize(spare)}` : '';
+  // 最后一个数据分区总会吃满盘，此时零头是它的、不是“未分配”，所以脚注不再提
+  const tail = eatsRest(target)
+    ? ''
+    : (spare >= GB / 2 ? ` · 未分配 ${fmtSize(spare)}` : '');
   return `${efiText()} + ${parts.join(' + ')}${tail}`;
 }
 
@@ -381,9 +402,17 @@ function bindStepSize() {
       const target = targetOf(Number(button.parentElement.dataset.disk));
       if (!target) return;
       const disk = diskOf(target.diskNumber);
-      const totalGb = ((Number(disk && disk.size_bytes) || 0) / GB);
-      target.sysGb = clamp(Number(button.dataset.preset), MIN_SYS_GB, Math.max(MIN_SYS_GB, totalGb - MIN_DATA_GB - RESERVE_GB));
-      target.dataGb = Math.max(MIN_DATA_GB, Math.round((totalGb - target.sysGb - RESERVE_GB) * 10) / 10);
+      const totalGb = toGb(Number(disk && disk.size_bytes) || 0);
+      // 必须走 fitLayout：它会把 E 也一起算进去。以前这里只算 C、D，
+      // E 保持原值，于是“C200 + D275.9 + E71.7”超过了 477 GB 的盘。
+      // even: 选「200」的预期是“系统 200，剩下的 D/E 平分”，不是 D 独吞剩余。
+      const fit = fitLayout(
+        totalGb,
+        Number(button.dataset.preset),
+        (Array.isArray(target.extras) ? target.extras : []).map((extra) => Number(extra.sizeGb) || 0),
+        { even: true, efiMb: reserveEfiMb() },
+      );
+      applyFit(target, fit);
       state.wizard.ack = false;
       renderInstall();
     });
@@ -417,8 +446,9 @@ function updateSizeVisual(target) {
   });
   if (freeSeg) {
     const spare = Math.max(0, targetRest(target));
-    freeSeg.style.width = `${freePct}%`;
-    freeSeg.firstElementChild.textContent = spare / GB >= 1 ? `未分配 ${Math.round(spare / GB)} GB` : '';
+    const eats = eatsRest(target);
+    freeSeg.style.width = eats ? '0%' : `${freePct}%`;
+    freeSeg.firstElementChild.textContent = !eats && spare / GB >= 1 ? `未分配 ${Math.round(spare / GB)} GB` : '';
   }
   card.querySelectorAll('.wgrip').forEach((grip) => {
     if (grip.dataset.grip === 'data') grip.style.left = `${sysPct + dataPct}%`;
@@ -434,8 +464,12 @@ function updateSizeVisual(target) {
   const restBox = card.querySelector('.trest [data-rest]');
   if (restBox) {
     const spare = targetRest(target);
-    restBox.textContent = spare > 0 ? fmtSize(spare) : '不足';
-    restBox.classList.toggle('warn', spare <= 0);
+    const eats = eatsRest(target);
+    restBox.textContent = restText(target, spare);
+    restBox.classList.toggle('warn', !eats && spare < 0);
+    const restWrap = card.querySelector('.trest .restbox');
+    // 最后一个数据分区会吃满盘时不显示“剩余”（永远是 0）
+    if (restWrap) restWrap.hidden = eats;
   }
 }
 
@@ -446,25 +480,22 @@ function bindDrag(bar) {
   const total = Number(disk.size_bytes) || GB;
   const totalGb = toGb(total);
   const extras = () => (Array.isArray(target.extras) ? target.extras : []);
-  const extrasGb = () => extras().reduce((sum, extra) => sum + (Number(extra.sizeGb) || 0), 0);
+  const extrasGbList = () => extras().map((extra) => Number(extra.sizeGb) || 0);
   // 向下取整：吸收变化的那一侧永远不吃掉最后 0.1 GB，保证总和不超过真实容量。
   const floor1 = (value) => Math.floor(value * 10) / 10;
   const round1 = (value) => Math.round(value * 10) / 10;
   let mode = 'sys';
 
-  /** C|D 分界：C 变大变小都由 D 吸收，E 固定。 */
-  const applySys = (ratio) => {
-    const restGb = extrasGb();
-    const maxSys = Math.max(MIN_SYS_GB, floor1(totalGb - RESERVE_GB - restGb - MIN_DATA_GB));
-    target.sysGb = clamp(round1(totalGb * ratio), MIN_SYS_GB, maxSys);
-    target.dataGb = Math.max(MIN_DATA_GB, floor1(totalGb - target.sysGb - restGb - RESERVE_GB));
+  /** 把 C 设成 newSysGb，D/E 一起重新分配（fitLayout 保证不超容量）。 */
+  const applySys = (newSysGb) => {
+    applyFit(target, fitLayout(totalGb, newSysGb, extrasGbList(), { efiMb: reserveEfiMb() }));
   };
 
   /** D|E 分界：两者总量不变，只在中间挪——所以永远不会超过盘容量。 */
   const applySplit = (ratio) => {
     const list = extras();
     if (!list.length) return;
-    const available = totalGb - Number(target.sysGb || 0) - RESERVE_GB;
+    const available = totalGb - Number(target.sysGb || 0) - reserveGb();
     const dataGb = clamp(
       round1(totalGb * ratio - Number(target.sysGb || 0)),
       MIN_DATA_GB,
@@ -490,7 +521,7 @@ function bindDrag(bar) {
     if (!rect.width) return;
     const ratio = clamp((clientX - rect.left) / rect.width, 0, 1);
     if (mode === 'data') applySplit(ratio);
-    else applySys(ratio);
+    else applySys(round1(totalGb * ratio));
     syncInputs();
     updateSizeVisual(target);
   };
@@ -522,7 +553,7 @@ function bindDrag(bar) {
     const step = event.key === 'ArrowLeft' ? -1 : 1;
     if (extras().length && event.shiftKey) {
       // Shift + 左右：调 D|E 分界
-      const available = totalGb - Number(target.sysGb || 0) - RESERVE_GB;
+      const available = totalGb - Number(target.sysGb || 0) - reserveGb();
       const dataGb = clamp(
         round1(Number(target.dataGb || 0) + step),
         MIN_DATA_GB,
@@ -531,13 +562,7 @@ function bindDrag(bar) {
       target.dataGb = dataGb;
       extras()[0].sizeGb = Math.max(MIN_EXTRA_GB, floor1(available - dataGb));
     } else {
-      const restGb = extrasGb();
-      target.sysGb = clamp(
-        Math.round(target.sysGb) + step,
-        MIN_SYS_GB,
-        Math.max(MIN_SYS_GB, Math.floor(totalGb) - MIN_DATA_GB - Math.ceil(restGb)),
-      );
-      target.dataGb = Math.max(MIN_DATA_GB, floor1(totalGb - target.sysGb - restGb - RESERVE_GB));
+      applySys(Math.round(Number(target.sysGb) || 0) + step);
     }
     renderInstall();
     event.preventDefault();
@@ -726,6 +751,9 @@ function stepConfirmHtml() {
     const unallocRow = unalloc > 0
       ? `<tr><td class="k">未分配</td><td>${esc(fmtSize(unalloc))}（保持为空闲空间，不建分区）</td></tr>`
       : '';
+    // convert gpt 会在盘首自动塞一个约 16 MB 的 MSR（Windows 的行为，不是我们的命令）。
+    // 执行器建分区前会按 GPT 类型找到它并删掉，这里如实说明，免得用户看 diskpart 日志时困惑。
+    const msrRow = '<tr><td class="k">MSR 分区</td><td>约 16 MB · 由 <code>convert gpt</code> 自动生成，执行时删除，最终布局不留</td></tr>';
     const letterText = Object.keys(letters)
       .filter((role) => letters[role])
       .map((role) => `${roleLabel(role)} ${letters[role]}:`)
@@ -735,6 +763,7 @@ function stepConfirmHtml() {
         <tr><td class="k">磁盘</td><td class="v">磁盘 ${esc(plan.disk_number)} · ${esc(plan.model || '')}</td></tr>
         <tr><td class="k">容量</td><td>${esc(plan.size_display || fmtSize(disk ? disk.size_bytes : 0))}</td></tr>
         ${partRows}
+        ${msrRow}
         ${unallocRow}
         <tr><td class="k">计划盘符</td><td>${esc(letterText)}</td></tr>
         <tr><td class="k">版本</td><td>${esc(versionText(targets))}</td></tr>

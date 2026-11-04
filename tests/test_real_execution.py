@@ -22,6 +22,10 @@ from app.application.contracts import DiskInfo
 from app.application.jobs import ExecutionPlan, Job, JobManager, JobSpec, JobStatus
 from app.application.partitions import plan_partitions
 from app.application.real_runner import (
+    STEP_OK,
+    STEP_TITLES,
+    RunnerError,
+    StepResult,
     WindowsDiskRunner,
     _CommandLog,
     build_real_runner,
@@ -299,20 +303,57 @@ def test_prune_runner_logs_removes_only_expired_runner_logs(tmp_path):
 
 
 def test_diskpart_script_layout():
+    """分区脚本分两段：先 clean+convert（会自动带出 MSR），再删 MSR + 建分区。"""
     runner = WindowsDiskRunner()
+    log = _CommandLog(None)
     parts = plan_partitions(
         {"partition_info": {"efi_size_mb": 300, "c_size_gb": 30}},
         letters={"efi": "E", "windows": "F", "data": "G"},
     )
-    lines = runner._diskpart_script(disk_number=2, parts=parts, log=_CommandLog(None))
 
+    wipe = runner._wipe_script(disk_number=2, log=log)
+    assert wipe == ["select disk 2", "clean", "convert gpt", "exit"]
+
+    lines = runner._diskpart_script(disk_number=2, parts=parts, log=log, msr_partition=1)
     assert lines[0] == "select disk 2"
-    assert "clean" in lines
-    assert "convert gpt" in lines
+    assert lines[1:3] == ["select partition 1", "delete partition override"]
     assert "create partition efi size=300" in lines
     assert "create partition primary size=30720" in lines  # 30 GB * 1024 MB
     assert "create partition primary" in lines  # 数据分区吃剩余空间
     assert lines[-1] == "exit"
+
+
+def test_diskpart_script_lets_last_data_partition_eat_remaining_space():
+    """最后一个数据分区可以不带 size：diskpart 用掉全部剩余空间。
+
+    这比“总容量 − C − EFI − 对齐余量”更准，也不会出现“界面上刚好、
+    diskpart 报空间不足”——所以界面的准备页面（selectionPayload）在把盘填满时
+    就发 ``"auto"``。
+    """
+    runner = WindowsDiskRunner()
+    parts = plan_partitions(
+        {
+            "partition_info": {
+                "efi_size_mb": 100,
+                "c_size_gb": 120,
+                "data_partitions": [
+                    {"size_gb": 200, "file_system": "NTFS"},
+                    {"size_gb": "auto", "file_system": "NTFS"},
+                ],
+            }
+        },
+        letters={"efi": "E", "windows": "F", "data": "G", "data2": "H"},
+    )
+    lines = runner._diskpart_script(disk_number=1, parts=parts, log=_CommandLog(None))
+
+    assert "create partition primary size=122880" in lines          # C 120 GB
+    assert "create partition primary size=204800" in lines          # D 200 GB
+    # 只有最后一个数据分区不带 size，且它是最后一个 create 行
+    creates = [line for line in lines if line.startswith("create partition primary")]
+    assert creates == ["create partition primary size=122880",
+                       "create partition primary size=204800",
+                       "create partition primary"]
+    assert "assign letter=H" in lines
 
 
 def test_diskpart_script_uses_explicit_data_size():
@@ -663,6 +704,7 @@ def test_runner_releases_efi_letter_even_when_image_fails(tmp_path):
         return 0, "ok"
 
     runner._run_diskpart = fake_diskpart  # type: ignore[method-assign]
+    runner._find_msr_partition = lambda disk_number, log: None  # type: ignore[method-assign]
     runner._apply_image = lambda image_path, index, target, log, **kwargs: (87, "bad image", 0.1)
 
     spec = SimpleNamespace(
@@ -680,6 +722,113 @@ def test_runner_releases_efi_letter_even_when_image_fails(tmp_path):
     assert "应用镜像失败" in (result.error or "")
     assert scripts[0][:2] == ["select disk 2", "clean"]
     assert ["select volume E", "remove letter=E", "exit"] in scripts
+
+
+# ----------------------------------------------------------- MSR 删除（两段式）
+
+
+def _msr_runner(**stubs):
+    runner = WindowsDiskRunner(
+        diskpart="diskpart.exe",
+        dism="dism.exe",
+        bcdboot="bcdboot.exe",
+        powershell="powershell.exe",
+    )
+    for name, value in stubs.items():
+        setattr(runner, name, value)
+    return runner
+
+
+def _tiny_image(tmp_path):
+    image = tmp_path / "tiny.wim"
+    image.write_bytes(b"x")
+    return image
+
+
+def _tiny_spec(image, data_size="auto"):
+    return SimpleNamespace(
+        disk_number=2,
+        config_payload={
+            "partition_info": {"efi_size_mb": 100, "c_size_gb": 3, "data_size_gb": data_size},
+            "image_info": {"image_path": str(image), "image_index": 1},
+        },
+        drive_letters={"efi": "E", "windows": "F", "data": "G"},
+    )
+
+
+def test_find_msr_partition_reads_partition_number():
+    runner = _msr_runner(
+        _spawn=lambda command, timeout, log, **kwargs: (
+            0, "MSR 1" + chr(13) + chr(10) + "1", 0.2
+        )
+    )
+    assert runner._find_msr_partition(2, _CommandLog(None)) == 1
+
+
+def test_find_msr_partition_returns_none_without_msr():
+    """有些盘 ``convert gpt`` 之后没有 MSR：不能瞎删，直接返回 None。"""
+    runner = _msr_runner(_spawn=lambda command, timeout, log, **kwargs: (0, "", 0.1))
+    assert runner._find_msr_partition(2, _CommandLog(None)) is None
+
+
+def test_find_msr_partition_raises_when_query_fails():
+    """查询失败要中止装机，而不是猜一个分区号去删。"""
+    runner = _msr_runner(
+        _spawn=lambda command, timeout, log, **kwargs: (1, "Get-Partition : 拒绝访问", 0.1)
+    )
+    with pytest.raises(RunnerError):
+        runner._find_msr_partition(2, _CommandLog(None))
+
+
+def test_run_steps_deletes_msr_before_creating_partitions(tmp_path):
+    """先 clean+convert（自动带出 16MB MSR），再按查到的分区号删掉它。"""
+    image = _tiny_image(tmp_path)
+    scripts: list[list[str]] = []
+
+    def fake_diskpart(lines, log, timeout=600.0, **kwargs):
+        scripts.append(list(lines))
+        return 0, "ok"
+
+    runner = _msr_runner(
+        _run_diskpart=fake_diskpart,
+        _find_msr_partition=lambda disk_number, log: 1,
+        _apply_image=lambda image_path, index, target, log, **kwargs: (0, "ok", 0.1),
+        _write_boot=lambda letters, log, **kwargs: (0, "ok", 0.1),
+        _verify=lambda disk_number, log, letters, **kwargs: StepResult(
+            key="verify", title=STEP_TITLES["verify"], status=STEP_OK, message="ok"
+        ),
+    )
+
+    result = runner.run(_tiny_spec(image), threading.Event())
+
+    assert result.success is True, result.error
+    assert scripts[0] == ["select disk 2", "clean", "convert gpt", "exit"]
+    layout = scripts[1]
+    assert layout.index("delete partition override") < layout.index("create partition efi size=100")
+    assert layout[1:3] == ["select partition 1", "delete partition override"]
+
+
+def test_run_steps_aborts_when_msr_lookup_fails(tmp_path):
+    """查不到 MSR 就整步失败：绝不在没确认的情况下继续建分区。"""
+    image = _tiny_image(tmp_path)
+    scripts: list[list[str]] = []
+
+    def fake_diskpart(lines, log, timeout=600.0, **kwargs):
+        scripts.append(list(lines))
+        return 0, "ok"
+
+    def boom(disk_number, log):
+        raise RunnerError("查询 MSR 分区失败")
+
+    runner = _msr_runner(_run_diskpart=fake_diskpart, _find_msr_partition=boom)
+
+    result = runner.run(_tiny_spec(image), threading.Event())
+
+    assert result.success is False
+    assert "MSR" in (result.error or "")
+    # 只跑了清盘那一段，没有继续建分区（另一条是收尾的释放盘符）
+    assert scripts[0] == ["select disk 2", "clean", "convert gpt", "exit"]
+    assert not any("create partition" in line for script in scripts for line in script)
 
 
 def test_cancelled_job_reports_cancelled_even_if_executor_fails():

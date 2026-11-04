@@ -10,6 +10,8 @@
 
 - ``role`` 同时是盘符字典的键（``efi`` / ``windows`` / ``data`` / ``data2``），
   与 ``drive_letters`` 保持一一对应；
+- 盘上**不保留 MSR**：``convert gpt`` 会自动建一个 16 MB 的 MSR，执行器按类型
+  删掉它，最终布局就是 EFI + C + D(+E)（见 ``strip_msr_lines``）；
 - ``size_mb=None`` 只可能出现在**唯一**的数据分区上（业务配置写了
   ``data_size_gb: auto``），表示“吃掉剩余空间”。显式给出 ``data_partitions``
   时每项都必须是正数，剩余空间保持未分配——界面上“加一个 E 分区”走的就是这条；
@@ -38,6 +40,10 @@ EFI_DEFAULT_MB = 100
 # C 之后最多再加一个数据分区（E）。盘符池、verify 判据都按这个上限设计。
 MAX_DATA_PARTITIONS = 2
 
+# MSR（Microsoft Reserved）分区的 GPT 类型；``convert gpt`` 会自动建一个 16 MB 的。
+# 我们的最终布局只要 EFI + C + D(+E)，所以建分区前把它按类型删掉（见 strip_msr_lines）。
+MSR_GPT = "e3c9e316-0b5c-4db8-817d-f92df00215ae"
+
 # 额外数据分区只给这两个：diskpart 对 >32 GB 的 FAT32 会直接失败。
 DATA_FS_CHOICES = ("NTFS", "exFAT")
 
@@ -50,19 +56,27 @@ class PartitionLayoutError(ValueError):
 
 @dataclass(frozen=True)
 class PlannedPartition:
-    """一个将要被创建的分区。``size_mb=None`` 表示吃掉剩余空间。"""
+    """一个将要被创建的分区。``size_mb=None`` 表示吃掉剩余空间。
+
+    ``estimate_mb`` 只在 ``size_mb is None`` 时有意义：按盘容量算出来的预估值，
+    **只用于界面展示**（“剩余空间（约 455.6 GB）”）。执行器看的是 ``size_mb``，
+    所以 diskpart 仍然收到不带 ``size=`` 的命令，由它自己决定最终大小。
+    """
 
     role: str
     label: str
     file_system: str
     size_mb: int | None = None
     letter: str | None = None
+    estimate_mb: int | None = None
 
     @property
     def size_text(self) -> str:
-        if self.size_mb is None:
-            return "剩余空间"
-        return format_size(self.size_mb * BYTES_PER_MB)
+        if self.size_mb is not None:
+            return format_size(self.size_mb * BYTES_PER_MB)
+        if self.estimate_mb:
+            return f"剩余空间（约 {format_size(self.estimate_mb * BYTES_PER_MB)}）"
+        return "剩余空间"
 
     @property
     def is_data(self) -> bool:
@@ -74,6 +88,7 @@ class PlannedPartition:
             "label": self.label,
             "file_system": self.file_system,
             "size_mb": self.size_mb,
+            "estimate_mb": self.estimate_mb,
             "size_display": self.size_text,
             "letter": self.letter,
         }
@@ -110,6 +125,15 @@ def _positive_number(value: Any) -> float | None:
     return number
 
 
+def _is_auto_size(value: Any) -> bool:
+    """``size_gb`` 是不是“吃掉剩余空间”（缺省 / 空串 / auto）。"""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in ("", "auto")
+    return False
+
+
 def _gb_to_mb(value: Any) -> int | None:
     number = _positive_number(value)
     return None if number is None else round(number * 1024)
@@ -142,17 +166,27 @@ def normalise_data_partitions(raw: Any) -> list[dict[str, Any]]:
             f"（C 之后最多再加 {MAX_DATA_PARTITIONS - 1} 个）"
         )
     normalised: list[dict[str, Any]] = []
+    total = len(raw)
     for index, item in enumerate(raw, start=1):
         if not isinstance(item, Mapping):
             raise PartitionLayoutError(f"第 {index} 个数据分区的配置不是对象")
         raw_gb = item.get("size_gb")
-        if _positive_number(raw_gb) is None and _positive_number(item.get("size_mb")) is not None:
-            # 也接受直接给 MB 的调用方（手写 REST payload 时更省事）。
-            size_gb: float = round(float(item["size_mb"]) / 1024, 3)
+        is_last = index == total
+        if _is_auto_size(raw_gb):
+            # 只有“最后一个数据分区”能吃掉剩余空间：否则后面的分区就没地方放了。
+            if not is_last:
+                raise PartitionLayoutError(
+                    f"第 {index} 个数据分区必须填写大小（只有最后一个可以留空/auto）"
+                )
+            size_gb: Any = "auto"
         else:
-            size_gb = float(raw_gb) if _positive_number(raw_gb) is not None else 0.0
-        if size_gb <= 0:
-            raise PartitionLayoutError(f"第 {index} 个数据分区必须填写大小（GB，正整数）")
+            if _positive_number(raw_gb) is None and _positive_number(item.get("size_mb")) is not None:
+                # 也接受直接给 MB 的调用方（手写 REST payload 时更省事）。
+                size_gb = round(float(item["size_mb"]) / 1024, 3)
+            else:
+                size_gb = float(raw_gb) if _positive_number(raw_gb) is not None else 0.0
+            if size_gb <= 0:
+                raise PartitionLayoutError(f"第 {index} 个数据分区必须填写大小（GB，正整数）")
         file_system = _canonical_fs(item.get("file_system"))
         if file_system not in DATA_FS_CHOICES:
             raise PartitionLayoutError(
@@ -164,9 +198,17 @@ def normalise_data_partitions(raw: Any) -> list[dict[str, Any]]:
 
 
 def _explicit_data_specs(raw: Any) -> list[dict[str, Any]]:
-    """把归一化后的数据分区列表换成“MB + 文件系统”，供布局使用。"""
+    """把归一化后的数据分区列表换成“MB + 文件系统”，供布局使用。
+
+    ``size_gb == "auto"``（只可能是最后一项）映射成 ``size_mb=None``，
+    执行器就会生成不带 ``size=`` 的 ``create partition primary``，
+    由 diskpart 自己吃掉剩余空间——比我们估对齐余量更准。
+    """
     return [
-        {"size_mb": _gb_to_mb(item["size_gb"]), "file_system": item["file_system"]}
+        {
+            "size_mb": None if item["size_gb"] == "auto" else _gb_to_mb(item["size_gb"]),
+            "file_system": item["file_system"],
+        }
         for item in normalise_data_partitions(raw)
     ]
 
@@ -215,18 +257,64 @@ def plan_partitions(
         )
     else:
         for index, spec in enumerate(_explicit_data_specs(raw_list), start=1):
+            size_mb = spec["size_mb"]
             parts.append(
                 PlannedPartition(
                     role="data" if index == 1 else f"data{index}",
                     label="Data" if index == 1 else f"Data{index}",
                     file_system=str(spec["file_system"]),
-                    size_mb=int(spec["size_mb"]),
+                    size_mb=None if size_mb is None else int(size_mb),
                 )
             )
 
     if letters:
         parts = [replace(part, letter=_letter_of(letters, part.role)) for part in parts]
     return parts
+
+
+def with_auto_estimates(
+    parts: Sequence[PlannedPartition],
+    disk_size_bytes: Any,
+) -> list[PlannedPartition]:
+    """给“吃剩余空间”的分区算一个展示用预估值（不改 ``size_mb``）。
+
+    执行器/diskpart 仍然收不到 ``size=``，最终大小由 diskpart 自己决定；
+    这里只是让计划表能显示“剩余空间（约 X GB）”，而不是一句干巴巴的“剩余空间”。
+    """
+    if not isinstance(disk_size_bytes, int) or isinstance(disk_size_bytes, bool):
+        return list(parts)
+    if disk_size_bytes <= 0 or not any(part.size_mb is None for part in parts):
+        return list(parts)
+    explicit = sum(int(part.size_mb) for part in parts if part.size_mb is not None)
+    # 和 check_layout 同口径：留 1 MB 给 GPT 表与分区对齐
+    estimate_mb = max(0, disk_size_bytes // BYTES_PER_MB - explicit - 1)
+    return [
+        part if part.size_mb is not None else replace(part, estimate_mb=estimate_mb)
+        for part in parts
+    ]
+
+
+def strip_msr_lines(msr_partition_number: Any) -> list[str]:
+    """删掉 ``convert gpt`` 自动生成的 MSR 分区所需的 diskpart 行。
+
+    Windows 在 ``convert gpt`` 时会在盘首放一个 16 MB 的 MSR（实测 Windows 10
+    19045 / diskpart 10.0.19041：``p1 Reserved 15.98 MB offset=0.02 MB``）。
+    我们的最终布局是 ``EFI + C + D(+E)``，所以在建分区前把它删掉；删完后盘首的
+    空闲会与后面的空闲合并，EFI 依然从 1 MB 开始（实测 ``offset=1.00 MB``）。
+
+    ``msr_partition_number`` **必须来自对真实磁盘的查询**（按 ``MSR_GPT`` 类型匹配），
+    不能假设“分区 1 就是 MSR”：万一本机没生成 MSR，``select partition 1`` 会失败，
+    整条 diskpart 脚本会中止。查不到（``None``）时返回空列表 = 不删任何东西。
+    """
+    try:
+        if isinstance(msr_partition_number, bool):  # True/False 不是分区号
+            return []
+        number = int(msr_partition_number)
+    except (TypeError, ValueError):
+        return []
+    if number <= 0:
+        return []
+    return [f"select partition {number}", "delete partition override"]
 
 
 def layout_summary(parts: Sequence[PlannedPartition]) -> str:
@@ -252,10 +340,8 @@ def check_layout(parts: Sequence[PlannedPartition], disk_size_bytes: Any) -> lis
         return []
     if disk_size_bytes <= 0:
         return []
-    if any(part.size_mb is None for part in parts):
-        # 有分区吃剩余空间，不可能超容量。
-        return []
-    required = sum(int(part.size_mb or 0) for part in parts) * BYTES_PER_MB
+    # 吃掉剩余空间的那个分区本身不会超容量，但显式指定的那些仍然可能超。
+    required = sum(int(part.size_mb) for part in parts if part.size_mb is not None) * BYTES_PER_MB
     # 留 1 MB 给 GPT 表与分区对齐。
     if required + BYTES_PER_MB <= disk_size_bytes:
         return []
