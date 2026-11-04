@@ -772,3 +772,105 @@ def test_step_events_are_broadcast_for_every_stage():
     assert ("job.step", "efi") in keyed
     assert ("job.step", "diskpart_preview") in keyed
     assert job.to_dict()["progress"]["percent"] == 100
+
+
+# ------------------------------------------------- 执行器失败分支（dism/bcdboot/verify/超时）
+def _whole_disk_spec(tmp_path):
+    image = tmp_path / "tiny.wim"
+    image.write_bytes(b"x")
+    return SimpleNamespace(
+        disk_number=1,
+        config_payload={
+            "partition_info": _PAYLOAD["partition_info"],
+            "image_info": {"image_path": str(image), "image_index": 1},
+        },
+        drive_letters={"efi": "E", "windows": "F", "data": "G"},
+    )
+
+
+def _stub_runner(monkeypatch, runner, *, spawn=None, diskpart=None):
+    released: list[bool] = []
+    monkeypatch.setattr(runner, "_release_efi_letter", lambda *a, **k: released.append(True))
+    monkeypatch.setattr(
+        runner, "_run_diskpart", diskpart or (lambda lines, log, **kwargs: (0, "diskpart ok"))
+    )
+    if spawn is not None:
+        monkeypatch.setattr(runner, "_spawn", spawn)
+    return released
+
+
+def test_runner_reports_dism_failure(tmp_path, monkeypatch) -> None:
+    runner = WindowsDiskRunner(diskpart="diskpart.exe", dism="dism.exe", bcdboot="bcdboot.exe")
+
+    def fake_spawn(command, timeout, log, *, env=None):
+        return (87, "dism 失败", 0.1) if str(command[0]).endswith("dism.exe") else (0, "ok", 0.1)
+
+    _stub_runner(monkeypatch, runner, spawn=fake_spawn)
+
+    result = runner.run(_whole_disk_spec(tmp_path), threading.Event())
+
+    assert result.success is False
+    image_step = next(step for step in result.steps if step.key == "image")
+    assert image_step.failed is True
+    assert "87" in image_step.message
+
+
+def test_runner_reports_bcdboot_failure_and_releases_letter(tmp_path, monkeypatch) -> None:
+    runner = WindowsDiskRunner(diskpart="diskpart.exe", dism="dism.exe", bcdboot="bcdboot.exe")
+
+    def fake_spawn(command, timeout, log, *, env=None):
+        return (2, "BFSVC Error: Could not open the BCD template store.", 0.1) if str(
+            command[0]
+        ).endswith("bcdboot.exe") else (0, "ok", 0.1)
+
+    released = _stub_runner(monkeypatch, runner, spawn=fake_spawn)
+
+    result = runner.run(_whole_disk_spec(tmp_path), threading.Event())
+
+    assert result.success is False
+    boot = next(step for step in result.steps if step.key == "boot")
+    assert boot.failed is True
+    assert "2" in boot.message
+    assert released, "bcdboot 失败也必须释放 EFI 临时盘符"
+
+
+def test_runner_reports_verify_rejection(tmp_path, monkeypatch) -> None:
+    from app.models import StepResult
+
+    runner = WindowsDiskRunner(diskpart="diskpart.exe", dism="dism.exe", bcdboot="bcdboot.exe")
+    _stub_runner(monkeypatch, runner, spawn=lambda *a, **k: (0, "ok", 0.1))
+    monkeypatch.setattr(
+        runner,
+        "_verify",
+        lambda disk_number, log, letters=None: StepResult(
+            key="verify",
+            title="校验分区结果",
+            status="failed",
+            message="校验不符合预期：系统分区里没有 Windows 系统文件",
+        ),
+    )
+
+    result = runner.run(_whole_disk_spec(tmp_path), threading.Event())
+
+    assert result.success is False
+    assert "分区校验失败" in (result.error or "")
+    verify = next(step for step in result.steps if step.key == "verify")
+    assert verify.failed is True
+
+
+def test_runner_reports_diskpart_timeout(tmp_path, monkeypatch) -> None:
+    from app.application.real_runner import RunnerError
+
+    runner = WindowsDiskRunner(diskpart="diskpart.exe", dism="dism.exe", bcdboot="bcdboot.exe")
+
+    def boom(lines, log, **kwargs):
+        raise RunnerError("命令超时（600 秒）：diskpart.exe")
+
+    _stub_runner(monkeypatch, runner, diskpart=boom)
+
+    result = runner.run(_whole_disk_spec(tmp_path), threading.Event())
+
+    assert result.success is False
+    efi = next(step for step in result.steps if step.key == "efi")
+    assert efi.failed is True
+    assert "超时" in efi.message

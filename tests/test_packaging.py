@@ -106,3 +106,13 @@ def test_make_icon_produces_valid_ico(tmp_path: Path) -> None:
     bi_size, bi_width, bi_height = struct.unpack("<Iii", raw[offset : offset + 12])
     assert bi_size == 40
     assert (bi_width, bi_height) == (256, 512)  # 高度含 AND 掩码
+
+
+def test_gui_exe_requests_admin() -> None:
+    """磁盘工具双击就应提权：清单里必须有 ``uac_admin=True``。
+
+    否则普通权限下能打开界面、预检报「需要管理员」，用户却没有任何入口提权。
+    """
+    text = (PACKAGING / "Sisp2.spec").read_text(encoding="utf-8")
+    gui_block = text[text.index('name="Sisp2"') : text.index('name="Sisp2"') + 400]
+    assert "uac_admin=True" in gui_block

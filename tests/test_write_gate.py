@@ -385,3 +385,104 @@ def test_gate_without_excluded_names_still_checks_other_rules(tmp_path: Path) ->
     with pytest.raises(PermissionError) as excinfo:
         api._gate(1, dict(_IDENTITY))
     assert "系统盘" in str(excinfo.value)
+
+
+# --------------------------------------------------- 五道闸门（逐条分支）
+def test_gate_service_dry_run_refuses() -> None:
+    service = SispService(
+        disk_scanner=lambda: [_summary()],
+        dry_run=True,
+        allowed_disk_numbers=[1],
+        real_runner=lambda spec, event: WorkerResult.dry_run_plan(1),
+    )
+    with pytest.raises(PermissionError, match="dry-run"):
+        service.require_disk_writable(1, {"unique_id": "unique-1", "serial_number": "SN-1"})
+
+
+def test_gate_disk_outside_allowlist_refuses() -> None:
+    service = _service(_summary(), allowed_disk_numbers=[2])
+    with pytest.raises(PermissionError, match="白名单"):
+        service.require_disk_writable(1, {"unique_id": "unique-1", "serial_number": "SN-1"})
+
+
+def test_gate_weak_identity_refuses() -> None:
+    service = _service(_summary(), allowed_disk_numbers=[1])
+    with pytest.raises(PermissionError, match="期望身份缺少"):
+        service.require_disk_writable(1, {"model": "test disk"})
+
+
+def test_gate_missing_disk_refuses() -> None:
+    """白名单里有、但重扫时盘已经不在了（被拔掉/掉线）→ 必须拒绝。"""
+    service = _service(_summary(1), allowed_disk_numbers=[9])
+    with pytest.raises(PermissionError, match="当前不存在"):
+        service.require_disk_writable(9, {"unique_id": "unique-1", "serial_number": "SN-1"})
+
+
+def test_gate_identity_changed_refuses() -> None:
+    """执行那一刻重扫到的唯一标识与计划里的不一致：换盘/换挂载也要挡住。"""
+    service = _service(_summary(unique_id="unique-1"), allowed_disk_numbers=[1])
+    with pytest.raises(PermissionError, match="身份与确认时不一致"):
+        service.require_disk_writable(1, {"unique_id": "unique-other", "serial_number": "SN-1"})
+
+
+def test_gate_protected_disk_refuses() -> None:
+    service = _service(_summary(is_system=True), allowed_disk_numbers=[1])
+    with pytest.raises(PermissionError, match="受保护"):
+        service.require_disk_writable(1, {"unique_id": "unique-1", "serial_number": "SN-1"})
+
+
+def test_gate_happy_path_returns_fresh_summary() -> None:
+    service = _service(_summary(), allowed_disk_numbers=[1])
+    summary = service.require_disk_writable(1, {"unique_id": "unique-1", "serial_number": "SN-1"})
+    assert summary["disk_number"] == 1
+    assert summary["unique_id"] == "unique-1"
+
+
+# --------------------------------------- 确认时重新授权（刷新页面不再被白名单挡住）
+def _gui_controller(*, type_to_confirm: bool = True) -> WorkflowController:
+    """模拟 GUI：没有显式白名单，授权完全来自 prepare/confirm 的隐式加入。"""
+    service = SispService(
+        disk_scanner=lambda: [_summary()],
+        dry_run=False,
+        real_runner=lambda spec, event: WorkerResult.dry_run_plan(1),
+    )
+    controller = WorkflowController(
+        service=service,
+        dry_run=False,
+        preflight_runner=_preflight,
+        type_to_confirm=type_to_confirm,
+        worker_interval=0.0,
+        image_indexes=lambda path: [1],
+    )
+    controller.start(None, dry_run=False)
+    return controller
+
+
+def test_confirm_regrants_allowlist_after_session_restart() -> None:
+    """刷新页面会重开会话、撤掉隐式授权；确认时必须按用户确认重新授权。
+
+    旧行为：确认时白名单是空的 → 闸门报「不在允许写盘的白名单内（当前白名单: 空）」。
+    """
+    controller = _gui_controller()
+    jobs = controller.submit(controller.prepare([1], dry_run=False), require_confirmation=True)
+
+    controller.start(None, dry_run=False)  # 模拟页面刷新
+    assert controller.service.allowed_disk_numbers == frozenset()
+
+    controller.confirm([jobs[0].id], confirm_text="1")
+
+    finished = controller.wait_all(timeout=5)
+    assert all(job.status.value != "waiting_confirmation" for job in finished)
+    assert controller.service.allowed_disk_numbers == frozenset({1})
+
+
+def test_confirm_without_text_does_not_grant_allowlist() -> None:
+    """确认文本不对就不该产生授权（否则等于把闸门绕过）。"""
+    controller = _gui_controller()
+    jobs = controller.submit(controller.prepare([1], dry_run=False), require_confirmation=True)
+    controller.start(None, dry_run=False)
+
+    with pytest.raises(WorkflowError):
+        controller.confirm([jobs[0].id])
+
+    assert controller.service.allowed_disk_numbers == frozenset()

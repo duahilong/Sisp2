@@ -602,3 +602,40 @@ def test_import_settings_accepts_inline_content(tmp_path: Path) -> None:
     body = api.import_settings(None, json.dumps({"efiDefaultMb": 260}))
     assert body["ok"] is True, body
     assert store.get()["efiDefaultMb"] == 260
+
+
+# ---------------------------------------------------- 设置导出 / 导入（v1.0.1）
+def test_settings_export_writes_portable_file(tmp_path: Path) -> None:
+    client, _wf = _build_client(tmp_path)
+    target = tmp_path / "exported.json"
+
+    data = _unwrap(client.post("/api/settings/export", json={"path": str(target)}))
+
+    assert Path(data["path"]) == target
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["version"] == 1
+    assert payload["settings"]["sysDefaultGb"] == 120
+
+
+def test_settings_import_roundtrip(tmp_path: Path) -> None:
+    client, _wf = _build_client(tmp_path)
+    _unwrap(client.put("/api/settings", json={"sysDefaultGb": 200}))
+    target = tmp_path / "exported.json"
+    _unwrap(client.post("/api/settings/export", json={"path": str(target)}))
+
+    _unwrap(client.put("/api/settings", json={"sysDefaultGb": 60}))
+    assert _unwrap(client.get("/api/settings"))["settings"]["sysDefaultGb"] == 60
+
+    _unwrap(client.post("/api/settings/import", json={"path": str(target)}))
+    assert _unwrap(client.get("/api/settings"))["settings"]["sysDefaultGb"] == 200
+
+
+def test_settings_import_rejects_broken_file(tmp_path: Path) -> None:
+    client, _wf = _build_client(tmp_path)
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+
+    body = client.post("/api/settings/import", json={"path": str(broken)}).json()
+
+    assert body["ok"] is False
+    assert body["error"]["code"] == "E_SETTINGS"

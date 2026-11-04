@@ -88,6 +88,8 @@ gui_exe = EXE(
     gui.datas,
     [],
     name="Sisp2",
+    # 这是个会清盘的磁盘工具：启动时就要 UAC 提权，避免“能打开但什么都写不了”。
+    uac_admin=True,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

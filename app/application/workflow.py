@@ -1184,6 +1184,13 @@ class WorkflowController:
         if self._type_to_confirm:
             self._require_confirm_text(waiting, confirm_text)
 
+        # 用户确认（勾选 + 输盘号）本身就是授权：这里重新补齐隐式白名单。
+        # 否则“刷新页面（新会话）/再 prepare 别的盘”会把之前那次 prepare 的隐式授权
+        # 撤掉，已排队的任务确认时报“不在允许写盘的白名单内（当前白名单: 空）”。
+        real_disks = [job.disk_number for job in waiting if not bool(job.spec.dry_run)]
+        if real_disks:
+            self.authorize_disks(real_disks)
+
         try:
             self._manager.confirm_batch(
                 [job.id for job in waiting],
