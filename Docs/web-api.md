@@ -25,7 +25,7 @@ python -m app.gui_web.main --serve --port 8765
 | `POST /api/session` | `{config_path, dry_run}`；重启会话并清空 WebApi 事件缓冲 |
 | `GET /api/disks` | 重扫硬盘 |
 | `POST /api/config/check` | `{config_path}` |
-| `POST /api/prepare` | `{selection, dry_run}`；selection 为盘号数组或盘号到覆盖对象的映射；省略 selection 表示「本次扫描里所有可选定的盘」，显式传空数组仍然报错（`E_PREPARE`） |
+| `POST /api/prepare` | `{selection, dry_run}`；selection 为盘号数组或盘号到覆盖对象的映射（每盘覆盖支持 `c_size`、`data_size`、`data_partitions`、`win_gho`、`image_index`）；省略 selection 表示「本次扫描里所有可选定的盘」，显式传空数组仍然报错（`E_PREPARE`） |
 | `POST /api/submit` | 登记等待确认任务 |
 | `POST /api/confirm` | `{job_ids, confirm_text?}`；`typeToConfirm` 开启时 `confirm_text` 必须是盘号或磁盘型号 |
 | `POST /api/cancel` | `{job_id}`，协作式取消 |
@@ -46,6 +46,33 @@ python -m app.gui_web.main --serve --port 8765
 | `POST /api/dialog/pick` | `{key, kind}` 原生文件/目录选择；需有 pywebview 窗口 |
 
 业务路由以同步 `def` 实现，由 FastAPI 在线程池运行。
+
+### `POST /api/prepare` 的返回（每个盘一项）
+
+`plan` 里除了 `executable` / `blockers` / `checks` / `drive_letters`，还有分区布局的实际结果：
+
+```jsonc
+{
+  "drive_letters": { "efi": "E", "windows": "F", "data": "G", "data2": "H" },
+  "partition_plan": [
+    {"role":"efi","label":"EFI","file_system":"FAT32","size_mb":300,
+     "size_display":"300.00 MB","letter":"E"},
+    {"role":"windows","label":"Windows","file_system":"NTFS","size_mb":122880,
+     "size_display":"120.00 GB","letter":"F"},
+    {"role":"data","label":"Data","file_system":"NTFS","size_mb":307200,
+     "size_display":"300.00 GB","letter":"G"},
+    {"role":"data2","label":"Data2","file_system":"exFAT","size_mb":204800,
+     "size_display":"200.00 GB","letter":"H"}
+  ],
+  "unallocated_bytes": 334379048960
+}
+```
+
+- `role` 与 `drive_letters` 的键一一对应；`data2` 只有加了额外数据分区（E）才出现。
+- `partition_plan` 是界面第 4 步的直接数据源（真实大小、文件系统、盘符），不要自己再算。
+- `unallocated_bytes` 是按计划建完分区后剩下的未分配空间（`data_size_gb` 吃剩余空间时为 0）。
+- 同一份布局也决定了容量预检（`+1 MB` 对齐余量）与 `verify` 的期望分区数（`≥ len(partition_plan)`）。
+
 
 ## Host 校验与安全
 

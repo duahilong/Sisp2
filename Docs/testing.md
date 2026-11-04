@@ -19,10 +19,14 @@ python -m pytest tests/ -q
 - 测试使用替身扫描器/执行器和注入依赖，不碰真实磁盘；
 - SSE 测试会在后台线程启动真实 uvicorn（随机空闲端口），因此依赖 `uvicorn`；
 - 覆盖重点：任务状态机、重复提交、取消、演练硬上限、盘符规划、设置校验与 BOM、写盘闸门、SSE 帧。
-- 当前基线：235 passed（专用 VM Windows 10 22H2 + Python 3.15.2 同口径，ruff 全绿）。其中前端相关三组：
+- 当前基线：262 passed（专用 VM Windows 10 22H2 + Python 3.15.2 同口径，ruff 全绿）。其中前端相关三组：
   `tests/test_ui_assets.py`（资源引用、薄壳、设置页字段对账、CSS 与纯函数约定）、
   `tests/test_partition_boot_image.py`（分区/引导/镜像三个模块的纯逻辑）、
   `tests/test_web_api.py` 新增的静态托管、日志尾部、分区确认、会话模式等用例。
+- `tests/test_partition_layout.py`（25 个）：分区布局的单一真相。最关键的一条是
+  **“默认布局与重构前的 diskpart 脚本逐字相同”**——不额外加分区时行为零变化，
+  否则等于把真机路径重新赌一遍；其余覆盖额外分区（E）的大小/文件系统/数量/容量、
+  盘符池分配与耗尽、`verify` 期望分区数、`prepare` 的 `data_partitions` 接入。
 
 ## 1.1 前端：静态检查与浏览器冒烟
 
@@ -39,8 +43,10 @@ node tools/ui_smoke.mjs --url http://127.0.0.1:8765/ --out build/shots  # headle
   `tests/test_ui_assets.py::test_frontend_static_check` 会代调它。
 - `tools/ui_smoke.mjs`：CDP 直连 headless Chrome（不依赖 Playwright），依次走主页面、
   四步向导、设置页、操作菜单和修复引导弹窗，收集 `Runtime.exceptionThrown` /
-  `Log.entryAdded`，截图 10 张，并对 `.dsel`/`.tgt`/`select[data-image]`/计划行数/
-  `#startBtn`/`.set-row` 做计数断言；**截图小于 20 KB 视为空白直接判失败**（曾经因为
+  `Log.entryAdded`，截图 11 张，并对 `.dsel`/`.tgt`/`select[data-image]`/计划行数/
+  `#startBtn`/`.set-row` 做计数断言；第 2 步还会真点一次「➕ 添加数据分区」：要求出现
+  1 行 `.szrow.extra`、文件系统下拉、进度条 4 段、➕ 隐藏，点 ✕ 后行数回到 0，再加回来
+  并要求第 4 步摘要里出现「额外数据分区」——这条路径以前只能靠人眼看截图；**截图小于 20 KB 视为空白直接判失败**（曾经因为
   `.fatal` 的 `display:flex` 盖掉了 `[hidden]`，整块遮罩把界面糊成纯背景色，十张截图
   全是空白而且脚本还“通过”了）。
 - 两项都需要 PATH 里有 `node`；没有时 `ui_check.py` 打印跳过并以 0 退出，
