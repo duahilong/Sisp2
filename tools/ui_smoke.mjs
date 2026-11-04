@@ -260,6 +260,39 @@ async function main() {
         })`)),
       });
 
+      // 手动改 C：最后一个数据分区是 auto，它的预估必须跟着变，
+      // 否则输入框里的 D 还是旧值、进度条右侧空一块（C + D ≠ 盘容量）。
+      const manual = await evaluate(`(function () {
+        const sysInput = document.querySelector('#wzBody .szrow input[data-size="sys"]');
+        if (!sysInput) return JSON.stringify({ reason: 'no sys input' });
+        sysInput.value = '116';
+        sysInput.dispatchEvent(new Event('input', { bubbles: true }));
+        const dataInput = document.querySelector('#wzBody .szrow input[data-size="data"]');
+        const totalText = String((document.querySelector('#wzBody .trest [data-total]') || {}).textContent || '');
+        const freeSeg = document.querySelector('#wzBody .wseg.free');
+        const result = {
+          capacityGb: parseFloat(totalText) || 0,
+          sysGb: Number(sysInput.value) || 0,
+          dataGb: dataInput ? Number(dataInput.value) || 0 : 0,
+          dataReadonly: Boolean(dataInput && dataInput.readOnly),
+          hasFreeSeg: Boolean(freeSeg),
+          err: String((document.querySelector('#wzBody .errmsg') || {}).textContent || ''),
+        };
+        return JSON.stringify(result);
+      })()`);
+      await sleep(200);
+      // 截图留在“C=116”那一刻，再恢复成 120 给后面的加 E 断言用
+      summary.shots.push(await shoot('05a-install-step2-manual'));
+      summary.steps.push({ step2manual: JSON.parse(manual) });
+      await evaluate(`(function () {
+        const sysInput = document.querySelector('#wzBody .szrow input[data-size="sys"]');
+        if (!sysInput) return false;
+        sysInput.value = '120';
+        sysInput.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()`);
+      await sleep(150);
+
       // 加一个额外数据分区（E）：➏ → 多一行 + 进度条多一段 + 能选文件系统，
       // 然后删掉，确认回到 C/D 两行——两个方向都要通，否则用户会卡在“加错了删不掉”。
       const added = await evaluate(`(function () {
@@ -301,6 +334,34 @@ async function main() {
           });
         })()`)),
       });
+      // 有 E 时 D 是显式分区：改 D，E（auto）必须跟着变（只读框要被写回新值）
+      const splitAuto = await evaluate(`(function () {
+        const dataInput = document.querySelector('#wzBody .szrow input[data-size="data"]');
+        const extraInput = document.querySelector('#wzBody .szrow.extra input[data-size="extra"]');
+        if (!dataInput || !extraInput) return JSON.stringify({ reason: 'no inputs' });
+        const beforeData = Number(dataInput.value) || 0;
+        const beforeExtra = Number(extraInput.value) || 0;
+        dataInput.value = '100';
+        dataInput.dispatchEvent(new Event('input', { bubbles: true }));
+        const totalText = String((document.querySelector('#wzBody .trest [data-total]') || {}).textContent || '');
+        const sysGb = Number((document.querySelector('#wzBody .szrow input[data-size="sys"]') || {}).value) || 0;
+        const result = {
+          beforeData,
+          beforeExtra,
+          dataGb: Number(dataInput.value) || 0,
+          extraGb: Number(extraInput.value) || 0,
+          sysGb,
+          capacityGb: parseFloat(totalText) || 0,
+          err: String((document.querySelector('#wzBody .errmsg') || {}).textContent || ''),
+        };
+        // 恢复，后面的断言按平分后的值走
+        dataInput.value = String(beforeData);
+        dataInput.dispatchEvent(new Event('input', { bubbles: true }));
+        return JSON.stringify(result);
+      })()`);
+      await sleep(200);
+      summary.steps.push({ step2splitAuto: JSON.parse(splitAuto) });
+
       // 快捷容量（100/120/150/200）：以前只算 C、D，E 保持原值，于是 C+D+E 会
       // 超过盘容量、界面报「超过磁盘容量」。现在走 derive.fitLayout，E 跟着重算。
       const preset = await evaluate(`(function () {
@@ -344,6 +405,33 @@ async function main() {
       }
       if (presetResult.error) problems.push(`快捷容量 200 之后出现错误提示: ${presetResult.error}`);
       if (presetResult.nextDisabled) problems.push('快捷容量 200 之后“下一步”被禁用（说明布局不合法）');
+
+      const splitStep = (summary.steps.find((step) => step.step2splitAuto) || {}).step2splitAuto;
+      if (splitStep && !splitStep.reason) {
+        if (splitStep.dataGb !== 100) problems.push(`把 D 改成 100 没生效（${splitStep.dataGb}）`);
+        if (Math.abs(splitStep.extraGb - splitStep.beforeExtra) < 0.5) {
+          problems.push(`改 D 之后 E 没有跟着变（还是 ${splitStep.extraGb} GB，应等于剩余空间）`);
+        }
+        const sum = splitStep.sysGb + splitStep.dataGb + splitStep.extraGb + 0.3;
+        if (Math.abs(sum - splitStep.capacityGb) > 1) {
+          problems.push(`改 D=100 之后 C+D+E 与总容量 ${splitStep.capacityGb} GB 对不上（和=${sum.toFixed(1)}）`);
+        }
+        if (splitStep.err) problems.push(`改 D 之后出现错误提示: ${splitStep.err}`);
+      }
+
+      const manualStep = (summary.steps.find((step) => step.step2manual) || {}).step2manual;
+      if (!manualStep) {
+        problems.push('没采集到“手动改 C”之后的状态');
+      } else if (!manualStep.reason) {
+        if (!manualStep.dataReadonly) problems.push('没有 E 时 D 是吃满剩余的分区，输入框必须只读');
+        if (manualStep.hasFreeSeg) problems.push('手动改 C 之后进度条不该出现“未分配”段');
+        // C + D + 预留余量(0.3 GB) 应该就是总容量，允许 1 GB 的取整误差
+        const sum = manualStep.sysGb + manualStep.dataGb + 0.3;
+        if (Math.abs(sum - manualStep.capacityGb) > 1) {
+          problems.push(`手动把 C 改成 116 之后 C(${manualStep.sysGb}) + D(${manualStep.dataGb}) 与总容量 ${manualStep.capacityGb} GB 对不上`);
+        }
+        if (manualStep.err) problems.push(`手动改 C 之后出现错误提示: ${manualStep.err}`);
+      }
 
       // 最后一个数据分区永远 auto（不带 size=，由 diskpart 吃满），所以：
       //   - 有 E 时 E 的输入框只读，D 可编辑；

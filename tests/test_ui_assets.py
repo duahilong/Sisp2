@@ -287,6 +287,60 @@ def test_removing_extra_partition_gives_space_back_to_data(tmp_path: Path) -> No
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="没有 node")
+def test_manual_sys_size_moves_the_auto_partition(tmp_path: Path) -> None:
+    """手动改 C 时，最后一个数据分区（auto）的预估必须跟着变。
+
+    回归：改成“永远 auto”之后，输入框里的 D 还是旧值，C+D 加起来不等于盘容量、
+    进度条右侧还空一块（用户实测 C 116 + D 276.6 != 477）。
+    """
+    for name in ("derive.js", "state.js"):
+        (tmp_path / name.replace(".js", "_copy.mjs")).write_text(
+            (JS / name).read_text(encoding="utf-8").replace("'./derive.js'", "'./derive_copy.mjs'"),
+            encoding="utf-8",
+        )
+    script = tmp_path / "sync_auto.mjs"
+    script.write_text(
+        chr(10).join([
+            "import { state, resetWizard, addTarget, selectionPayload, syncAutoPartition,",
+            "  targetOf, reserveGb, autoPartitionBytes } from './state_copy.mjs';",
+            "const GB = 1024 ** 3;",
+            "state.disks = [{ disk_number: 1, size_bytes: Math.round(477 * GB), model: 'X',",
+            "  partition_style: 'GPT', partitions: [] }];",
+            "state.settings = { sysDefaultGb: 200, dataDefaultGb: 'auto',",
+            "  defaultFs: 'NTFS', efiDefaultMb: 100 };",
+            "resetWizard();",
+            "addTarget(1);",
+            "const target = targetOf(1);",
+            "const before = target.dataGb;",
+            "target.sysGb = 116;            // 用户手填 C",
+            "syncAutoPartition(target);",
+            "const after = target.dataGb;",
+            "const payload = selectionPayload()['1'];",
+            "console.log(JSON.stringify({ before, after, sys: target.sysGb,",
+            "  reserve: reserveGb(), payload,",
+            "  autoGb: autoPartitionBytes(target) / GB }));",
+        ]) + chr(10),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [shutil.which("node"), str(script)],
+        cwd=str(tmp_path), capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    got = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    # 477 GB 盘、C 116 -> D 应该重算成 360.7（477 - 116 - 0.3）
+    assert got["before"] != got["after"], "改 C 之后 D 没有跟着动"
+    assert abs(got["after"] - 360.7) < 0.2, got["after"]
+    # C + D + 预留余量 = 整块盘（不多不少）
+    total = got["sys"] + got["after"] + got["reserve"]
+    assert abs(total - 477) < 0.25, total
+    # 输入框里的数字与“剩余空间”同一个值
+    assert abs(got["autoGb"] - got["after"]) < 0.05
+    # 发给后端的仍然是 auto
+    assert got["payload"]["data_size"] == "auto"
+
+
 def test_last_data_partition_is_always_sent_as_auto(tmp_path: Path) -> None:
     """最后一个数据分区**永远**发 ``"auto"``，由 diskpart 自己吃剩余空间。
 

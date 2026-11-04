@@ -16,7 +16,7 @@ import {
   toGb, fromGb, extraColor, extraLetter, fitLayout, lastPartitionIsAuto,
 } from './derive.js';
 import {
-  state, diskOf, targetOf, targetError, autoPartitionBytes, addTarget, removeTarget,
+  state, diskOf, targetOf, targetError, autoPartitionBytes, syncAutoPartition, addTarget, removeTarget,
   addExtraPartition, removeExtraPartition, selectionPayload, resetWizard, applyFit,
   reserveGb, reserveEfiMb, dataFs, STEP_LABELS, JOB_STATUS_TEXT,
 } from './state.js';
@@ -45,6 +45,11 @@ const logCache = new Map();
 
 /* ------------------------------------------------------------------ 渲染入口 */
 export function renderInstall() {
+  // 第 2 步的自定值（最后一个数据分区的预估）在渲染前对齐一次：从后端拿回计划、
+  // 切盘、改设置（EFI 大小）之后，state 里的数字可能已经不是“剩下多少”了。
+  if (state.wizard.step === 2 && state.wizard.phase === 'form') {
+    state.wizard.targets.forEach((target) => syncAutoPartition(target));
+  }
   renderStepper();
   renderBody();
   renderFoot();
@@ -321,6 +326,9 @@ function bindStepSize() {
       const value = Number(input.value);
       if (input.dataset.size === 'sys') target.sysGb = Number.isFinite(value) ? value : 0;
       else target.dataGb = Number.isFinite(value) ? value : 0;
+      // 最后一个数据分区是 auto（不带 size=），它的预估值必须跟着手填的数字走，
+      // 否则输入框和进度条加起来不等于盘容量（用户实测：C 116 + D 276.6 ≠ 477）
+      syncAutoPartition(target);
       state.wizard.ack = false;
       updateSizeVisual(target);
       renderFoot();
@@ -332,6 +340,7 @@ function bindStepSize() {
       const key = input.dataset.size === 'sys' ? 'sysGb' : 'dataGb';
       const min = input.dataset.size === 'sys' ? MIN_SYS_GB : MIN_DATA_GB;
       if (!(target[key] >= min)) target[key] = min;
+      syncAutoPartition(target);
       renderInstall();
     });
   });
@@ -413,6 +422,17 @@ function updateSizeVisual(target) {
   const sysSeg = card.querySelector('.wseg.sys');
   const dataSeg = card.querySelector('.wseg.dat');
   if (sysSeg) { sysSeg.style.width = `${sysPct}%`; sysSeg.firstElementChild.textContent = `系统 ${Math.round(target.sysGb)} GB`; }
+  // 吃满剩余的那个分区是只读输入框：改 C / 改显式 D 时它自己不触发 input 事件，
+  // 所以这里要把重算出来的预估值写回输入框——否则用户看到的数字停在旧值，
+  // C + D 加起来也不等于盘容量。
+  const autoInput = card.querySelector(
+    autoRole(target) === 'extra'
+      ? `input[data-size="extra"][data-index="${extras.length - 1}"]`
+      : 'input[data-size="data"]',
+  );
+  if (autoInput && autoInput.readOnly) autoInput.value = autoRole(target) === 'extra'
+    ? (extras[extras.length - 1] && extras[extras.length - 1].sizeGb)
+    : target.dataGb;
   if (dataSeg) { dataSeg.style.width = `${dataPct}%`; dataSeg.firstElementChild.textContent = `数据 ${Math.round(target.dataGb)} GB`; }
   card.querySelectorAll('.wseg.ext').forEach((seg, index) => {
     if (!(index in extraPct)) return;

@@ -376,12 +376,34 @@ export function autoPartitionBytes(target) {
   const disk = diskOf(target.diskNumber);
   const total = Number(disk && disk.size_bytes) || 0;
   const extras = Array.isArray(target.extras) ? target.extras : [];
-  const efiGb = Math.max(0, Number(state.settings && state.settings.efiDefaultMb) || DEFAULT_EFI_MB) / 1024;
   const others = (Number(target.sysGb) || 0)
     + (extras.length ? Number(target.dataGb) || 0 : 0)
-    + efiGb;
-  // 这里的 0.2 GB 与 derive.reserveGb 的 ALIGN_GB 同口径（只用于显示预估）
-  return Math.max(0, total - others * (1024 ** 3) - 0.2 * (1024 ** 3));
+    + reserveGb();
+  return Math.max(0, total - others * (1024 ** 3));
+}
+
+/** 最后一个数据分区永远吃满剩余：按当前的 C（和显式 D）把它的预估值重算一遍。
+ *
+ * 以前 D 是显式分区，用户改 C 时只需重算“剩余”那个提示；现在 D/E 是 auto
+ * （不带 `size=`），它的预估值就是“剩下多少”，**必须跟着 C / 显式 D 变**，
+ * 否则输入框里的数字和进度条会和盘容量对不上（C 116 + D 276.6 ≠ 477）。
+ *
+ * 只改预估值、不动用户正在输入的那个值；越界时算出来可能是 0，交给
+ * ``targetError()``（checkLayout 的“剩下的空间够不够下限”）去报错。
+ */
+export function syncAutoPartition(target) {
+  if (!target) return;
+  const disk = diskOf(target.diskNumber);
+  const totalGb = toGb(Number(disk && disk.size_bytes) || 0);
+  if (!(totalGb > 0)) return;
+  const extras = Array.isArray(target.extras) ? target.extras : [];
+  const autoRole = extras.length ? 'extra' : 'data';
+  const explicitGb = (Number(target.sysGb) || 0)
+    + (autoRole === 'extra' ? Number(target.dataGb) || 0 : 0);
+  // 与 fitLayout 同口径：向下取整到 0.1 GB，再加 1e-9 吸收浮点误差
+  const left = Math.max(0, Math.floor((totalGb - explicitGb - reserveGb()) * 10 + 1e-9) / 10);
+  if (autoRole === 'extra') extras[extras.length - 1].sizeGb = left;
+  else target.dataGb = left;
 }
 
 export function diskFreeGb(disk) {
