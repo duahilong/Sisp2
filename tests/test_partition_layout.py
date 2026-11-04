@@ -27,30 +27,30 @@ from app.application.partitions import (
     strip_msr_lines,
     unallocated_bytes,
 )
-from app.application.real_runner import WindowsDiskRunner, _CommandLog, _verify_verdict
+from app.application.real_runner import (
+    WindowsDiskRunner,
+    _CommandLog,
+    _layout_verdict,
+    _verify_verdict,
+)
 from app.application.service import SispService
 from app.application.workflow import WorkflowController
 from app.drive_letters import build_drive_letter_allocations
 
 GIB = 1024 ** 3
+MB = 1024 ** 2
 
 
-def _legacy_runner_script(
-    parts: list[Any],
-    disk_number: int = 2,
-    msr_partition: int | None = None,
-) -> list[str]:
-    """执行器现在分两段 diskpart：清盘段 + 布局段（可带删 MSR）。
+def _legacy_runner_script(parts: list[Any], disk_number: int = 2) -> list[str]:
+    """执行器现在分三段 diskpart：清盘 → 删 MSR（按真实分区号，单独跑）→ 建分区。
 
-    这里把两段拼起来（去掉第二次的 ``select disk`` / ``exit``），方便和重构前
-    的单段脚本逐字对比。
+    这里把“清盘 + 建分区”两段拼起来（跳过删 MSR 那段，因为它依赖真实分区号），
+    方便和重构前的单段脚本逐字对比。
     """
     runner = WindowsDiskRunner()
     log = _CommandLog(None)
     wipe = runner._wipe_script(disk_number=disk_number, log=log)
-    layout = runner._diskpart_script(
-        disk_number=disk_number, parts=parts, log=log, msr_partition=msr_partition
-    )
+    layout = runner._diskpart_script(disk_number=disk_number, parts=parts, log=log)
     return [*wipe[:-1], *layout[1:-1], layout[-1]]
 
 
@@ -68,8 +68,8 @@ def test_strip_msr_lines_deletes_by_number() -> None:
     assert strip_msr_lines("3") == ["select partition 3", "delete partition override"]
 
 
-def test_layout_script_deletes_msr_before_creating_partitions() -> None:
-    """``convert gpt`` 自动建的 MSR 要在建 EFI 之前删掉，最终布局 EFI+C+D。"""
+def test_msr_delete_is_a_separate_step_before_layout() -> None:
+    """``convert gpt`` 自动建的 MSR 单独一段删掉，建分区的脚本里不再出现删除。"""
     parts = plan_partitions(
         {"partition_info": {"efi_size_mb": 100, "c_size_gb": 120}},
         letters={"efi": "F", "windows": "G", "data": "H"},
@@ -80,19 +80,16 @@ def test_layout_script_deletes_msr_before_creating_partitions() -> None:
     wipe = runner._wipe_script(disk_number=1, log=log)
     assert wipe == ["select disk 1", "clean", "convert gpt", "exit"]
 
-    layout = runner._diskpart_script(disk_number=1, parts=parts, log=log, msr_partition=1)
-    assert layout[:3] == ["select disk 1", "select partition 1", "delete partition override"]
-    # 删 MSR 必须在第一个 create 之前
-    assert layout.index("delete partition override") < layout.index("create partition efi size=100")
-    assert layout[-1] == "exit"
+    delete = runner._msr_delete_script(disk_number=1, msr_partition=1, log=log)
+    assert delete == ["select disk 1", "select partition 1", "delete partition override", "exit"]
 
-    # 没有 MSR 时脚本里不该出现删除动作
-    plain = runner._diskpart_script(disk_number=1, parts=parts, log=log, msr_partition=None)
-    assert "delete partition override" not in plain
+    layout = runner._diskpart_script(disk_number=1, parts=parts, log=log)
+    assert "delete partition override" not in layout
+    assert layout[1] == "create partition efi size=100"
 
 
-def test_dry_run_preview_shows_both_phases() -> None:
-    """演练预览要如实展示“清盘一段 + 删 MSR 再建分区一段”。"""
+def test_dry_run_preview_shows_three_phases() -> None:
+    """演练预览如实展示三段：清盘 → 删 MSR（含复查说明）→ 建分区。"""
     service = SispService(disk_scanner=list, dry_run=True)
     text = service.build_diskpart_preview(
         1,
@@ -100,18 +97,131 @@ def test_dry_run_preview_shows_both_phases() -> None:
         {"efi": "F", "windows": "G", "data": "H"},
     )
     lines = text.splitlines()
-    assert "REM === 第一段：清盘 + 转 GPT ===" in lines
-    assert "REM === 第二段：删掉 convert gpt 自动生成的 MSR，再建分区 ===" in lines
-    # 第一段：clean + convert gpt
-    assert lines[lines.index("clean") - 1] == "select disk 1"
-    assert "convert gpt" in lines
-    # 第二段里 MSR 的两条命令只以 REM 形式出现（预览时不知道真实分区号）
+    assert "REM === 1/3 清盘 + 转 GPT ===" in lines
+    assert "REM === 2/3 删除 convert gpt 自动生成的 MSR（删完立刻复查）===" in lines
+    assert "REM === 3/3 建分区（最后一项不带 size=，由 diskpart 吃掉剩余空间）===" in lines
+    # MSR 那两条只以 REM 出现（预览时不知道真实分区号）
     assert "REM select partition <MSR 分区号>" in lines
     assert "REM delete partition override" in lines
     assert not any(line.startswith("delete partition") for line in lines)
-    # 布局照旧
     assert "create partition efi size=100" in lines
     assert "create partition primary" in lines
+
+
+# ---------------------------------------------------------- 建完分区后的复核
+
+
+def _layout_payload(*, msr=False, extra=False, efi_offset_mb=1, largest_free=0):
+    items = [
+        {
+            "number": 1,
+            "offset_bytes": efi_offset_mb * MB,
+            "size_bytes": 100 * MB,
+            "type": "System",
+            "gpt_type": "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}",
+            "drive_letter": None,
+        }
+    ]
+    if msr:
+        items.insert(
+            0,
+            {
+                "number": 1,
+                "offset_bytes": 17 * 1024,
+                "size_bytes": 16 * MB,
+                "type": "Reserved",
+                "gpt_type": f"{{{MSR_GPT}}}",
+                "drive_letter": None,
+            },
+        )
+    items.append(
+        {
+            "number": 2,
+            "offset_bytes": (efi_offset_mb + 100) * MB,
+            "size_bytes": 120 * GIB,
+            "type": "Basic",
+            "gpt_type": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}",
+            "drive_letter": "F",
+        }
+    )
+    items.append(
+        {
+            "number": 3,
+            "offset_bytes": (efi_offset_mb + 100) * MB + 120 * GIB,
+            "size_bytes": 300 * GIB,
+            "type": "Basic",
+            "gpt_type": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}",
+            "drive_letter": "G",
+        }
+    )
+    if extra:
+        items.append(
+            {
+                "number": 4,
+                "offset_bytes": (efi_offset_mb + 100) * MB + 420 * GIB,
+                "size_bytes": 200 * GIB,
+                "type": "Basic",
+                "gpt_type": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}",
+                "drive_letter": "H",
+            }
+        )
+    return {
+        "disk_number": 1,
+        "partition_style": "GPT",
+        "largest_free": largest_free,
+        "partitions": items,
+    }
+
+
+def _layout_parts(extra: bool = False):
+    payload = {"partition_info": {"efi_size_mb": 100, "c_size_gb": 120}}
+    if extra:
+        payload["partition_info"]["data_partitions"] = [
+            {"size_gb": 300, "file_system": "NTFS"},
+            {"size_gb": "auto", "file_system": "NTFS"},
+        ]
+    return plan_partitions(payload)
+
+
+def test_layout_verdict_accepts_clean_layout() -> None:
+    ok, message, details = _layout_verdict(_layout_payload(), _layout_parts())
+    assert ok is True
+    assert "3 个分区" in message
+    assert details["problems"] == []
+
+
+def test_layout_verdict_rejects_leftover_msr() -> None:
+    """删 MSR 没生效 → 建完立刻要拦住（不能等到 dism 跑完）。"""
+    ok, message, _ = _layout_verdict(_layout_payload(msr=True), _layout_parts())
+    assert ok is False
+    assert "保留分区" in message
+
+
+def test_layout_verdict_rejects_efi_not_at_disk_start() -> None:
+    """MSR 还在时 EFI 会被挤到 16 MB，这里必须认出来。"""
+    ok, message, _ = _layout_verdict(_layout_payload(efi_offset_mb=16), _layout_parts())
+    assert ok is False
+    assert "EFI 没有从盘首开始" in message
+
+
+def test_layout_verdict_rejects_wrong_partition_count() -> None:
+    ok, message, _ = _layout_verdict(_layout_payload(extra=True), _layout_parts())
+    assert ok is False
+    assert "分区数与计划不符" in message
+
+
+def test_layout_verdict_wants_last_partition_to_eat_rest() -> None:
+    """最后一个分区不带 size= 时应该没有剩余；留下大块空闲说明没吃到。"""
+    ok, message, _ = _layout_verdict(
+        _layout_payload(largest_free=50 * GIB), _layout_parts()
+    )
+    assert ok is False
+    assert "未分配" in message
+
+
+def test_layout_verdict_accepts_four_partitions() -> None:
+    ok, _, _ = _layout_verdict(_layout_payload(extra=True), _layout_parts(extra=True))
+    assert ok is True
 
 
 # --------------------------------------------------------------------- 默认布局
@@ -355,7 +465,8 @@ def test_unallocated_bytes_counts_leftover() -> None:
         }
     )
     leftover = unallocated_bytes(parts, 100 * GIB)
-    assert leftover == 100 * GIB - (300 * 1024 * 1024 + 30 * GIB) - 1024 * 1024
+    # 扣掉显式分区 + LAYOUT_SLACK_MB（GPT 首尾各 1 MB + 1 MB 冗余）
+    assert leftover == 100 * GIB - (300 * 1024 * 1024 + 30 * GIB) - 3 * 1024 * 1024
     # 有分区吃剩余空间时没有“未分配”概念
     rest = plan_partitions({"partition_info": {"c_size_gb": 20}})
     assert unallocated_bytes(rest, 100 * GIB) == 0

@@ -236,6 +236,13 @@ def test_runner_accepts_runner_options_on_spec(tmp_path, monkeypatch) -> None:
     runner._run_diskpart = fake_run_diskpart  # type: ignore[method-assign]
     runner._spawn = fake_spawn  # type: ignore[method-assign]
     runner._verify = lambda disk_number, log, letters=None, **_: SimpleNamespace(failed=False)  # type: ignore[method-assign]
+    # 分区查询/建完复核走 PowerShell，这里不关心，给一个“正常 GPT、无 MSR”的答案
+    runner._query_partitions = lambda disk, log: {  # type: ignore[method-assign]
+        "partition_style": "GPT",
+        "partitions": [],
+        "largest_free": 0,
+    }
+    runner._check_layout_after_create = lambda disk, parts, log: (True, "ok", {})  # type: ignore[method-assign]
 
     spec = SimpleNamespace(
         disk_number=1,

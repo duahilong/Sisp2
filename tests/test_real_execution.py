@@ -303,7 +303,7 @@ def test_prune_runner_logs_removes_only_expired_runner_logs(tmp_path):
 
 
 def test_diskpart_script_layout():
-    """分区脚本分两段：先 clean+convert（会自动带出 MSR），再删 MSR + 建分区。"""
+    """分区脚本分三段：清盘+转 GPT → 删 MSR → 建分区（各段独立校验）。"""
     runner = WindowsDiskRunner()
     log = _CommandLog(None)
     parts = plan_partitions(
@@ -314,13 +314,16 @@ def test_diskpart_script_layout():
     wipe = runner._wipe_script(disk_number=2, log=log)
     assert wipe == ["select disk 2", "clean", "convert gpt", "exit"]
 
-    lines = runner._diskpart_script(disk_number=2, parts=parts, log=log, msr_partition=1)
-    assert lines[0] == "select disk 2"
-    assert lines[1:3] == ["select partition 1", "delete partition override"]
-    assert "create partition efi size=300" in lines
-    assert "create partition primary size=30720" in lines  # 30 GB * 1024 MB
-    assert "create partition primary" in lines  # 数据分区吃剩余空间
-    assert lines[-1] == "exit"
+    delete = runner._msr_delete_script(disk_number=2, msr_partition=1, log=log)
+    assert delete == ["select disk 2", "select partition 1", "delete partition override", "exit"]
+
+    layout = runner._diskpart_script(disk_number=2, parts=parts, log=log)
+    assert layout[0] == "select disk 2"
+    assert "delete partition override" not in layout  # MSR 在上一段已删
+    assert "create partition efi size=300" in layout
+    assert "create partition primary size=30720" in layout  # 30 GB * 1024 MB
+    assert "create partition primary" in layout  # 最后一项吃剩余空间
+    assert layout[-1] == "exit"
 
 
 def test_diskpart_script_lets_last_data_partition_eat_remaining_space():
@@ -704,7 +707,8 @@ def test_runner_releases_efi_letter_even_when_image_fails(tmp_path):
         return 0, "ok"
 
     runner._run_diskpart = fake_diskpart  # type: ignore[method-assign]
-    runner._find_msr_partition = lambda disk_number, log: None  # type: ignore[method-assign]
+    runner._find_msr_partition = lambda disk_number, log, **_: None  # type: ignore[method-assign]
+    runner._check_layout_after_create = lambda disk, parts, log: (True, "ok", {})  # type: ignore[method-assign]
     runner._apply_image = lambda image_path, index, target, log, **kwargs: (87, "bad image", 0.1)
 
     spec = SimpleNamespace(
@@ -727,18 +731,6 @@ def test_runner_releases_efi_letter_even_when_image_fails(tmp_path):
 # ----------------------------------------------------------- MSR 删除（两段式）
 
 
-def _msr_runner(**stubs):
-    runner = WindowsDiskRunner(
-        diskpart="diskpart.exe",
-        dism="dism.exe",
-        bcdboot="bcdboot.exe",
-        powershell="powershell.exe",
-    )
-    for name, value in stubs.items():
-        setattr(runner, name, value)
-    return runner
-
-
 def _tiny_image(tmp_path):
     image = tmp_path / "tiny.wim"
     image.write_bytes(b"x")
@@ -756,56 +748,175 @@ def _tiny_spec(image, data_size="auto"):
     )
 
 
+def _msr_runner(**stubs):
+    runner = WindowsDiskRunner(
+        diskpart="diskpart.exe",
+        dism="dism.exe",
+        bcdboot="bcdboot.exe",
+        powershell="powershell.exe",
+    )
+    for name, value in stubs.items():
+        setattr(runner, name, value)
+    return runner
+
+
+def _msr_payload(number=1):
+    return {
+        "partition_style": "GPT",
+        "largest_free": 0,
+        "partitions": [
+            {
+                "number": number,
+                "size_bytes": 16 * 1024 * 1024,
+                "offset_bytes": 17 * 1024,
+                "type": "Reserved",
+                "gpt_type": "{e3c9e316-0b5c-4db8-817d-f92df00215ae}",
+                "drive_letter": None,
+            }
+        ],
+    }
+
+
 def test_find_msr_partition_reads_partition_number():
     runner = _msr_runner(
-        _spawn=lambda command, timeout, log, **kwargs: (
-            0, "MSR 1" + chr(13) + chr(10) + "1", 0.2
-        )
+        _query_partitions=lambda disk, log: _msr_payload(3),
     )
-    assert runner._find_msr_partition(2, _CommandLog(None)) == 1
+    assert runner._find_msr_partition(2, _CommandLog(None)) == 3
 
 
 def test_find_msr_partition_returns_none_without_msr():
     """有些盘 ``convert gpt`` 之后没有 MSR：不能瞎删，直接返回 None。"""
-    runner = _msr_runner(_spawn=lambda command, timeout, log, **kwargs: (0, "", 0.1))
+    runner = _msr_runner(_query_partitions=lambda disk, log: _empty_disk())
     assert runner._find_msr_partition(2, _CommandLog(None)) is None
+
+
+def test_find_msr_partition_retries_before_giving_up():
+    """枚举慢：头两次查不到、第三次才出现 → 仍然要认出来（不能就此跳过删除）。"""
+    calls: list[int] = []
+
+    def flaky(disk, log):
+        calls.append(1)
+        return _msr_payload(1) if len(calls) >= 3 else _empty_disk()
+
+    runner = _msr_runner(_query_partitions=flaky)
+    assert runner._find_msr_partition(2, _CommandLog(None)) == 1
+    assert len(calls) == 3
 
 
 def test_find_msr_partition_raises_when_query_fails():
     """查询失败要中止装机，而不是猜一个分区号去删。"""
-    runner = _msr_runner(
-        _spawn=lambda command, timeout, log, **kwargs: (1, "Get-Partition : 拒绝访问", 0.1)
-    )
+
+    def boom(disk, log):
+        raise RunnerError("Get-Partition : 拒绝访问")
+
+    runner = _msr_runner(_query_partitions=boom)
     with pytest.raises(RunnerError):
         runner._find_msr_partition(2, _CommandLog(None))
 
 
-def test_run_steps_deletes_msr_before_creating_partitions(tmp_path):
-    """先 clean+convert（自动带出 16MB MSR），再按查到的分区号删掉它。"""
+def _ok_pipeline(**overrides):
+    """把 dism / bcdboot / verify 都换成“成功”，只留分区阶段的真实逻辑。"""
+    stubs = {
+        "_apply_image": lambda image_path, index, target, log, **kwargs: (0, "ok", 0.1),
+        "_write_boot": lambda letters, log, **kwargs: (0, "ok", 0.1),
+        "_verify": lambda disk_number, log, letters, **kwargs: StepResult(
+            key="verify", title=STEP_TITLES["verify"], status=STEP_OK, message="ok"
+        ),
+    }
+    stubs.update(overrides)
+    return stubs
+
+
+def test_run_steps_deletes_msr_then_verifies_before_creating_partitions(tmp_path):
+    """清盘 → 删 MSR（独立脚本）→ 复查 → 建分区 → 复核布局。
+
+    关键顺序：删除必须发生在建 EFI 之前，而且删完要再查一次。
+    """
     image = _tiny_image(tmp_path)
     scripts: list[list[str]] = []
+    queries: list[int] = []
 
     def fake_diskpart(lines, log, timeout=600.0, **kwargs):
         scripts.append(list(lines))
         return 0, "ok"
 
+    def fake_query(disk_number, log):
+        queries.append(1)
+        return _msr_payload(1) if len(queries) == 1 else _empty_disk()
+
     runner = _msr_runner(
         _run_diskpart=fake_diskpart,
-        _find_msr_partition=lambda disk_number, log: 1,
-        _apply_image=lambda image_path, index, target, log, **kwargs: (0, "ok", 0.1),
-        _write_boot=lambda letters, log, **kwargs: (0, "ok", 0.1),
-        _verify=lambda disk_number, log, letters, **kwargs: StepResult(
-            key="verify", title=STEP_TITLES["verify"], status=STEP_OK, message="ok"
-        ),
+        _query_partitions=fake_query,
+        _check_layout_after_create=lambda disk, parts, log: (True, "ok", {}),
+        **_ok_pipeline(),
     )
 
     result = runner.run(_tiny_spec(image), threading.Event())
 
     assert result.success is True, result.error
+    # 三段 diskpart，顺序固定
     assert scripts[0] == ["select disk 2", "clean", "convert gpt", "exit"]
-    layout = scripts[1]
-    assert layout.index("delete partition override") < layout.index("create partition efi size=100")
-    assert layout[1:3] == ["select partition 1", "delete partition override"]
+    assert scripts[1] == ["select disk 2", "select partition 1", "delete partition override", "exit"]
+    layout = scripts[2]
+    assert "delete partition override" not in layout
+    assert layout.index("create partition efi size=100") == 1
+    # 找了 1 次（命中），删完复查用满 3 次重试才确认“没有 MSR 了”
+    assert len(queries) == 1 + 3
+
+
+def test_run_steps_aborts_when_msr_survives_delete(tmp_path):
+    """删 MSR 的脚本退出码 0，但复查发现它还在 → 立刻中止，绝不建分区。"""
+    image = _tiny_image(tmp_path)
+    scripts: list[list[str]] = []
+    state = {"deleted": False}
+
+    def fake_diskpart(lines, log, timeout=600.0, **kwargs):
+        scripts.append(list(lines))
+        if any("delete partition override" in line for line in lines):
+            state["deleted"] = True  # 假装成功，但盘上其实没删掉
+        return 0, "ok"
+
+    def fake_query(disk_number, log):
+        return _msr_payload(1)  # 永远查得到 → 说明删除没生效
+
+    runner = _msr_runner(
+        _run_diskpart=fake_diskpart,
+        _query_partitions=fake_query,
+        **_ok_pipeline(),
+    )
+
+    result = runner.run(_tiny_spec(image), threading.Event())
+
+    assert result.success is False
+    assert "MSR" in (result.error or "")
+    assert "仍" in (result.error or "") or "失败" in (result.error or "")
+    # 只跑了清盘 + 删 MSR 两段，没有建分区
+    assert not any("create partition" in line for script in scripts for line in script)
+
+
+def test_run_steps_aborts_when_layout_check_fails(tmp_path):
+    """建完分区复核失败（比如多了一个分区）→ 在 dism 之前就停。"""
+    image = _tiny_image(tmp_path)
+    applied: list[str] = []
+
+    runner = _msr_runner(
+        _run_diskpart=lambda lines, log, timeout=600.0, **kwargs: (0, "ok"),
+        _query_partitions=lambda disk, log: _empty_disk(),
+        _check_layout_after_create=lambda disk, parts, log: (False, "分区数与计划不符（期望 3 个，实际 4 个）", {}),
+        **_ok_pipeline(
+            _apply_image=lambda image_path, index, target, log, **kwargs: (
+                applied.append("image") or 0,
+                "ok",
+                0.1,
+            ),
+        ),
+    )
+
+    result = runner.run(_tiny_spec(image), threading.Event())
+
+    assert result.success is False
+    assert "分区数与计划不符" in (result.error or "")
+    assert applied == []  # 没有进入 dism
 
 
 def test_run_steps_aborts_when_msr_lookup_fails(tmp_path):
@@ -932,11 +1043,24 @@ def _whole_disk_spec(tmp_path):
     )
 
 
-def _stub_runner(monkeypatch, runner, *, spawn=None, diskpart=None):
+def _empty_disk(*_args, **_kwargs):
+    """默认的分区查询结果：GPT、没有任何保留分区、也没有剩余空间。"""
+    return {"partition_style": "GPT", "partitions": [], "largest_free": 0}
+
+
+def _stub_runner(monkeypatch, runner, *, spawn=None, diskpart=None, partitions=None, layout_ok=True):
     released: list[bool] = []
     monkeypatch.setattr(runner, "_release_efi_letter", lambda *a, **k: released.append(True))
     monkeypatch.setattr(
         runner, "_run_diskpart", diskpart or (lambda lines, log, **kwargs: (0, "diskpart ok"))
+    )
+    # 分区查询与“建完复核”都走 PowerShell：这两个测试只关心 dism/bcdboot/盘符，
+    # 所以默认给一个“正常 GPT 盘”，专项测试再单独覆盖它们的失败分支。
+    monkeypatch.setattr(runner, "_query_partitions", partitions or _empty_disk)
+    monkeypatch.setattr(
+        runner,
+        "_check_layout_after_create",
+        lambda disk, parts, log: (layout_ok, "ok" if layout_ok else "分区数与计划不符", {}),
     )
     if spawn is not None:
         monkeypatch.setattr(runner, "_spawn", spawn)
