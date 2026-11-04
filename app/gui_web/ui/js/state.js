@@ -8,7 +8,7 @@
 
 import {
   clamp, freeBytes, isSelectable, checkLayout, fitLayout, reserveGb as reserveGbFor,
-  lastPartitionEatsRest, DEFAULT_EFI_MB, MIN_DATA_GB, MIN_EXTRA_GB, MAX_EXTRAS, toGb,
+  DEFAULT_EFI_MB, MIN_DATA_GB, MIN_EXTRA_GB, MAX_EXTRAS, toGb,
 } from './derive.js';
 
 export const STEP_LABELS = {
@@ -337,28 +337,20 @@ export function targetsValid() {
 
 /** 每块盘的通知 payload：POST /api/prepare 的 selection 形态。
  *
- * **最后一个数据分区默认发 ``"auto"``**（= diskpart 不写 ``size=``，吃掉剩余空间），
- * 前提是“这块盘本来就是填满的”——即扣掉 C、D、E 之后只剩 EFI/对齐的零头（< 1 GB）。
- * 这样：
- *   - 不会再因为我们对对齐余量的估算偏差，出现“界面显示刚好、diskpart 报空间不足”；
- *   - 用户故意把 D 调小、留下大块空盘时，仍然发显式大小（草重“留白”的意图）。
+ * **最后一个数据分区永远发 ``"auto"``**（= diskpart 不写 ``size=``，吃掉全部剩余空间）：
+ *   - 界面上的 D/E 数字只是“预估”（``fitLayout`` 算出来的、用于显示与拖动），
+ *     最后那个分区的输入框是只读的，用户改不了；
+ *   - 尺寸由 diskpart 自己算，所以永远不会出现“界面显示刚好、diskpart 报空间不足”；
+ *   - 有 E 时：D 显式、E 为 auto；没有 E 时：D 就是 auto，永远吃满整盘。
  */
 export function selectionPayload() {
   const selection = {};
   const fs = dataFs();
   for (const target of state.wizard.targets) {
     const extras = Array.isArray(target.extras) ? target.extras : [];
-    // 布局是否本来就填满盘（只余 EFI/对齐的零头）——判据与界面文案共用 derive
-    const disk = diskOf(target.diskNumber);
-    const eatRest = lastPartitionEatsRest(
-      toGb(disk ? disk.size_bytes : 0),
-      target.sysGb,
-      target.dataGb,
-      extras.map((extra) => Number(extra.sizeGb) || 0),
-    );
     const entry = { c_size: Number(target.sysGb) };
     if (extras.length) {
-      // 有额外分区时必须给出显式列表：第一个是 D，其余是 E/F……
+      // 有额外分区时必须给出显式列表：第一个是 D（显式），最后一个是 auto。
       // 文件系统统一取 dataFs()，界面上的 E 没有选择器（与 D 一致）。
       const list = [
         { size_gb: Number(target.dataGb), file_system: fs },
@@ -367,11 +359,10 @@ export function selectionPayload() {
           file_system: fs,
         })),
       ];
-      // 只有**最后**一项允许 auto（后端会检查，中间项 auto 直接报错）
-      if (eatRest) list[list.length - 1].size_gb = 'auto';
+      list[list.length - 1].size_gb = 'auto';
       entry.data_partitions = list;
     } else {
-      entry.data_size = eatRest ? 'auto' : Number(target.dataGb);
+      entry.data_size = 'auto';
     }
     if (target.imagePath) entry.win_gho = target.imagePath;
     if (target.imageIndex) entry.image_index = Number(target.imageIndex);
@@ -380,17 +371,17 @@ export function selectionPayload() {
   return selection;
 }
 
-/** 剩余空间（用于第 2 步右上的“剩余”）。 */
-export function targetRest(target) {
+/** 最后一个数据分区（D 或 E）能分到多少字节 —— 它就是“剩余空间”。 */
+export function autoPartitionBytes(target) {
   const disk = diskOf(target.diskNumber);
   const total = Number(disk && disk.size_bytes) || 0;
-  const extras = (Array.isArray(target.extras) ? target.extras : [])
-    .reduce((sum, extra) => sum + (Number(extra.sizeGb) || 0), 0);
-  const rest = total
-    - (Number(target.sysGb) || 0) * (1024 ** 3)
-    - (Number(target.dataGb) || 0) * (1024 ** 3)
-    - extras * (1024 ** 3);
-  return rest;
+  const extras = Array.isArray(target.extras) ? target.extras : [];
+  const efiGb = Math.max(0, Number(state.settings && state.settings.efiDefaultMb) || DEFAULT_EFI_MB) / 1024;
+  const others = (Number(target.sysGb) || 0)
+    + (extras.length ? Number(target.dataGb) || 0 : 0)
+    + efiGb;
+  // 这里的 0.2 GB 与 derive.reserveGb 的 ALIGN_GB 同口径（只用于显示预估）
+  return Math.max(0, total - others * (1024 ** 3) - 0.2 * (1024 ** 3));
 }
 
 export function diskFreeGb(disk) {

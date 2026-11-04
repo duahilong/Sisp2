@@ -287,12 +287,12 @@ def test_removing_extra_partition_gives_space_back_to_data(tmp_path: Path) -> No
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="没有 node")
-def test_last_data_partition_is_sent_as_auto(tmp_path: Path) -> None:
-    """把盘填满时，最后一个数据分区发 ``"auto"``，由 diskpart 自己吃剩余空间。
+def test_last_data_partition_is_always_sent_as_auto(tmp_path: Path) -> None:
+    """最后一个数据分区**永远**发 ``"auto"``，由 diskpart 自己吃剩余空间。
 
-    ``create partition primary``（不带 ``size=``）会用掉全部剩余空间，比我们在界面上
-    算「总容量 − C − EFI − 对齐余量」更准；用户故意把 D 调小、留一大块空盘时，
-    仍然发显式大小（尊重“留白”的意图）。
+    ``create partition primary``（不带 ``size=``）会吃掉全部剩余空间，比界面上算
+    「总容量 − C − EFI − 对齐余量」更准，而且容量不足从根上不可能发生。
+    代价是界面上的数字只是预估：最后那个分区的输入框是只读的，用户改不了。
     """
     for name in ("derive.js", "state.js"):
         (tmp_path / name.replace(".js", "_copy.mjs")).write_text(
@@ -335,5 +335,5 @@ def test_last_data_partition_is_sent_as_auto(tmp_path: Path) -> None:
     assert parts[0]["size_gb"] == 178.3
     assert parts[-1]["size_gb"] == "auto"
     assert all(entry["file_system"] == "NTFS" for entry in parts)
-    # 用户手动把 D 调小、留下 250 GB 不分配：必须是显式数字，不能偷偷吃掉
-    assert got["shrunk"]["data_size"] == 100
+    # 用户把 D 的数字改小也不会改变结果：最后一项永远是 auto（输入框只读）
+    assert got["shrunk"]["data_size"] == "auto"

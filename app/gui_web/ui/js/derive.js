@@ -301,31 +301,47 @@ export function extraLetter(index) {
   return String.fromCharCode("E".charCodeAt(0) + Number(index));
 }
 
-/** 分区大小校验（与后端 plan_partitions/check_layout 同口径，错误提示给界面用）。
+/** 分区大小校验（与后端 ``plan_partitions`` / ``check_layout`` 同口径）。
  *
  * ``efiMb`` 是 EFI 分区大小：它来自配置文件（``partition_info.efi_size_mb``，
  * 常见 100/300 MB），界面拿不到，所以按 100 MB 估一个下限；真实的
- * EFI 大小在第 4 步的执行计划里能读到，超了后端也会直接把阻断项写回来。
+ * EFI 大小在第 4 步的执行计划里能读到，超了后端也会把阻断项写回来。
  *
- * ``extras`` 是额外数据分区数组（``[{sizeGb}]``），每一项都必须显式给大小——
- * 只有最后一个有大小，剩下的是“未分配”，界面会单独提示。
+ * **最后一个数据分区永远不带 ``size=``**（由 diskpart 吃掉剩余空间），所以：
+ *   - 只有显式项（EFI、C、有 E 时的 D）参与“放不放得下”的计算；
+ *   - 最后一个只校验“剩下那点够不够它自己的下限”。
+ * 这样界面上的数字再也不会因为估算偏差报“超过磁盘容量”。
  */
 export function checkLayout(totalBytes, sysGb, dataGb, extras = [], efiMb = 100) {
   const total = Number(totalBytes) || 0;
   const sys = Number(sysGb) || 0;
-  const data = Number(dataGb) || 0;
   const efi = Math.max(0, Number(efiMb) || 0);
-  if (!(sys > 0) || !(data > 0)) return '两个分区都要填大小';
+  if (!(sys > 0)) return '系统分区要填大小';
   if (sys < MIN_SYS_GB) return `系统分区至少 ${MIN_SYS_GB} GB`;
-  if (data < MIN_DATA_GB) return `第一个数据分区至少 ${MIN_DATA_GB} GB`;
-  let need = Math.round(efi * MB) + fromGb(sys) + fromGb(data) + MB;
-  for (const extra of extras || []) {
-    const gb = Number((extra && extra.sizeGb) || 0);
-    if (!(gb > 0)) return '数据分区要填大小';
-    if (gb < MIN_EXTRA_GB) return `数据分区至少 ${MIN_EXTRA_GB} GB`;
-    need += fromGb(gb);
+
+  const list = Array.isArray(extras) ? extras : [];
+  // 显式项：EFI + C + (有 E 时的 D) + (中间的额外数据分区，目前最多 1 个)
+  let explicit = Math.round(efi * MB) + fromGb(sys) + MB;
+  if (list.length) {
+    const data = Number(dataGb) || 0;
+    if (!(data > 0)) return '第一个数据分区要填大小';
+    if (data < MIN_DATA_GB) return `第一个数据分区至少 ${MIN_DATA_GB} GB`;
+    explicit += fromGb(data);
+    for (let index = 0; index < list.length - 1; index += 1) {
+      const gb = Number((list[index] && list[index].sizeGb) || 0);
+      if (!(gb > 0)) return '数据分区要填大小';
+      if (gb < MIN_EXTRA_GB) return `数据分区至少 ${MIN_EXTRA_GB} GB`;
+      explicit += fromGb(gb);
+    }
   }
-  if (need > total) return `超过磁盘容量 ${fmtSize(total)}`;
+  if (explicit > total) return `超过磁盘容量 ${fmtSize(total)}`;
+
+  // 最后那个自动分区能分到多少，决定它能不能满足下限
+  const autoMinGb = list.length ? MIN_EXTRA_GB : MIN_DATA_GB;
+  const autoGb = (total - explicit) / GB;
+  if (autoGb < autoMinGb) {
+    return `剩下的空间只有 ${autoGb.toFixed(1)} GB，最后一个数据分区至少要 ${autoMinGb} GB`;
+  }
   return '';
 }
 
@@ -341,24 +357,14 @@ export function checkSizes(totalBytes, sysGb, dataGb, efiMb = 100) {
  */
 export const floor1Gb = (value) => Math.floor((Number(value) || 0) * 10 + 1e-9) / 10;
 
-/** 剩余容量低于这个值（GB）时，就让最后一个数据分区“吃掉剩余空间”。 */
-export const EAT_REST_GB = 1;
-
-/** 扣掉 C、D、E 之后还剩多少 GB（可以为负 = 已经超容量）。 */
-export function trailingSpareGb(totalGb, sysGb, dataGb, extrasGb = []) {
-  const extras = (extrasGb || []).reduce((sum, gb) => sum + (Number(gb) || 0), 0);
-  return (Number(totalGb) || 0) - (Number(sysGb) || 0) - (Number(dataGb) || 0) - extras;
-}
-
 /**
- * 最后一个数据分区是否会“吃掉剩余空间”（不写 `size=`，由 diskpart 决定）。
+ * 最后一个数据分区永远会“吃掉剩余空间”（不写 `size=`，由 diskpart 决定）。
  *
- * 抽成纯函数是因为两个地方必须同口径：`selectionPayload()` 据此发 `"auto"`，
- * 界面上的「剩余」文案据此显示「0（并入 E）」。否则会出现“第 2 步说还剩 348 MB、
- * 第 4 步却把它全给了 E”这种自相矛盾的显示。
+ * 这里不再做阈值判断，只是把这个约定写成一个可读的谓词：有 E 时是 E，没 E 时是 D；
+ * 它的大小永远是“剩下多少算多少”，所以界面上它的输入框是只读的、显示的是预估值。
  */
-export function lastPartitionEatsRest(totalGb, sysGb, dataGb, extrasGb = []) {
-  return trailingSpareGb(totalGb, sysGb, dataGb, extrasGb) < EAT_REST_GB;
+export function lastPartitionIsAuto(extras = []) {
+  return (Array.isArray(extras) ? extras.length : 0) > 0 ? 'extra' : 'data';
 }
 
 /**
@@ -418,7 +424,11 @@ export function fitLayout(totalGb, wantedSysGb, extrasGb = [], options = {}) {
   return { sysGb, dataGb: Math.max(MIN_DATA_GB, dataGb), extrasGb: kept };
 }
 
-/** 按计划建完分区后剩下的未分配字节数（0 表示正好用完）。 */
+/** 按计划建完分区后剩下的未分配字节数（0 表示正好用完）。
+ *
+ * 界面已经不再用它：最后一个数据分区永远不带 `size=`，由 diskpart 吃满，
+ * “未分配”这个概念在界面上不存在了。保留这个纯函数给 tools/ 与单测做算术核对。
+ */
 export function unallocatedBytes(totalBytes, sysGb, dataGb, extras = [], efiMb = 100) {
   const total = Number(totalBytes) || 0;
   let used = Math.round((Number(efiMb) || 0) * MB) + fromGb(Number(sysGb) || 0) + fromGb(Number(dataGb) || 0) + MB;

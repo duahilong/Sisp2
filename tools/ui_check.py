@@ -33,7 +33,7 @@ _IMPORT_RE = re.compile(r"""from\s+['"]\./([\w.-]+\.js)['"]""")
 _ATTR_RE = re.compile(r"""(?:href|src)="(/static/[^"]+)\"""")
 
 DERIVE_SCRIPT = """
-import { fmtSize, fsClass, segments, checkSizes, checkLayout, unallocatedBytes, partShortName, suggestLetter, fitLayout, reserveGb, trailingSpareGb, lastPartitionEatsRest, EAT_REST_GB } from './derive.js';
+import { fmtSize, fsClass, segments, checkSizes, checkLayout, unallocatedBytes, partShortName, suggestLetter, fitLayout, reserveGb, lastPartitionIsAuto } from './derive.js';
 
 const GB = 1024 ** 3;
 const esp = { partition_number: 1, size_bytes: 100 * 1024 * 1024,
@@ -57,13 +57,18 @@ const out = {
   ok_sizes: checkSizes(1000 * GB, 120, 380),
   small_sys: checkSizes(1000 * GB, 20, 100) !== '',
   too_big: checkSizes(100 * GB, 120, 380) !== '',
-  efi_reserved: checkSizes(100 * GB, 60, 39.5, 1024) !== '',
+  efi_reserved: checkLayout(100 * GB, 90, 0, [], 1024) !== '',
   efi_fits: checkSizes(100 * GB, 60, 39, 300),
   layout_no_extras: checkLayout(1000 * GB, 120, 380),
   layout_ok: checkLayout(1000 * GB, 120, 380, [{ sizeGb: 200 }]),
   layout_rest: unallocatedBytes(1000 * GB, 120, 380, [{ sizeGb: 200 }]) > 0,
-  layout_zero_extra: checkLayout(1000 * GB, 120, 380, [{ sizeGb: 0 }]) !== '',
-  layout_overflow: checkLayout(500 * GB, 120, 380, [{ sizeGb: 200 }]) !== '',
+  // 最后那个数据分区永远 auto：它的预估大小不参与容量校验，
+  // 只有显式项（EFI/C/有 E 时的 D）会顶到容量，剩下的必须够它的下限
+  layout_auto_last_data: checkLayout(160 * GB, 120, 100) === '',
+  layout_auto_too_small: checkLayout(100 * GB, 120, 100) !== '',
+  layout_auto_extra_small: checkLayout(100 * GB, 60, 39.5, [{ sizeGb: 1 }]) !== '',
+  auto_role_data: lastPartitionIsAuto([]),
+  auto_role_extra: lastPartitionIsAuto([{ sizeGb: 200 }]),
   // 快捷容量（100/120/150/200）必须把 E 一起重算：以前只算 C 和 D，
   // 于是 C=200 + D=275.9 + E=71.7 在 477 GB 的盘上超了一大截。
   // 并且剩下的容量要由 D / E 平分，不能全给 D。
@@ -76,11 +81,6 @@ const out = {
     return [fit.sysGb, fit.dataGb];
   })(),
   // 预留余量 = EFI + 对齐，不再是固定 1 GB：“剩余”不应该白扔一整 GB
-  // “最后一个数据分区吃剩余空间”的判据：界面文案与 payload 必须共用
-  trailing_spare: +trailingSpareGb(476.9, 150, 163.3, [163.3]).toFixed(2),
-  eats_rest_filled: lastPartitionEatsRest(476.9, 150, 163.3, [163.3]),
-  eats_rest_gap: lastPartitionEatsRest(476.9, 120, 100, []),
-  eat_rest_threshold: EAT_REST_GB,
   reserve_default: reserveGb(),
   reserve_efi300: reserveGb(300),
   // 无论怎么点，C + D + E + 预留余量都不能超过盘容量
@@ -127,14 +127,13 @@ EXPECTED = {
     "layout_no_extras": "",
     "layout_ok": "",
     "layout_rest": True,
-    "layout_zero_extra": True,
-    "layout_overflow": True,
+    "layout_auto_last_data": True,
+    "layout_auto_too_small": True,
+    "layout_auto_extra_small": True,
+    "auto_role_data": "data",
+    "auto_role_extra": "extra",
     "fit_preset": [200, 138.3, [138.3]],
     "fit_no_extra": [120, 356.6],
-    "trailing_spare": 0.3,
-    "eats_rest_filled": True,
-    "eats_rest_gap": False,
-    "eat_rest_threshold": 1,
     "reserve_default": 0.3,
     "reserve_efi300": 0.49,
     "fit_never_over": True,

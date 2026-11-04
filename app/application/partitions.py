@@ -12,12 +12,18 @@
   与 ``drive_letters`` 保持一一对应；
 - 盘上**不保留 MSR**：``convert gpt`` 会自动建一个 16 MB 的 MSR，执行器按类型
   删掉它，最终布局就是 EFI + C + D(+E)（见 ``strip_msr_lines``）；
-- ``size_mb=None`` 只可能出现在**唯一**的数据分区上（业务配置写了
-  ``data_size_gb: auto``），表示“吃掉剩余空间”。显式给出 ``data_partitions``
-  时每项都必须是正数，剩余空间保持未分配——界面上“加一个 E 分区”走的就是这条；
+- ``size_mb=None`` 只可能出现在**最后**的数据分区上（业务配置写了
+  ``data_size_gb: auto``、或界面永远发的最后一项），表示“吃掉剩余空间”：
+  diskpart 收到不带 ``size=`` 的 ``create partition primary``，尺寸由它自己算，
+  所以最后一项永远不会容量不足。界面把最后一项的输入框做成只读的预估，
+  不再发显式数字；
+- 显式项（EFI、C、以及有 E 时的 D）仍然可能顶到盘尾，容量校验把这些算清楚；
 - 文件系统统一成规范写法（``NTFS`` / ``exFAT`` / ``FAT32``），拼脚本时再转成
   diskpart 的小写 token；
-- 容量算术留 1 MB 给 GPT 表与分区对齐，和 ``_check_partition_fit`` 的老口径一致。
+- 容量算术留 ``LAYOUT_SLACK_MB``（GPT 盘首/盘尾各 1 MB，再加 1 MB 冗余）。
+  实测（40 GB 盘、diskpart 10.0.19041）：显式分区合计 = 盘容量 − 1 MB 时
+  最后一个 ``create`` 失败（``exit=-2147024809``），= 容量 − 2 MB 时成功且
+  ``LargestFree=0``。以前这里只留 1 MB，边界配置会“校验通过 + 清盘后失败”。
 
 全部是纯函数，不碰磁盘、不读设置，方便单测。
 """
@@ -43,6 +49,12 @@ MAX_DATA_PARTITIONS = 2
 # MSR（Microsoft Reserved）分区的 GPT 类型；``convert gpt`` 会自动建一个 16 MB 的。
 # 我们的最终布局只要 EFI + C + D(+E)，所以建分区前把它按类型删掉（见 strip_msr_lines）。
 MSR_GPT = "e3c9e316-0b5c-4db8-817d-f92df00215ae"
+
+# 盘符/对齐之外，GPT 盘真正不能用的空间：盘首 1 MB（主头 + 分区表数组 +
+# diskpart 的 1 MB 对齐起点）、盘尾 1 MB（备份头 + 备份表）。
+# 实测 40 GB 盘：显式合计 = 容量 − 2 MB 时成功且 LargestFree=0；= 容量 − 1 MB
+# 时最后一个 create 失败。这里取 3 MB，给 4Kn / 非整数 MB 容量留 1 MB 冗余。
+LAYOUT_SLACK_MB = 3
 
 # 额外数据分区只给这两个：diskpart 对 >32 GB 的 FAT32 会直接失败。
 DATA_FS_CHOICES = ("NTFS", "exFAT")
@@ -286,8 +298,7 @@ def with_auto_estimates(
     if disk_size_bytes <= 0 or not any(part.size_mb is None for part in parts):
         return list(parts)
     explicit = sum(int(part.size_mb) for part in parts if part.size_mb is not None)
-    # 和 check_layout 同口径：留 1 MB 给 GPT 表与分区对齐
-    estimate_mb = max(0, disk_size_bytes // BYTES_PER_MB - explicit - 1)
+    estimate_mb = max(0, disk_size_bytes // BYTES_PER_MB - explicit - LAYOUT_SLACK_MB)
     return [
         part if part.size_mb is not None else replace(part, estimate_mb=estimate_mb)
         for part in parts
@@ -301,6 +312,9 @@ def strip_msr_lines(msr_partition_number: Any) -> list[str]:
     19045 / diskpart 10.0.19041：``p1 Reserved 15.98 MB offset=0.02 MB``）。
     我们的最终布局是 ``EFI + C + D(+E)``，所以在建分区前把它删掉；删完后盘首的
     空闲会与后面的空闲合并，EFI 依然从 1 MB 开始（实测 ``offset=1.00 MB``）。
+
+    执行器把这两行放在**独立的一段** diskpart 里跑，紧跟一次复查（还能不能查到
+    MSR）；确认真的没了才去建分区，避免“删失败了却继续建”留下多一个分区。
 
     ``msr_partition_number`` **必须来自对真实磁盘的查询**（按 ``MSR_GPT`` 类型匹配），
     不能假设“分区 1 就是 MSR”：万一本机没生成 MSR，``select partition 1`` 会失败，
@@ -340,10 +354,10 @@ def check_layout(parts: Sequence[PlannedPartition], disk_size_bytes: Any) -> lis
         return []
     if disk_size_bytes <= 0:
         return []
-    # 吃掉剩余空间的那个分区本身不会超容量，但显式指定的那些仍然可能超。
+    # 吃掉剩余空间的那个分区本身不会超容量（最后一个数据分区永远如此），
+    # 但显式指定的那些仍然可能超。
     required = sum(int(part.size_mb) for part in parts if part.size_mb is not None) * BYTES_PER_MB
-    # 留 1 MB 给 GPT 表与分区对齐。
-    if required + BYTES_PER_MB <= disk_size_bytes:
+    if required + LAYOUT_SLACK_MB * BYTES_PER_MB <= disk_size_bytes:
         return []
     return [f"{layout_summary(parts)} 超过 {format_size(disk_size_bytes)}"]
 
@@ -354,8 +368,8 @@ def unallocated_bytes(parts: Sequence[PlannedPartition], disk_size_bytes: Any) -
         return 0
     if disk_size_bytes <= 0 or any(part.size_mb is None for part in parts):
         return 0
-    used = sum(int(part.size_mb or 0) for part in parts) * BYTES_PER_MB + BYTES_PER_MB
-    return max(disk_size_bytes - used, 0)
+    used = sum(int(part.size_mb or 0) for part in parts) * BYTES_PER_MB
+    return max(disk_size_bytes - used - LAYOUT_SLACK_MB * BYTES_PER_MB, 0)
 
 
 def diskpart_lines(parts: Sequence[PlannedPartition]) -> list[str]:

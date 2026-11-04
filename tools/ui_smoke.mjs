@@ -273,7 +273,6 @@ async function main() {
       summary.steps.push({
         step2extra: JSON.parse(await evaluate(`(function () {
           const row = document.querySelector('#wzBody .szrow.extra');
-          const restText = String((document.querySelector('#wzBody .trest [data-rest]') || {}).textContent || '');
           const freeSeg = document.querySelector('#wzBody .wseg.free');
           const footText = String((document.querySelector('#wzBody [data-err]') || {}).textContent || '');
           const nameEl = row && row.querySelector('.szname');
@@ -294,9 +293,10 @@ async function main() {
             splitOk: dataGb > 0 && extraGb > 0 && Math.abs(dataGb - extraGb) <= 1.5,
             error: (document.querySelector('#wzBody .errmsg') || {}).textContent || '',
             canAddMore: Boolean(document.querySelector('#wzBody button[data-add]')),
-            restText: restText,
-            restHidden: Boolean(document.querySelector('#wzBody .trest .restbox[hidden]')),
-            freeWidth: freeSeg ? freeSeg.style.width : '',
+            // 最后一个数据分区永远 auto：输入框只读、没有“剩余/未分配”段
+            extraReadonly: Boolean(extraInput && extraInput.readOnly),
+            dataReadonly: Boolean(dataInput && dataInput.readOnly),
+            hasFreeSeg: Boolean(freeSeg),
             footText: footText,
           });
         })()`)),
@@ -345,21 +345,19 @@ async function main() {
       if (presetResult.error) problems.push(`快捷容量 200 之后出现错误提示: ${presetResult.error}`);
       if (presetResult.nextDisabled) problems.push('快捷容量 200 之后“下一步”被禁用（说明布局不合法）');
 
-      // 第 2 步的「剩余」必须与执行计划一致：最后一个数据分区会吃掉零头时，
-      // 最后一个数据分区总会吃满整盘，所以这里不再显示“剩余”（永远是 0，没信息量）；
-      // 进度条也不留灰色未分配段，脚注写“+ 剩余 …（并入 X）”。
+      // 最后一个数据分区永远 auto（不带 size=，由 diskpart 吃满），所以：
+      //   - 有 E 时 E 的输入框只读，D 可编辑；
+      //   - 进度条没有“未分配”段；
+      //   - 脚注把最后那个分区写成“剩余（约 X）”。
       const step2Extra = summary.steps.find((item) => item.step2extra)?.step2extra;
       if (!step2Extra) {
         problems.push('没采集到第 2 步加 E 之后的状态');
       } else {
-        if (step2Extra.restText !== '' || !step2Extra.restHidden) {
-          problems.push(`加 E 之后不该再显示“剩余”（永远是 0），实际：text='${step2Extra.restText}' hidden=${step2Extra.restHidden}`);
-        }
-        if (step2Extra.freeWidth && parseFloat(step2Extra.freeWidth) > 0) {
-          problems.push(`加 E 之后进度条还留着未分配段（width=${step2Extra.freeWidth}）`);
-        }
-        if (/剩余/.test(step2Extra.footText)) {
-          problems.push(`加 E 之后脚注不该再提“剩余”（零头归 E），实际：${step2Extra.footText}`);
+        if (!step2Extra.extraReadonly) problems.push('加 E 之后 E 的输入框必须是只读（它永远吃满剩余）');
+        if (step2Extra.dataReadonly) problems.push('加 E 之后 D 必须是可编辑的（它是显式分区）');
+        if (step2Extra.hasFreeSeg) problems.push('第 2 步进度条不该再有“未分配”段');
+        if (!/剩余（约 /.test(step2Extra.footText)) {
+          problems.push(`脚注应把最后一个分区写成“剩余（约 X）”，实际：${step2Extra.footText}`);
         }
       }
 
@@ -444,7 +442,8 @@ async function main() {
             sysGb: values.sys,
             dataGb: values.data,
             capacityGb: capacityGb,
-            // 删掉 E 之后 D 要把容量吃回来，不能留一大块“未分配”
+            // 删掉 E 之后 D 变回“吃满剩余”的 auto，输入框只读、数字是预估
+            dataReadonly: Boolean(document.querySelector('#wzBody .szrow input[data-size="data"]')?.readOnly),
             spareGb: Math.round((capacityGb - (values.sys || 0) - (values.data || 0)) * 10) / 10,
             error: String((document.querySelector('#wzBody .errmsg') || {}).textContent || ''),
           });
@@ -452,8 +451,8 @@ async function main() {
       });
       const removedResult = summary.steps[summary.steps.length - 1].step2extraRemoved;
       if (removedResult.rows !== 0) problems.push('删掉 E 之后还留着 E 的输入行');
-      if (removedResult.spareGb > 2) {
-        problems.push(`删掉 E 之后 D 没有吃掉容量：未分配 ${removedResult.spareGb} GB`);
+      if (!removedResult.dataReadonly) {
+        problems.push('删掉 E 之后 D 变回“吃满剩余”，输入框必须是只读');
       }
       if (removedResult.error) problems.push(`删掉 E 之后报错: ${removedResult.error}`);
       summary.shots.push(await shoot('05b3-install-step2-extra-removed'));
@@ -496,7 +495,8 @@ async function main() {
             start: (document.querySelector('#startBtn') || {}).disabled,
             error: (document.querySelector('#wzBody .warnbox') || {}).innerText || '',
             planDataRows: (text.match(/数据分区/g) || []).length,
-            planUnalloc: text.indexOf('未分配') >= 0,
+            planUnalloc: text.indexOf('未分配') >= 0,  // 永远是 false：最后一项吃满
+            planAuto: text.indexOf('剩余空间（约') >= 0,
             planLetters: text.indexOf('盘符') >= 0,
             text: text.slice(0, 400),
           });
@@ -557,7 +557,8 @@ async function main() {
       if (!extra.clicked) problems.push('第 2 步没有“➕ 添加数据分区”按钮');
       if (extra.rows !== 1) problems.push(`点 ➕ 之后额外分区行数为 ${extra.rows}（期望 1）`);
       if (extra.selects !== 0) problems.push('数据分区不应该再有文件系统选择器（固定跟 D 一致）');
-      if (extra.segs < 4) problems.push(`分区条只有 ${extra.segs} 段（期望 C/D/E/未分配 至少 4 段）`);
+      // 最后一个数据分区永远吃满，所以进度条只有 C / D / E 三段，没有“未分配”段
+      if (extra.segs !== 3) problems.push(`分区条是 ${extra.segs} 段（期望 3：C/D/E，不再有未分配段）`);
       if (extra.error) problems.push(`加了数据分区后第 2 步报错：${extra.error}`);
       if (extra.canAddMore) problems.push('已经有一个数据分区了，➕ 按钮还应该禁用/隐藏');
       if (!String(extra.rowText).includes('数据分区')) problems.push('E 行的名字应该就是“数据分区”');
@@ -588,6 +589,8 @@ async function main() {
         problems.push(`第 4 步计划表里只有一个数据分区（${step4.planDataRows}，期望 2：D 和 E）`);
       }
       if (!step4.planLetters) problems.push('第 4 步没有显示计划盘符');
+      if (step4.planUnalloc) problems.push('第 4 步不该出现“未分配”（最后一个分区永远吃满）');
+      if (!step4.planAuto) problems.push('第 4 步应把最后一个分区显示为“剩余空间（约 X GB）”');
     }
 
     console.log(JSON.stringify({ ok: problems.length === 0, problems, ...summary }, null, 2));

@@ -531,6 +531,9 @@ table.grid{width:100%;border-collapse:separate;border-spacing:0;font-size:12px}
   font-family:var(--mono);font-size:13px;outline:none;
 }
 .szrow input:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-bg)}
+/* 最后一个数据分区的输入框是只读的：尺寸由 diskpart 吃剩余空间决定，这里只显示预估 */
+.szrow input[readonly]{background:#F4F7FA;color:var(--muted);cursor:default}
+.szrow input[readonly]:focus{border-color:var(--line);box-shadow:none}
 .szrow input.bad{border-color:var(--danger);box-shadow:0 0 0 2px var(--danger-bg)}
 .unit{font-size:11.5px;color:var(--muted)}
 .szsub{font-size:11px;color:var(--faint)}
