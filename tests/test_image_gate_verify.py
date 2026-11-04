@@ -1,0 +1,320 @@
+"""① 镜像可应用性闸门 与 ② verify「装完能不能开机」判据。
+
+这两个改动都是为了防止同一个后果：**盘已经清空，才发现镜像不能用 / 装不进去**。
+所以测试重点不是“顺利路径”，而是每种“不该让它开始”的形态都要变成阻断项，
+以及 verify 在引导文件/系统文件缺失时必须判失败。
+"""
+
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+from typing import Any
+
+from app.application.contracts import DiskInfo
+from app.application.real_runner import WindowsDiskRunner, _verify_verdict
+from app.application.workflow import WorkflowController, _image_problems
+from app.models import WorkerResult
+from app.preflight import CHECK_IMAGE_TYPE, run_preflight_checks
+
+_GIB = 1024**3
+
+_OK_VERIFY_PAYLOAD: dict[str, Any] = {
+    "partition_style": "GPT",
+    "partitions": [
+        {"number": 1, "size_bytes": 16 * 1024**2},
+        {"number": 2, "size_bytes": 300 * 1024**2},
+        {"number": 3, "size_bytes": 120 * _GIB, "drive_letter": "G"},
+        {"number": 4, "size_bytes": 300 * _GIB, "drive_letter": "J"},
+    ],
+    "boot_file": r"F:\EFI\Microsoft\Boot\bootmgfw.efi",
+    "system_file": r"G:\Windows\System32\config\SYSTEM",
+}
+
+
+# --------------------------------------------------------- ① 镜像可应用性闸门
+def test_image_problems_accepts_applicable_image(tmp_path):
+    wim = tmp_path / "win11.wim"
+    wim.write_bytes(b"wim")
+    assert _image_problems({"image_info": {"image_path": str(wim)}}) == []
+
+
+def test_image_problems_rejects_iso_with_actionable_message(tmp_path):
+    """ISO 是“能读索引、不能 apply”的典型：必须在计划阶段挡住，而不是清盘后报错。"""
+    iso = tmp_path / "win11.iso"
+    iso.write_bytes(b"iso")
+    problems = _image_problems({"image_info": {"image_path": str(iso)}})
+    assert problems
+    assert "ISO" in problems[0]
+    assert "install.wim" in problems[0]
+
+
+def test_image_problems_rejects_unknown_suffix(tmp_path):
+    note = tmp_path / "notes.txt"
+    note.write_text("x", encoding="utf-8")
+    problems = _image_problems({"image_info": {"image_path": str(note)}})
+    assert problems
+    assert "不支持" in problems[0]
+
+
+def test_image_problems_reports_missing_file(tmp_path):
+    problems = _image_problems({"image_info": {"image_path": str(tmp_path / "gone.wim")}})
+    assert problems
+    assert "不存在" in problems[0]
+
+
+def test_image_problems_checks_requested_index(tmp_path):
+    wim = tmp_path / "win11.wim"
+    wim.write_bytes(b"wim")
+
+    problems = _image_problems(
+        {"image_info": {"image_path": str(wim), "image_index": 9}}, lambda path: [1, 2]
+    )
+    assert problems
+    assert "索引 9" in problems[0]
+
+    ok = _image_problems(
+        {"image_info": {"image_path": str(wim), "image_index": 2}}, lambda path: [1, 2]
+    )
+    assert ok == []
+
+
+def test_image_problems_defaults_to_index_one(tmp_path):
+    """执行器缺省用索引 1，所以没写索引时也要校验 1 存不存在。"""
+    wim = tmp_path / "win11.wim"
+    wim.write_bytes(b"wim")
+    problems = _image_problems({"image_info": {"image_path": str(wim)}}, lambda path: [3])
+    assert problems
+    assert "索引 1" in problems[0]
+
+
+def test_image_problems_surfaces_reader_failure(tmp_path):
+    wim = tmp_path / "win11.wim"
+    wim.write_bytes(b"wim")
+
+    def boom(path: str) -> list[int]:
+        raise RuntimeError("dism 挂了")
+
+    problems = _image_problems({"image_info": {"image_path": str(wim)}}, boom)
+    assert problems
+    assert "无法读取" in problems[0]
+
+
+def _disk(number: int = 1) -> DiskInfo:
+    return DiskInfo(
+        disk_number=number,
+        model="test disk",
+        serial_number=None,
+        unique_id=f"unique-{number}",
+        size_bytes=60 * _GIB,
+        size_display="60 GB",
+        partition_style="RAW",
+        bus_type="NVMe",
+        drive_letters=(),
+        is_boot=False,
+        is_system=False,
+        is_offline=False,
+        is_read_only=False,
+        is_selectable=True,
+        protection_reasons=(),
+    )
+
+
+class _FakeService:
+    def __init__(self, disks: list[DiskInfo]) -> None:
+        self.disks = disks
+        self.dry_run = True
+        self.allowed_disk_numbers = frozenset()
+
+    def scan_protected_disks(self, excluded_names: Any = None) -> list[DiskInfo]:
+        return list(self.disks)
+
+    def build_selection_plan(self, payload, summaries, selected, **kwargs):
+        letters = {number: {"efi": "E", "windows": "F", "data": "G"} for number in selected}
+        return SimpleNamespace(drive_letter_allocations=letters)
+
+    def execute_spec(self, spec, cancel_event):
+        return WorkerResult.dry_run_plan(int(getattr(spec, "disk_number", 0) or 0))
+
+    def check_config(self, config_path=None):
+        return SimpleNamespace(passed=True, message="配置可解析", error_code=0)
+
+
+def _controller(image_path: str) -> WorkflowController:
+    def preflight(config_path=None, dry_run=False):
+        return {
+            "results": [{"name": "运行前检查", "passed": True, "message": "ok"}],
+            "config_payload": {
+                "partition_info": {"efi_size_mb": 300, "c_size_gb": 10},
+                "image_info": {"image_path": image_path, "image_index": 1},
+            },
+        }
+
+    return WorkflowController(
+        service=_FakeService([_disk(1)]),
+        dry_run=True,
+        preflight_runner=preflight,
+        image_indexes=lambda path: [1],
+    )
+
+
+def test_prepare_blocks_iso_image_and_disables_start(tmp_path):
+    iso = tmp_path / "win11.iso"
+    iso.write_bytes(b"iso")
+    controller = _controller(str(iso))
+    controller.start(None, dry_run=True)
+
+    prepared = controller.prepare([1])[0]
+
+    assert prepared.plan.executable is False
+    assert any("ISO" in blocker for blocker in prepared.plan.blockers)
+    checks = {check.key: check for check in prepared.plan.checks}
+    assert checks["image"].passed is False
+    assert "ISO" in checks["image"].message
+
+
+def test_prepare_keeps_applicable_image_executable(tmp_path):
+    wim = tmp_path / "win11.wim"
+    wim.write_bytes(b"wim")
+    controller = _controller(str(wim))
+    controller.start(None, dry_run=True)
+
+    prepared = controller.prepare([1])[0]
+
+    checks = {check.key: check for check in prepared.plan.checks}
+    assert checks["image"].passed is True
+    assert not any("镜像" in blocker for blocker in prepared.plan.blockers)
+
+
+def test_preflight_flags_iso_image(tmp_path):
+    iso = tmp_path / "win11.iso"
+    iso.write_bytes(b"iso")
+    report = run_preflight_checks(
+        dry_run=True,
+        admin_checker=lambda: True,
+        command_lookup=lambda name: "found",
+        settings={"sysWim": str(iso)},
+    )
+    results = {item["name"]: item for item in report["results"]}
+    assert results[CHECK_IMAGE_TYPE]["passed"] is False
+    assert "ISO" in results[CHECK_IMAGE_TYPE]["message"]
+    assert report["all_passed"] is False
+
+
+def test_preflight_accepts_applicable_image(tmp_path):
+    wim = tmp_path / "win11.wim"
+    wim.write_bytes(b"wim")
+    report = run_preflight_checks(
+        dry_run=True,
+        admin_checker=lambda: True,
+        command_lookup=lambda name: "found",
+        settings={"sysWim": str(wim)},
+    )
+    results = {item["name"]: item for item in report["results"]}
+    assert results[CHECK_IMAGE_TYPE]["passed"] is True
+
+
+# ------------------------------------------------- ② verify：装完能不能开机
+def test_verify_verdict_accepts_ready_disk():
+    ok, message, details = _verify_verdict(_OK_VERIFY_PAYLOAD)
+    assert ok is True
+    assert "bootmgfw.efi" in message
+    assert details["boot_file"].endswith("bootmgfw.efi")
+    assert details["system_file"].endswith("SYSTEM")
+    assert details["problems"] == []
+
+
+def test_verify_verdict_fails_without_boot_file():
+    payload = dict(_OK_VERIFY_PAYLOAD, boot_file=None)
+    ok, message, details = _verify_verdict(payload)
+    assert ok is False
+    assert "bootmgfw" in message
+    assert any("EFI" in problem for problem in details["problems"])
+
+
+def test_verify_verdict_fails_without_system_file():
+    """镜像只应用了一半（或只拷了引导文件）时必须判失败，而不是“六步全绿”。"""
+    payload = dict(_OK_VERIFY_PAYLOAD, system_file=None)
+    ok, message, _ = _verify_verdict(payload)
+    assert ok is False
+    assert "系统文件" in message
+
+
+def test_verify_verdict_requires_gpt_and_three_partitions():
+    mbr = dict(_OK_VERIFY_PAYLOAD, partition_style="MBR")
+    ok, message, _ = _verify_verdict(mbr)
+    assert ok is False
+    assert "GPT" in message
+
+    two_parts = dict(_OK_VERIFY_PAYLOAD, partitions=_OK_VERIFY_PAYLOAD["partitions"][:2])
+    ok, message, _ = _verify_verdict(two_parts)
+    assert ok is False
+    assert "分区数" in message
+
+
+class _StubLog:
+    def __init__(self) -> None:
+        self.blocks: list[str] = []
+
+    def write(self, message: str) -> None:
+        pass
+
+    def block(self, title: str, text: str) -> None:
+        self.blocks.append(title)
+
+    def flush(self) -> None:
+        pass
+
+
+def test_verify_script_receives_letters(monkeypatch):
+    """verify 要靠 EFI/Windows 盘符去查文件，所以必须把它们传进 PowerShell 环境。"""
+    runner = WindowsDiskRunner(
+        diskpart="diskpart.exe", dism="dism.exe", bcdboot="bcdboot.exe",
+        powershell="powershell.exe",
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_run(command, **kwargs):
+        captured["env"] = kwargs.get("env") or {}
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(_OK_VERIFY_PAYLOAD).encode("utf-8"),
+            stderr=b"",
+        )
+
+    monkeypatch.setattr("app.application.real_runner.subprocess.run", fake_run)
+    result = runner._verify(1, _StubLog(), {"efi": "F", "windows": "G"})
+
+    assert result.status == "ok"
+    assert captured["env"]["VIX_EFI_LETTER"] == "F"
+    assert captured["env"]["VIX_WINDOWS_LETTER"] == "G"
+
+
+def test_every_preflight_check_has_a_stable_key():
+    """新增预检项必须同步 ``_CHECK_KEYS``，否则界面拿到的是 check_N 这种漂移 key。"""
+    from app import preflight
+    from app.application.workflow import _CHECK_KEYS
+
+    names = [
+        value
+        for name, value in vars(preflight).items()
+        if name.startswith("CHECK_") and isinstance(value, str)
+    ]
+    missing = [name for name in names if name not in _CHECK_KEYS]
+    assert missing == []
+
+
+def test_preflight_iso_check_maps_to_image_type_key(tmp_path):
+    from app.application.workflow import _build_check_items
+
+    iso = tmp_path / "win11.iso"
+    iso.write_bytes(b"iso")
+    report = run_preflight_checks(
+        dry_run=True,
+        admin_checker=lambda: True,
+        command_lookup=lambda name: "found",
+        settings={"sysWim": str(iso)},
+    )
+    checks = {item.key: item for item in _build_check_items(report["results"])}
+    assert checks["image_type"].passed is False
+    assert "ISO" in checks["image_type"].message

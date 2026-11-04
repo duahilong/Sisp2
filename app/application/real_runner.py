@@ -102,21 +102,49 @@ STEP_TITLES = {
 _VERIFY_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
 $number = [int]$env:VIX_DISK_NUMBER
+$efiLetter = [string]$env:VIX_EFI_LETTER
+$winLetter = [string]$env:VIX_WINDOWS_LETTER
+$disk = Get-Disk -Number $number
 $items = foreach ($part in Get-Partition -DiskNumber $number -ErrorAction SilentlyContinue) {
     [pscustomobject]@{
         number        = [int]$part.PartitionNumber
         size_bytes    = [long]$part.Size
         offset_bytes  = [long]$part.Offset
         type          = [string]$part.Type
+        gpt_type      = [string]$part.GptType
         drive_letter  = if ($part.DriveLetter) { [string]$part.DriveLetter } else { $null }
         is_active     = [bool]$part.IsActive
         is_hidden     = [bool]$part.IsHidden
     }
 }
+function Find-First($paths) {
+    foreach ($path in $paths) {
+        if ($path -and (Test-Path -LiteralPath $path)) { return $path }
+    }
+    return $null
+}
+# bcdboot 写完后，EFI 分区里必须有引导文件
+$bootFile = $null
+if ($efiLetter) {
+    $bootFile = Find-First @(
+        "${efiLetter}:\EFI\Microsoft\Boot\bootmgfw.efi",
+        "${efiLetter}:\EFI\BOOT\BOOTX64.EFI"
+    )
+}
+# Windows 分区里必须有系统文件（真实镜像一定会有）
+$systemFile = $null
+if ($winLetter) {
+    $systemFile = Find-First @(
+        "${winLetter}:\Windows\System32\config\SYSTEM",
+        "${winLetter}:\Windows\System32\ntoskrnl.exe"
+    )
+}
 [pscustomobject]@{
     disk_number     = $number
-    partition_style = [string](Get-Disk -Number $number).PartitionStyle
+    partition_style = [string]$disk.PartitionStyle
     partitions      = @($items)
+    boot_file       = $bootFile
+    system_file     = $systemFile
 } | ConvertTo-Json -Depth 4 -Compress
 """
 
@@ -176,6 +204,55 @@ def _tail(text: str, limit: int = 4000) -> str:
     if len(text) <= limit:
         return text
     return "…（前略）\n" + text[-limit:]
+
+
+def _verify_verdict(payload: Mapping[str, Any]) -> tuple[bool, str, dict[str, Any]]:
+    """把 verify 脚本的输出变成“这块盘现在能不能用”的结论。
+
+    只靠“GPT + 分区数”是不够的：bcdboot 可能退出码 0 但没写入任何文件，镜像
+    也可能只应用了一半。所以这里四个条件都查：分区表、分区数、EFI 引导文件、
+    Windows 系统文件。纯函数，方便用假 payload 测失败分支。
+    """
+    parts = payload.get("partitions") or []
+    if isinstance(parts, Mapping):
+        parts = [parts]
+    parts = [part for part in parts if isinstance(part, Mapping)]
+    style = str(payload.get("partition_style") or "?").strip().upper()
+    boot_file = str(payload.get("boot_file") or "").strip()
+    system_file = str(payload.get("system_file") or "").strip()
+
+    summary = "、".join(
+        f"#{part.get('number')}"
+        f"{('(' + str(part.get('drive_letter')) + ':)' if part.get('drive_letter') else '')}"
+        f"={format_size(part.get('size_bytes'))}"
+        for part in parts
+    )
+
+    problems: list[str] = []
+    if style != "GPT":
+        problems.append(f"分区表不是 GPT（{style}）")
+    if len(parts) < 3:
+        problems.append(f"分区数不足（{len(parts)} 个）")
+    if not boot_file:
+        problems.append("EFI 分区里没有 bootmgfw.efi（bcdboot 没写进去）")
+    if not system_file:
+        problems.append("系统分区里没有 Windows 系统文件（镜像没应用完整）")
+
+    details: dict[str, Any] = {
+        "partition_style": style,
+        "partitions": parts,
+        "boot_file": boot_file or None,
+        "system_file": system_file or None,
+        "problems": problems,
+    }
+    if problems:
+        return False, "校验不符合预期：" + "；".join(problems) + f"（{summary}）", details
+    return (
+        True,
+        f"GPT、{len(parts)} 个分区：{summary}；引导 {Path(boot_file).name}；"
+        f"系统 {Path(system_file).name}",
+        details,
+    )
 
 
 def prune_runner_logs(log_dir: str | os.PathLike[str], retention_days: int) -> int:
@@ -524,7 +601,7 @@ class WindowsDiskRunner:
 
         # 6：校验
         self._notify(on_step, "verify", "running", "校验分区与引导")
-        steps.append(self._verify(disk_number, log))
+        steps.append(self._verify(disk_number, log, letters))
         if steps[-1].failed:
             return steps, "分区校验失败"
         return steps, None
@@ -686,7 +763,12 @@ class WindowsDiskRunner:
         log.write(f"临时目录：{temp_dir}")
         return env
 
-    def _verify(self, disk_number: int, log: _CommandLog) -> StepResult:
+    def _verify(
+        self,
+        disk_number: int,
+        log: _CommandLog,
+        letters: Mapping[str, str] | None = None,
+    ) -> StepResult:
         title = STEP_TITLES["verify"]
         if not self.powershell:
             return StepResult(
@@ -697,6 +779,10 @@ class WindowsDiskRunner:
             )
         env = dict(os.environ)
         env["VIX_DISK_NUMBER"] = str(disk_number)
+        # 校验时 EFI / Windows 的盘符还没释放（释放发生在外层 finally），正好用来查文件。
+        letters = dict(letters or {})
+        env["VIX_EFI_LETTER"] = str(letters.get("efi") or "")
+        env["VIX_WINDOWS_LETTER"] = str(letters.get("windows") or "")
         try:
             completed = subprocess.run(  # noqa: S603 - 固定脚本，编号来自任务
                 [self.powershell, "-NoProfile", "-NonInteractive", "-Command", _VERIFY_SCRIPT],
@@ -728,27 +814,13 @@ class WindowsDiskRunner:
                 status=STEP_FAILED,
                 message=f"校验输出不是合法 JSON：{_tail(raw, 300)}",
             )
-        parts = payload.get("partitions") or []
-        if isinstance(parts, dict):
-            parts = [parts]
-        style = payload.get("partition_style") or "?"
-        summary = "、".join(
-            f"#{part.get('number')}"
-            f"{('(' + str(part.get('drive_letter')) + ':)' if part.get('drive_letter') else '')}"
-            f"={format_size(part.get('size_bytes'))}"
-            for part in parts
-        )
-        ok = str(style).upper() == "GPT" and len(parts) >= 3
+        ok, message, details = _verify_verdict(payload if isinstance(payload, Mapping) else {})
         return StepResult(
             key="verify",
             title=title,
             status=STEP_OK if ok else STEP_FAILED,
-            message=(
-                f"GPT、{len(parts)} 个分区：{summary}"
-                if ok
-                else f"校验不符合预期：style={style}，分区数={len(parts)}"
-            ),
-            details={"partition_style": style, "partitions": parts},
+            message=message,
+            details=details,
         )
 
     # ------------------------------------------------------------------ 进程

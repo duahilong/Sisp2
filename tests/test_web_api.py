@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -32,12 +33,15 @@ from app.gui_web.server import create_app
 from app.models import WorkerResult
 from app.modules.settings.service import build_store
 
+_FAKE_IMAGE_PATH = Path(tempfile.gettempdir()) / "sisp-test-web-api.wim"
+_FAKE_IMAGE_PATH.write_bytes(b"wim")
+
 _GIB = 1024**3
 _PAYLOAD: dict[str, Any] = {
     "partition_info": {"efi_size_mb": 300, "c_size_gb": 30, "data_size_gb": "auto"},
-    # 计划会按 payload 重算镜像存在性，所以这里要用一个真实存在的文件
-    # （只校验存在性，不解析内容）。
-    "image_info": {"image_path": str(Path(__file__).resolve()), "image_index": 1},
+    # 计划会按 payload 重算镜像可用性（类型 + 存在性 + 索引），所以这里用
+    # 一个真实存在的 .wim 占位文件；索引读取器在 _build_client 里注入。
+    "image_info": {"image_path": str(_FAKE_IMAGE_PATH), "image_index": 1},
 }
 
 
@@ -97,6 +101,7 @@ def _build_client(
         service=_FakeService([_disk(1), _disk(2)]),
         dry_run=True,
         preflight_runner=_preflight,
+        image_indexes=lambda path: [1],
     )
     wf.start(None, dry_run=True)
     store = build_store(tmp_path / "settings.json")

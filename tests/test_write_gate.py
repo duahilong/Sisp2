@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -142,9 +143,11 @@ def test_execute_spec_runs_runner_for_clean_disk() -> None:
 
 
 # ------------------------------------------------------------------ 输入确认
-# 计划里会按 payload 重算“镜像文件是否存在”，所以这里的路径必须真实存在；
-# 用本测试文件当占位——检查只看存在性，不解析内容。
-_FAKE_IMAGE = str(Path(__file__).resolve())
+# 计划会按 payload 重算“镜像能不能装机”（类型 + 存在性），所以这里要一个
+# 真实存在、后缀合法的占位文件；测试里再注入索引读取器，避免真的调 dism。
+_FAKE_IMAGE_PATH = Path(tempfile.gettempdir()) / "sisp-test-fake-image.wim"
+_FAKE_IMAGE_PATH.write_bytes(b"wim")
+_FAKE_IMAGE = str(_FAKE_IMAGE_PATH)
 
 
 def _preflight(config_path=None, dry_run=False) -> dict[str, Any]:
@@ -166,6 +169,7 @@ def _controller(type_to_confirm: bool) -> tuple[WorkflowController, list[str]]:
         preflight_runner=_preflight,
         type_to_confirm=type_to_confirm,
         worker_interval=0.0,
+        image_indexes=lambda path: [1],
     )
     wf.start(None, dry_run=False)
     prepared = wf.prepare([1], dry_run=False)
@@ -243,6 +247,7 @@ def test_confirm_follows_live_type_to_confirm_setting() -> None:
         type_to_confirm=False,
         worker_interval=0.0,
         settings_provider=lambda: dict(settings),
+        image_indexes=lambda path: [1],
     )
     wf.start(None, dry_run=False)
     jobs = wf.submit(wf.prepare([1], dry_run=False), require_confirmation=True)
@@ -283,6 +288,7 @@ def _controller_multi(disks: list[dict[str, Any]], **kwargs: Any) -> WorkflowCon
         dry_run=False,
         preflight_runner=_preflight,
         worker_interval=0.0,
+        image_indexes=lambda path: [1],
     )
     wf.start(None, dry_run=False)
     return wf

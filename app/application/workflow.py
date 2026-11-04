@@ -36,6 +36,7 @@ from app.application.jobs import ExecutionPlan, Job, JobManager, JobSpec, JobSta
 from app.application.real_runner import build_real_runner
 from app.application.service import SispService
 from app.models import WorkerResult
+from app.modules.image.service import IMAGE_SUFFIXES
 from app.orchestrator import build_worker_disk_identity
 from app.preflight import run_preflight_checks
 
@@ -47,6 +48,7 @@ _CHECK_KEYS = {
     "配置文件存在性检查": "config_exists",
     "配置文件可解析性检查": "config_parse",
     "镜像文件存在性检查": "image_exists",
+    "镜像可应用性检查": "image_type",
     "临时目录可用空间检查": "free_space",
     "外部工具可用性检查": "tools",
     "设置路径有效性检查": "setting_paths",
@@ -210,29 +212,72 @@ def _merge_payload(
 
 
 _IMAGE_CHECK_PREFIX = "镜像文件存在性检查"
+_IMAGE_TYPE_PREFIX = "镜像可应用性检查"
 
 
-def _image_blocker(payload: Mapping[str, Any] | None) -> str | None:
-    """按“这块盘实际要用的镜像”重算一次存在性。
+def _image_problems(
+    payload: Mapping[str, Any] | None,
+    read_indexes: Callable[[str], Sequence[int]] | None = None,
+) -> list[str]:
+    """这块盘要用的镜像能不能拿来装机（类型 / 存在性 / 索引）。
 
     会话级预检只在 ``start()`` 时按配置文件算一次；而向导第 3 步允许每块盘换
     镜像、换目录，所以计划里的镜像阻断必须按合并后的 payload 重算——否则用户
-    在第 3 步选了一个真实存在的镜像，第 4 步照样挂着“镜像文件不存在”的阻断，
-    永远无法开始。
+    在第 3 步选了一个真实存在的镜像，第 4 步照样挂着“镜像文件不存在”的阻断。
+
+    这里只做“计划阶段就能判定”的事情：ISO 不能 apply、后缀不对、文件不在、
+    dism 里没有这个索引。真正的“装完能不能开机”在 ``verify`` 步骤里查。
+
+    ``read_indexes`` 不传时只查类型与存在性（纯函数，测试不需要 dism）。
     """
     if not isinstance(payload, Mapping):
-        return None
+        return []
     image_info = payload.get("image_info")
     if not isinstance(image_info, Mapping):
-        return None
+        return []
     raw = image_info.get("image_path")
     text = str(raw).strip() if raw is not None else ""
     if not text:
-        return None
+        return []
+
     target = Path(text).expanduser()
-    if target.is_file():
-        return None
-    return f"{_IMAGE_CHECK_PREFIX}：镜像文件不存在: {target}"
+    suffix = target.suffix.lower()
+    if suffix == ".iso":
+        return [
+            f"{_IMAGE_TYPE_PREFIX}：{target.name} 是 ISO，dism 不能直接应用到分区；"
+            "请先挂载 ISO 取出 sources\\install.wim"
+        ]
+    if suffix not in IMAGE_SUFFIXES:
+        return [
+            f"{_IMAGE_TYPE_PREFIX}：不支持 {suffix or '无后缀'} 文件，"
+            "装机只接受 WIM/ESD/SWM"
+        ]
+    if not target.is_file():
+        return [f"{_IMAGE_CHECK_PREFIX}：镜像文件不存在: {target}"]
+
+    if read_indexes is None:
+        return []
+
+    # 执行器在缺省时用索引 1，所以没写索引也要校验 1 是否存在。
+    index = int(_as_number(image_info.get("image_index")) or 1)
+    try:
+        available = sorted({int(item) for item in read_indexes(str(target))})
+    except Exception as exc:  # noqa: BLE001 - dism 读不出来就是不可用
+        return [f"{_IMAGE_TYPE_PREFIX}：无法读取 {target.name} 的索引（{exc}）"]
+    if not available:
+        return [f"{_IMAGE_TYPE_PREFIX}：{target.name} 里没有可安装的版本"]
+    if index not in available:
+        return [
+            f"{_IMAGE_TYPE_PREFIX}：镜像索引 {index} 不存在"
+            f"（{target.name} 可用索引：{available}）"
+        ]
+    return []
+
+
+def _image_blocker(payload: Mapping[str, Any] | None) -> str | None:
+    """只查类型与存在性的便捷包装（给测试与轻量调用方用）。"""
+    problems = _image_problems(payload)
+    return problems[0] if problems else None
 
 
 def _apply_partition_defaults(
@@ -366,6 +411,7 @@ class WorkflowController:
         block_unverified: bool = True,
         type_to_confirm: bool = False,
         settings_provider: Callable[[], dict[str, Any]] | None = None,
+        image_indexes: Callable[[str], Sequence[int]] | None = None,
     ) -> None:
         self._dry_run = bool(dry_run)
         # 构造时的 True 是硬上限：--dry-run / dryRunByDefault 启动后，
@@ -397,6 +443,9 @@ class WorkflowController:
         self._type_to_confirm = bool(type_to_confirm)
         # 界面设置提供者：预检、执行器可选项都从这里取最新设置。
         self._settings_provider = settings_provider
+        # 镜像索引来源：默认用 dism 读（带 mtime 缓存），测试可整体替掉。
+        self._image_indexes = image_indexes
+        self._image_index_cache: dict[str, tuple[tuple[int, int], list[int]]] = {}
         # 上一次 prepare() 因“无显式白名单”而隐式加入的盘号；下次 prepare/start 时撤销。
         self._implicit_allowlist: set[int] = set()
         # 服务必须跟着控制器的开关走——dry-run、写盘白名单、执行器
@@ -885,15 +934,15 @@ class WorkflowController:
         task_payload = payload if payload is not None else (session.config_payload or {})
         identity = build_worker_disk_identity(disk.to_dict())
         checks: list[CheckItem] = []
-        # 会话级阻断项里，“镜像文件存在性检查”是按配置文件算的；这块盘可能在第 3 步
-        # 换了镜像，所以先剔掉旧的，等下面按合并后的 payload 重算再补回去。
+        # 会话级阻断项里，“镜像文件存在性检查”/“镜像可应用性检查”是按配置文件算的；
+        # 这块盘可能在第 3 步换了镜像，所以先剔掉旧的，等下面按合并后的 payload 重算。
         blockers: list[str] = [
             item for item in session.blockers
             if not item.startswith(_IMAGE_CHECK_PREFIX)
+            and not item.startswith(_IMAGE_TYPE_PREFIX)
         ]
-        image_blocker = _image_blocker(task_payload)
-        if image_blocker:
-            blockers.append(image_blocker)
+        image_problems = self._image_problems_for(task_payload)
+        blockers.extend(image_problems)
         warnings: list[str] = []
 
         checks.append(
@@ -977,6 +1026,16 @@ class WorkflowController:
         if not letters_complete:
             blockers.append(f"硬盘 {disk.disk_number} 盘符分配不完整")
 
+        # 镜像能不能装机（类型/存在性/索引）；不能就把它变成阻断项，界面开始按钮会置灰。
+        checks.append(
+            CheckItem(
+                key="image",
+                label="镜像可应用性",
+                passed=not image_problems,
+                message=image_problems[0] if image_problems else "镜像可直接应用到分区",
+            )
+        )
+
         warnings.append(_DRY_RUN_WARNING if dry_run else _DESTRUCTIVE_WARNING)
         warnings.append(_CANCEL_WARNING)
 
@@ -1001,6 +1060,35 @@ class WorkflowController:
             runner_options=self._runner_options(),
         )
         return PreparedJob(spec=spec, plan=plan, disk=disk)
+
+    # ------------------------------------------------------------------ 执行
+    def _image_problems_for(self, payload: Mapping[str, Any] | None) -> list[str]:
+        """按当前会话的 dism 重算镜像可用性（结果会缓存，避免每次 prepare 都读一遍）。"""
+        return _image_problems(payload, self._read_image_indexes)
+
+    def _read_image_indexes(self, path: str) -> Sequence[int]:
+        if self._image_indexes is not None:
+            return self._image_indexes(path)
+        return self._probe_image_indexes(path)
+
+    def _probe_image_indexes(self, path: str) -> list[int]:
+        """用 dism 读索引；同一文件（mtime+大小没变）只读一次。"""
+        target = Path(path).expanduser()
+        try:
+            stat = target.stat()
+            stamp = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            stamp = (0, 0)
+        cached = self._image_index_cache.get(str(target))
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+
+        from app.modules.image.service import ImageProbe
+
+        probe = ImageProbe(dism=self._tool_paths.get("dism") or None)
+        indexes = [int(item["index"]) for item in probe.read_indexes(str(target)) if item.get("index")]
+        self._image_index_cache[str(target)] = (stamp, indexes)
+        return indexes
 
     # ------------------------------------------------------------------ 执行
     def submit(

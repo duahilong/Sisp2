@@ -381,7 +381,9 @@ function bindDrag(bar) {
 function stepVersionHtml() {
   const rows = state.wizard.targets.map((target) => {
     const disk = diskOf(target.diskNumber);
-    const fileOptions = (images.listing && images.listing.images) || [];
+    // 装机只接受 dism 能 /Apply-Image 的格式；ISO 需要先取出 sources\install.wim。
+    const fileOptions = ((images.listing && images.listing.images) || [])
+      .filter((file) => file.kind !== 'iso');
     const options = ['<option value="">配置文件里的镜像（不改）</option>']
       .concat(fileOptions.map((file) => `<option value="${esc(file.path)}"${file.path === (target.imagePath || defaultImagePath()) ? ' selected' : ''}>${esc(file.name)} · ${esc(file.size_display || fmtSize(file.size_bytes))}</option>`))
       .join('');
@@ -402,6 +404,8 @@ function stepVersionHtml() {
   }).join('');
 
   const dir = images.listing ? images.listing.directory : (state.settings ? state.settings.sysIsoDir : '');
+  const isoCount = ((images.listing && images.listing.images) || [])
+    .filter((file) => file.kind === 'iso').length;
   return `<div class="wz-inner">
     <h3 class="wz-h">系统版本</h3>
     <p class="wz-p">版本列表是从镜像文件里用 dism 读出来的真实索引，不是写死的 Win10/Win11 两行。不选就沿用配置文件里的设置。</p>
@@ -410,6 +414,7 @@ function stepVersionHtml() {
       <button class="lnk" id="imgReload">重新读取</button>
       ${images.loading ? '<span class="szsub">正在读取…</span>' : ''}
     </div>
+    ${isoCount ? `<div class="szsub" style="margin:-2px 0 6px">目录里还有 ${isoCount} 个 ISO 没有列出：ISO 要先取出 sources\\install.wim 才能装机。</div>` : ''}
     ${rows || '<div class="empty-hint">还没有选盘</div>'}
     ${images.listing && images.listing.images && images.listing.images.length === 0
       ? `<div class="warnbox"><span class="wi">!</span><div>镜像目录里没找到 WIM/ESD/SWM/ISO 文件。可以先去「设置 → 系统文件 → 镜像目录」指一个目录。</div></div>`
@@ -418,7 +423,7 @@ function stepVersionHtml() {
 }
 
 function defaultImagePath() {
-  const files = (images.listing && images.listing.images) || [];
+  const files = ((images.listing && images.listing.images) || []).filter((file) => file.kind !== 'iso');
   const preferred = (state.settings && state.settings.sysWim) || '';
   const hit = files.find((file) => file.path === preferred);
   return hit ? hit.path : (files.length ? files[0].path : '');

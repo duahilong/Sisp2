@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from app import resources
+from app.modules.image.service import IMAGE_SUFFIXES
 from app.resources import app_root
 
 REPO_ROOT = app_root()
@@ -44,6 +45,7 @@ CHECK_POWERSHELL = "PowerShell 可用性检查"
 CHECK_CONFIG_EXISTS = "配置文件存在性检查"
 CHECK_CONFIG_PARSE = "配置文件可解析性检查"
 CHECK_IMAGE = "镜像文件存在性检查"
+CHECK_IMAGE_TYPE = "镜像可应用性检查"
 CHECK_FREE_SPACE = "临时目录可用空间检查"
 CHECK_TOOLS = "外部工具可用性检查"
 CHECK_SETTING_PATHS = "设置路径有效性检查"
@@ -371,6 +373,22 @@ def run_preflight_checks(
         target = Path(image_path).expanduser()
         if target.is_file():
             add(CHECK_IMAGE, True, f"镜像文件存在: {target}")
+            # 类型检查：dism 只能 ``/Apply-Image`` 到分区，ISO 必须先把 install.wim 取出来。
+            suffix = target.suffix.lower()
+            if suffix in IMAGE_SUFFIXES:
+                add(CHECK_IMAGE_TYPE, True, f"可直接应用到分区：{suffix}")
+            elif suffix == ".iso":
+                add(
+                    CHECK_IMAGE_TYPE,
+                    False,
+                    f"{target.name} 是 ISO：dism 不能直接应用，请先取出 sources\\install.wim",
+                )
+            else:
+                add(
+                    CHECK_IMAGE_TYPE,
+                    False,
+                    f"不支持 {suffix or '无后缀'} 文件：装机只接受 WIM/ESD/SWM",
+                )
         else:
             add(CHECK_IMAGE, False, f"镜像文件不存在: {target}")
 

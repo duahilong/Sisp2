@@ -191,6 +191,7 @@ def test_per_disk_image_override_recomputes_image_blocker(tmp_path):
         service=_FakeService([_disk(1)]),
         dry_run=True,
         preflight_runner=preflight,
+        image_indexes=lambda path: [1],
     )
     controller.start(None, dry_run=True)
 
