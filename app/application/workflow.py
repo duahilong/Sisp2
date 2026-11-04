@@ -33,6 +33,14 @@ from typing import Any
 
 from app.application.contracts import CheckItem, DiskInfo
 from app.application.jobs import ExecutionPlan, Job, JobManager, JobSpec, JobStatus
+from app.application.partitions import (
+    PartitionLayoutError,
+    check_layout,
+    data_partition_count,
+    normalise_data_partitions,
+    plan_partitions,
+    unallocated_bytes,
+)
 from app.application.real_runner import build_real_runner
 from app.application.service import SispService
 from app.models import WorkerResult
@@ -54,7 +62,7 @@ _CHECK_KEYS = {
     "设置路径有效性检查": "setting_paths",
 }
 
-# 三分区布局，只需 3 个盘符
+# 基础三分区布局；额外数据分区（E）会再加一个 ``data2``
 _PLAN_STEP_KEYS = ("efi", "windows", "data")
 _DRY_RUN_WARNING = "dry-run 模式：只展示执行计划，不会执行任何写盘操作"
 _DESTRUCTIVE_WARNING = "破坏性操作：将清空目标硬盘全部数据，请再次核对硬盘编号和身份"
@@ -166,7 +174,11 @@ def _merge_payload(
 
     支持的最小键集（其余键透传）：
     ``efi_size`` / ``efi_size_mb``、``c_size`` / ``c_size_gb``、
-    ``data_size`` / ``data_size_gb``、``win_gho``、``image_index``。
+    ``data_size`` / ``data_size_gb``、``data_partitions``、``win_gho``、
+    ``image_index``。
+
+    ``data_partitions`` 存在时**取代** ``data_size_gb``（向导里加了 E 分区走
+    这条），每项都必须显式给出 ``size_gb``。
     """
     payload = copy.deepcopy(dict(base_payload or {}))
     if not overrides:
@@ -192,6 +204,16 @@ def _merge_payload(
         value = _as_number(data_size)
         if value is not None:
             partition_info["data_size_gb"] = value
+
+    data_parts = overrides.get("data_partitions")
+    if data_parts is not None:
+        # 显式分区表：校验通过才存回去，顺手把老的 data_size_gb 拿掉，
+        # 避免两个来源同时存在时“到底听谁”的歧义。
+        try:
+            partition_info["data_partitions"] = normalise_data_partitions(data_parts)
+        except PartitionLayoutError as exc:
+            raise WorkflowError(f"分区配置无效：{exc}") from exc
+        partition_info.pop("data_size_gb", None)
 
     win_gho = overrides.get("win_gho")
     if isinstance(win_gho, str) and win_gho.strip():
@@ -362,30 +384,21 @@ def _apply_image_defaults(
 
 
 def _check_partition_fit(disk: DiskInfo, payload: dict[str, Any]) -> list[str]:
-    """检查三个分区是否放得下（不依赖 PowerShell，纯算术）。"""
+    """检查分区布局是否放得下（不依赖 PowerShell，纯算术）。
+
+    布局由 ``app.application.partitions.plan_partitions`` 统一解析，所以加了
+    额外数据分区（E）之后这里自动算上新分区；错误信息保持“硬盘 N 容量不足”。
+    """
     if not isinstance(disk.size_bytes, int) or disk.size_bytes <= 0:
         return []
-    info = payload.get("partition_info") or {}
-    if not isinstance(info, dict):
-        return []
-
-    efi_mb = _as_number(info.get("efi_size_mb")) or 100.0
-    c_gb = _as_number(info.get("c_size_gb"))
-    data_gb = _as_number(info.get("data_size_gb"))
-    if c_gb is None:
-        return []
-
-    required = int(efi_mb * BYTES_PER_MB + c_gb * BYTES_PER_GB)
-    if data_gb is not None:
-        required += int(data_gb * BYTES_PER_GB)
-    # 留 1MB 给分区对齐与 GPT 表
-    if required + BYTES_PER_MB > disk.size_bytes:
-        return [
-            f"硬盘 {disk.disk_number} 容量不足：EFI {efi_mb:.0f}MB + C {c_gb:.0f}GB"
-            + (f" + D {data_gb:.0f}GB" if data_gb is not None else "")
-            + f" 超过 {disk.size_display}"
-        ]
-    return []
+    try:
+        parts = plan_partitions(payload)
+    except PartitionLayoutError as exc:
+        return [f"硬盘 {disk.disk_number} 分区配置无效：{exc}"]
+    return [
+        f"硬盘 {disk.disk_number} 容量不足：{problem}"
+        for problem in check_layout(parts, disk.size_bytes)
+    ]
 
 
 class WorkflowController:
@@ -878,27 +891,12 @@ class WorkflowController:
                 self._implicit_allowlist |= added
             implicit_allowlist = True
 
-        summaries = [disk.to_dict() for disk in session.disks]
-        try:
-            selection = self._service.build_selection_plan(
-                session.config_payload,
-                summaries,
-                selected,
-                config_path=session.config_path,
-                log_dir=self._log_dir,
-                result_dir=self._result_dir,
-                resource_resolver=self._resource_resolver,
-            )
-        except Exception as exc:
-            raise WorkflowError(f"无法生成执行计划：{exc}") from exc
-
         disk_lookup = {disk.disk_number: disk for disk in session.disks}
-        prepared: list[PreparedJob] = []
+        payloads: dict[int, dict[str, Any]] = {}
         for disk_number in selected:
             disk = disk_lookup.get(disk_number)
             if disk is None:
                 raise WorkflowError(f"硬盘编号不存在: {disk_number}")
-            drive_letters = selection.drive_letter_allocations.get(disk_number) or {}
             # 优先级（从弱到强）：业务配置 → 界面设置 → 向导里这块盘的逐盘覆盖。
             # 所以先把设置叠到会话载荷上，再合并逐盘覆盖——否则设置里的默认值
             # 会把用户在向导第 2/3 步填的大小和镜像“改回去”。
@@ -915,13 +913,40 @@ class WorkflowController:
             payload = _merge_payload(base_payload, overrides.get(disk_number))
             for message in _check_partition_fit(disk, payload):
                 raise WorkflowError(message)
+            payloads[disk_number] = payload
+
+        # 盘符分配要知道每块盘到底几个数据分区（3 个还是 4 个盘符），
+        # 所以必须晚于载荷合并——早了就只能按三分区算。
+        extra_counts = {
+            number: max(0, data_partition_count(payload) - 1)
+            for number, payload in payloads.items()
+        }
+        summaries = [disk.to_dict() for disk in session.disks]
+        try:
+            selection = self._service.build_selection_plan(
+                session.config_payload,
+                summaries,
+                selected,
+                config_path=session.config_path,
+                log_dir=self._log_dir,
+                result_dir=self._result_dir,
+                resource_resolver=self._resource_resolver,
+                extra_counts=extra_counts,
+            )
+        except Exception as exc:
+            raise WorkflowError(f"无法生成执行计划：{exc}") from exc
+
+        prepared: list[PreparedJob] = []
+        for disk_number in selected:
+            disk = disk_lookup[disk_number]
+            drive_letters = selection.drive_letter_allocations.get(disk_number) or {}
             prepared.append(
                 self._build_prepared_job(
                     session,
                     disk,
                     drive_letters,
                     dry_run=active_dry_run,
-                    payload=payload,
+                    payload=payloads[disk_number],
                     implicit_allowlist=implicit_allowlist,
                 )
             )
@@ -1018,13 +1043,22 @@ class WorkflowController:
         letters_complete = all(
             str(drive_letters.get(key) or "").strip() for key in _PLAN_STEP_KEYS
         )
+        # 额外数据分区（E）的盘符也要有，否则 diskpart 建完分区挂不上盘符。
+        extra_letters = [
+            str(drive_letters.get(role) or "").strip()
+            for role in sorted(drive_letters)
+            if role.startswith("data") and role != "data"
+        ]
+        letters_complete = letters_complete and len(extra_letters) == max(
+            0, data_partition_count(task_payload) - 1
+        )
         checks.append(
             CheckItem(
                 key="drive_letters",
                 label="盘符分配",
                 passed=letters_complete,
                 message=(
-                    "已分配 EFI/Windows/Data 盘符"
+                    "已分配 EFI/Windows/数据分区盘符"
                     if letters_complete
                     else "盘符分配不完整"
                 ),
@@ -1033,6 +1067,13 @@ class WorkflowController:
         )
         if not letters_complete:
             blockers.append(f"硬盘 {disk.disk_number} 盘符分配不完整")
+
+        # 分区布局：界面第 4 步直接渲染这份计划（真实大小 + 盘符 + 文件系统）。
+        planned_parts: list[Any] = []
+        try:
+            planned_parts = plan_partitions(task_payload, letters=drive_letters)
+        except PartitionLayoutError as exc:
+            blockers.append(f"硬盘 {disk.disk_number} 分区配置无效：{exc}")
 
         # 镜像能不能装机（类型/存在性/索引）；不能就把它变成阻断项，界面开始按钮会置灰。
         checks.append(
@@ -1058,6 +1099,8 @@ class WorkflowController:
             warnings=tuple(warnings),
             checks=tuple(checks),
             blockers=tuple(dict.fromkeys(blockers)),
+            partition_plan=tuple(part.to_dict() for part in planned_parts),
+            unallocated_bytes=unallocated_bytes(planned_parts, disk.size_bytes),
         )
         spec = JobSpec(
             disk_number=disk.disk_number,

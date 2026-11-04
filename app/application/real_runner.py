@@ -7,7 +7,8 @@
 
 1. ``efi``：``select disk`` → ``clean`` → 转 GPT → 建 EFI 分区（FAT32 + 盘符）
 2. ``windows``：建 Windows 分区（NTFS + 盘符）
-3. ``data``：建数据分区（NTFS + 盘符；``data_size_gb=auto`` 用剩余空间）
+3. ``data``：建数据分区（1 个，或向导里额外加的一个；大小与文件系统由
+   ``app.application.partitions`` 统一解析）
 4. ``image``：``dism /Apply-Image`` 把 ``image_info.image_path`` 应用到 Windows 分区
 5. ``boot``：``bcdboot <Windows 盘>\\Windows /s <EFI 盘> /f UEFI``
 6. ``verify``：重新扫描该盘的分区，把实际结果记进 ``details``
@@ -40,6 +41,12 @@ from pathlib import Path
 from typing import Any
 
 from app.application.contracts import format_size
+from app.application.partitions import (
+    PartitionLayoutError,
+    PlannedPartition,
+    diskpart_lines,
+    plan_partitions,
+)
 from app.models import STEP_FAILED, STEP_OK, STEP_SKIPPED, StepResult, WorkerResult
 
 _LOGGER = logging.getLogger(__name__)
@@ -206,7 +213,10 @@ def _tail(text: str, limit: int = 4000) -> str:
     return "…（前略）\n" + text[-limit:]
 
 
-def _verify_verdict(payload: Mapping[str, Any]) -> tuple[bool, str, dict[str, Any]]:
+def _verify_verdict(
+    payload: Mapping[str, Any],
+    min_partitions: int = 3,
+) -> tuple[bool, str, dict[str, Any]]:
     """把 verify 脚本的输出变成“这块盘现在能不能用”的结论。
 
     只靠“GPT + 分区数”是不够的：bcdboot 可能退出码 0 但没写入任何文件，镜像
@@ -231,8 +241,11 @@ def _verify_verdict(payload: Mapping[str, Any]) -> tuple[bool, str, dict[str, An
     problems: list[str] = []
     if style != "GPT":
         problems.append(f"分区表不是 GPT（{style}）")
-    if len(parts) < 3:
-        problems.append(f"分区数不足（{len(parts)} 个）")
+    # 盘上还有 diskpart 自动保留的 16MB MSR，所以只比“计划里的分区数”更少才算异常。
+    if len(parts) < max(3, int(min_partitions)):
+        problems.append(
+            f"分区数不足（期望至少 {max(3, int(min_partitions))} 个，实际 {len(parts)} 个）"
+        )
     if not boot_file:
         problems.append("EFI 分区里没有 bootmgfw.efi（bcdboot 没写进去）")
     if not system_file:
@@ -465,15 +478,15 @@ class WindowsDiskRunner:
     ) -> tuple[list[StepResult], str | None]:
         options = dict(options or {})
         temp_dir = _existing_dir(options.get("temp_dir"))
-        partitions = payload.get("partition_info")
-        info = partitions if isinstance(partitions, Mapping) else {}
-        efi_mb = max(int(_to_int(info.get("efi_size_mb")) or 100), 64)
-        c_gb = _to_int(info.get("c_size_gb"))
-        data_gb = _to_int(info.get("data_size_gb"))
 
-        if c_gb is None or c_gb <= 0:
-            return steps, "配置里 partition_info.c_size_gb 必须是正整数"
-        missing_letters = [role for role in _STEP_ORDER if not letters.get(role)]
+        # 分区布局的唯一真相：EFI → Windows → 数据分区（可能两个）。
+        # c_size_gb 缺失/非法时这里直接报错，还没碰到磁盘。
+        try:
+            parts = plan_partitions(payload, letters=letters)
+        except PartitionLayoutError as exc:
+            return steps, str(exc)
+
+        missing_letters = [part.role for part in parts if not part.letter]
         if missing_letters:
             return steps, f"缺少盘符分配：{', '.join(missing_letters)}"
         if not image_path:
@@ -481,16 +494,8 @@ class WindowsDiskRunner:
         if not Path(image_path).is_file():
             return steps, f"镜像文件不存在: {image_path}"
 
-        # 1-3：清盘 + 三分区（一条 diskpart 脚本，失败即整步失败）
-        script = self._diskpart_script(
-            disk_number=disk_number,
-            efi_mb=efi_mb,
-            c_gb=c_gb,
-            data_gb=data_gb,
-            letters=letters,
-            log=log,
-            data_fs=data_fs_token(payload),
-        )
+        # 1-3：清盘 + 建分区（一条 diskpart 脚本，失败即整步失败）
+        script = self._diskpart_script(disk_number=disk_number, parts=parts, log=log)
         if cancel_event.is_set():
             return steps, "任务已取消（未开始写盘）"
 
@@ -526,17 +531,55 @@ class WindowsDiskRunner:
             )
             return steps, f"diskpart 失败（退出码 {code}）"
 
-        for key in _STEP_ORDER:
-            size_text = {"efi": f"{efi_mb} MB", "windows": f"{c_gb} GB", "data": (f"{data_gb} GB" if data_gb else "剩余空间")}[key]
-            steps.append(
-                StepResult(
-                    key=key,
-                    title=STEP_TITLES[key],
-                    status=STEP_OK,
-                    message=f"已创建并格式化（{size_text}，盘符 {letters[key]}）",
-                    details={"letter": letters[key], "size": size_text},
-                )
+        by_role = {part.role: part for part in parts}
+        efi_part = by_role["efi"]
+        windows_part = by_role["windows"]
+        data_parts = [part for part in parts if part.is_data]
+
+        steps.append(
+            StepResult(
+                key="efi",
+                title=STEP_TITLES["efi"],
+                status=STEP_OK,
+                message=f"已创建并格式化（{efi_part.size_text}，盘符 {efi_part.letter}）",
+                details={
+                    "letter": efi_part.letter,
+                    "size": efi_part.size_text,
+                    "file_system": efi_part.file_system,
+                },
             )
+        )
+        steps.append(
+            StepResult(
+                key="windows",
+                title=STEP_TITLES["windows"],
+                status=STEP_OK,
+                message=f"已创建并格式化（{windows_part.size_text}，盘符 {windows_part.letter}）",
+                details={
+                    "letter": windows_part.letter,
+                    "size": windows_part.size_text,
+                    "file_system": windows_part.file_system,
+                },
+            )
+        )
+        data_summary = " + ".join(f"{part.label} {part.size_text}" for part in data_parts)
+        data_letters = "/".join(str(part.letter or "") for part in data_parts)
+        steps.append(
+            StepResult(
+                key="data",
+                title=(
+                    f"创建数据分区（{len(data_parts)} 个）"
+                    if len(data_parts) > 1
+                    else STEP_TITLES["data"]
+                ),
+                status=STEP_OK,
+                message=f"已创建并格式化（{data_summary}，盘符 {data_letters}）",
+                details={
+                    "letters": [part.letter for part in data_parts],
+                    "partitions": [part.to_dict() for part in data_parts],
+                },
+            )
+        )
 
         # 4：应用镜像
         if cancel_event.is_set():
@@ -601,7 +644,7 @@ class WindowsDiskRunner:
 
         # 6：校验
         self._notify(on_step, "verify", "running", "校验分区与引导")
-        steps.append(self._verify(disk_number, log, letters))
+        steps.append(self._verify(disk_number, log, letters, min_partitions=len(parts)))
         if steps[-1].failed:
             return steps, "分区校验失败"
         return steps, None
@@ -611,26 +654,15 @@ class WindowsDiskRunner:
         self,
         *,
         disk_number: int,
-        efi_mb: int,
-        c_gb: int,
-        data_gb: int | None,
-        letters: Mapping[str, str],
+        parts: Sequence[PlannedPartition],
         log: _CommandLog,
-        data_fs: str = "ntfs",
     ) -> list[str]:
+        """拼出完整的 diskpart 脚本（select/clean/convert + 布局 + exit）。"""
         lines = [
             f"select disk {disk_number}",
             "clean",
             "convert gpt",
-            f"create partition efi size={efi_mb}",
-            "format quick fs=fat32 label=EFI",
-            f"assign letter={letters['efi']}",
-            f"create partition primary size={c_gb * 1024}",
-            "format quick fs=ntfs label=Windows",
-            f"assign letter={letters['windows']}",
-            "create partition primary" if not data_gb else f"create partition primary size={data_gb * 1024}",
-            f"format quick fs={data_fs} label=Data",
-            f"assign letter={letters['data']}",
+            *diskpart_lines(parts),
             "exit",
         ]
         log.block("diskpart 脚本", "\n".join(lines))
@@ -768,6 +800,8 @@ class WindowsDiskRunner:
         disk_number: int,
         log: _CommandLog,
         letters: Mapping[str, str] | None = None,
+        *,
+        min_partitions: int = 3,
     ) -> StepResult:
         title = STEP_TITLES["verify"]
         if not self.powershell:
@@ -814,7 +848,10 @@ class WindowsDiskRunner:
                 status=STEP_FAILED,
                 message=f"校验输出不是合法 JSON：{_tail(raw, 300)}",
             )
-        ok, message, details = _verify_verdict(payload if isinstance(payload, Mapping) else {})
+        ok, message, details = _verify_verdict(
+            payload if isinstance(payload, Mapping) else {},
+            min_partitions=min_partitions,
+        )
         return StepResult(
             key="verify",
             title=title,

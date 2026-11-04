@@ -20,6 +20,7 @@ import pytest
 
 from app.application.contracts import DiskInfo
 from app.application.jobs import ExecutionPlan, Job, JobManager, JobSpec, JobStatus
+from app.application.partitions import plan_partitions
 from app.application.real_runner import (
     WindowsDiskRunner,
     _CommandLog,
@@ -299,14 +300,11 @@ def test_prune_runner_logs_removes_only_expired_runner_logs(tmp_path):
 
 def test_diskpart_script_layout():
     runner = WindowsDiskRunner()
-    lines = runner._diskpart_script(
-        disk_number=2,
-        efi_mb=300,
-        c_gb=30,
-        data_gb=None,
+    parts = plan_partitions(
+        {"partition_info": {"efi_size_mb": 300, "c_size_gb": 30}},
         letters={"efi": "E", "windows": "F", "data": "G"},
-        log=_CommandLog(None),
     )
+    lines = runner._diskpart_script(disk_number=2, parts=parts, log=_CommandLog(None))
 
     assert lines[0] == "select disk 2"
     assert "clean" in lines
@@ -319,14 +317,11 @@ def test_diskpart_script_layout():
 
 def test_diskpart_script_uses_explicit_data_size():
     runner = WindowsDiskRunner()
-    lines = runner._diskpart_script(
-        disk_number=1,
-        efi_mb=100,
-        c_gb=10,
-        data_gb=5,
+    parts = plan_partitions(
+        {"partition_info": {"efi_size_mb": 100, "c_size_gb": 10, "data_size_gb": 5}},
         letters={"efi": "E", "windows": "F", "data": "G"},
-        log=_CommandLog(None),
     )
+    lines = runner._diskpart_script(disk_number=1, parts=parts, log=_CommandLog(None))
 
     assert "create partition primary size=5120" in lines
 
@@ -842,7 +837,7 @@ def test_runner_reports_verify_rejection(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         runner,
         "_verify",
-        lambda disk_number, log, letters=None: StepResult(
+        lambda disk_number, log, letters=None, **_: StepResult(
             key="verify",
             title="校验分区结果",
             status="failed",

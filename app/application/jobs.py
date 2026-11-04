@@ -110,6 +110,10 @@ class ExecutionPlan:
     warnings: tuple[str, ...] = ()
     checks: tuple[Any, ...] = ()
     blockers: tuple[str, ...] = ()
+    # 这块盘要建哪些分区（role/label/文件系统/大小/盘符）；界面第 4 步直接渲染。
+    partition_plan: tuple[dict[str, Any], ...] = ()
+    # 按计划建完之后剩下的未分配空间；界面提示“容量会闲置”。
+    unallocated_bytes: int = 0
 
     @property
     def executable(self) -> bool:
@@ -130,6 +134,8 @@ class ExecutionPlan:
                 for check in self.checks
             ],
             "blockers": list(self.blockers),
+            "partition_plan": [dict(item) for item in self.partition_plan],
+            "unallocated_bytes": self.unallocated_bytes,
             "executable": self.executable,
         }
 

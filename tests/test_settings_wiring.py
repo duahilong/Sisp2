@@ -235,7 +235,7 @@ def test_runner_accepts_runner_options_on_spec(tmp_path, monkeypatch) -> None:
 
     runner._run_diskpart = fake_run_diskpart  # type: ignore[method-assign]
     runner._spawn = fake_spawn  # type: ignore[method-assign]
-    runner._verify = lambda disk_number, log, letters=None: SimpleNamespace(failed=False)  # type: ignore[method-assign]
+    runner._verify = lambda disk_number, log, letters=None, **_: SimpleNamespace(failed=False)  # type: ignore[method-assign]
 
     spec = SimpleNamespace(
         disk_number=1,

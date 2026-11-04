@@ -152,6 +152,19 @@ def validate_config_payload(payload: Mapping[str, Any]) -> list[str]:
             number = _as_number(data_size)
             if number is None or number < 0:
                 problems.append("partition_info.data_size_gb 必须是正数或 auto")
+        # 显式数据分区列表（向导里加了 E 分区才会出现）：结构不对就阻断，
+        # 否则会一直到 diskpart 才发现，而那时盘已经清空了。
+        data_parts = partition_info.get("data_partitions")
+        if data_parts is not None:
+            from app.application.partitions import (
+                PartitionLayoutError,
+                normalise_data_partitions,
+            )
+
+            try:
+                normalise_data_partitions(data_parts)
+            except PartitionLayoutError as exc:
+                problems.append(f"partition_info.data_partitions 不合法：{exc}")
 
     image_info = payload.get("image_info")
     if image_info is not None and not isinstance(image_info, Mapping):

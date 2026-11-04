@@ -43,7 +43,11 @@ from app.application.contracts import (
     SelectionPlan,
     format_size,
 )
-from app.application.real_runner import data_fs_token
+from app.application.partitions import (
+    PartitionLayoutError,
+    diskpart_lines,
+    plan_partitions,
+)
 from app.models import STEP_SKIPPED, StepResult, WorkerResult
 from app.orchestrator import build_worker_disk_identity, identity_matches, is_strong_identity
 from app.preflight import load_config, resolve_config_path
@@ -333,11 +337,14 @@ class SispService:
         log_dir: str | None = None,
         result_dir: str | None = None,
         resource_resolver: Callable[[Any], int | None] | None = None,
+        extra_counts: Mapping[int, int] | None = None,
     ) -> SelectionPlan:
         """校验选中硬盘并分配盘符，返回 ``SelectionPlan``。
 
         ``resource_resolver`` 若提供，会被当作“这块盘至少需要多少字节”的
         计算函数；容量不足直接抛 ``ValueError``，不进入确认界面。
+        ``extra_counts`` 是 ``{硬盘编号: 额外数据分区数}``（每盘 0 或 1），
+        决定这块盘要分配 3 个还是 4 个盘符。
         """
         _ = (config_path, log_dir, result_dir)  # 目前只透传，不落盘
 
@@ -397,7 +404,7 @@ class SispService:
                         f"实际 {format_size(size_bytes)}"
                     )
 
-        allocations = self._allocate_letters(disk_numbers, used_letters)
+        allocations = self._allocate_letters(disk_numbers, used_letters, extra_counts)
         return SelectionPlan(
             selected_disk_numbers=tuple(disk_numbers),
             forbidden_drive_letters=tuple(sorted(used_letters)),
@@ -408,24 +415,32 @@ class SispService:
         self,
         disk_numbers: list[int],
         forbidden: set[str],
+        extra_counts: Mapping[int, int] | None = None,
     ) -> dict[int, dict[str, str]]:
         """优先复用 ``app.drive_letters``；不可用时用同规则本地分配。"""
+        extra_counts = dict(extra_counts or {})
         try:
             from app.drive_letters import build_drive_letter_allocations
         except ImportError:
             pass
         else:
-            return build_drive_letter_allocations(list(disk_numbers), sorted(forbidden))
+            return build_drive_letter_allocations(
+                list(disk_numbers), sorted(forbidden), extra_counts
+            )
+
+        from app.drive_letters import letter_roles
 
         pool = [letter for letter in AVAILABLE_DRIVE_LETTERS if letter not in forbidden]
         allocations: dict[int, dict[str, str]] = {}
         index = 0
         for number in disk_numbers:
-            if index + LETTERS_PER_DISK > len(pool):
-                raise ValueError(f"可用盘符不足，无法为硬盘 {number} 分配 {LETTERS_PER_DISK} 个盘符")
-            letters = pool[index:index + LETTERS_PER_DISK]
-            allocations[number] = dict(zip(DRIVE_LETTER_ROLES, letters, strict=False))
-            index += LETTERS_PER_DISK
+            extra = max(0, min(int(extra_counts.get(number, 0)), 1))
+            need = LETTERS_PER_DISK + extra
+            if index + need > len(pool):
+                raise ValueError(f"可用盘符不足，无法为硬盘 {number} 分配 {need} 个盘符")
+            letters = pool[index:index + need]
+            allocations[number] = dict(zip(letter_roles(extra), letters, strict=False))
+            index += need
         return allocations
 
     # ------------------------------------------------------------------ 执行
@@ -675,9 +690,6 @@ class SispService:
         letters: Mapping[str, str],
     ) -> str:
         """生成 diskpart 脚本文本用于预览；**不会**被本模块执行。"""
-        efi_mb = self._efi_size_mb(payload)
-        c_gb = self._c_size_gb(payload)
-        data_gb = self._data_size_gb(payload)
         image_info = payload.get("image_info")
         image_path = None
         if isinstance(image_info, Mapping):
@@ -688,25 +700,15 @@ class SispService:
             f"select disk {disk_number}",
             "clean",
             "convert gpt",
-            f"create partition efi size={int(efi_mb)}",
-            'format quick fs=fat32 label="EFI"',
         ]
-        if letters.get("efi"):
-            lines.append(f"assign letter={letters['efi']}")
-        if c_gb is not None:
-            lines.append(f"create partition primary size={int(c_gb * 1024)}")
-        else:
-            lines.append("create partition primary")
-        lines.append('format quick fs=ntfs label="Windows"')
-        if letters.get("windows"):
-            lines.append(f"assign letter={letters['windows']}")
-        if isinstance(data_gb, float) and data_gb > 0:
-            lines.append(f"create partition primary size={int(data_gb * 1024)}")
-        else:
-            lines.append("create partition primary")
-        lines.append(f'format quick fs={data_fs_token(payload)} label="Data"')
-        if letters.get("data"):
-            lines.append(f"assign letter={letters['data']}")
+        try:
+            parts = plan_partitions(payload, letters=letters)
+        except PartitionLayoutError as exc:
+            # 分区配置不合法也要能看完预览，而不是把演练步弄成异常。
+            lines.append(f"REM 分区配置不合法：{exc}")
+            lines.append("exit")
+            return "\n".join(lines)
+        lines.extend(diskpart_lines(parts))
         lines.append("exit")
         if image_path:
             lines.append(f'REM 镜像：{image_path}（由应用层接管，不经 diskpart）')
