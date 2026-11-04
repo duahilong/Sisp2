@@ -18,7 +18,7 @@ import {
 import {
   state, diskOf, targetOf, targetError, targetRest, addTarget, removeTarget,
   addExtraPartition, removeExtraPartition, selectionPayload, resetWizard,
-  STEP_LABELS, JOB_STATUS_TEXT,
+  dataFs, STEP_LABELS, JOB_STATUS_TEXT,
 } from './state.js';
 import { pushLog, toast, confirmDialog, openModal, jobStatusText } from './shell.js';
 import { lostPartitionsText } from './view-main.js';
@@ -33,10 +33,10 @@ const images = {
 
 const ROLE_TEXT = { efi: 'EFI 分区', windows: '系统分区', data: '数据分区' };
 
-/** 角色 → 界面名字：额外数据分区是 data2、data3…… */
+/** 角色 → 界面名字：所有数据分区（D/E）都叫“数据分区”，靠盘符区分。 */
 function roleLabel(role) {
   if (ROLE_TEXT[role]) return ROLE_TEXT[role];
-  if (String(role).startsWith('data')) return '额外数据分区';
+  if (String(role).startsWith('data')) return '数据分区';
   return String(role || '分区');
 }
 
@@ -234,12 +234,10 @@ function layoutOf(target, total) {
 function extraRowsHtml(target) {
   const extras = Array.isArray(target.extras) ? target.extras : [];
   return extras.map((extra, index) => `<div class="szrow extra">
-        <span class="szname"><span class="lbadge" style="background:${extraColor(index)}">${extraLetter(index)}</span>额外数据分区</span>
+        <span class="szname"><span class="lbadge" style="background:${extraColor(index)}">${extraLetter(index)}</span>数据分区</span>
         <input type="number" min="${MIN_EXTRA_GB}" step="1" value="${esc(extra.sizeGb)}" data-size="extra" data-index="${index}" data-disk="${target.diskNumber}">
         <span class="unit">GB</span>
-        <select data-fs="extra" data-index="${index}" data-disk="${target.diskNumber}" title="文件系统">
-          ${['NTFS', 'exFAT'].map((fs) => `<option${String(extra.fs || 'NTFS') === fs ? ' selected' : ''}>${fs}</option>`).join('')}
-        </select>
+        <span class="szsub">${esc(dataFs())} · 建完即可用</span>
         <button class="rm" data-remove="${index}" data-disk="${target.diskNumber}" title="删除这个分区">✕</button>
       </div>`).join('');
 }
@@ -255,12 +253,12 @@ function stepSizeHtml() {
     const extraSegs = layout.extraBytes.map((bytes, index) => `<span class="wseg ext" data-extra="${index}" style="width:${layout.extraPct[index].toFixed(2)}%;background:${extraColor(index)}"><span>${extraLetter(index)} ${Math.round(Number(extras[index].sizeGb) || 0)} GB</span></span>`).join('');
     const addButton = extras.length < MAX_EXTRAS
       ? `<button class="addpart" data-add="${target.diskNumber}">➕ 添加数据分区</button>`
-      : '<div class="szsub">已添加额外分区（最多 1 个）</div>';
+      : '<div class="szsub">已添加数据分区（最多 1 个）</div>';
     return `<div class="tgt" data-disk="${target.diskNumber}">
       <div class="tgt-h">
         <span class="tn">磁盘 ${target.diskNumber}</span>
         <span class="tm">${esc(disk.model || '')} · ${esc(disk.partition_style || '')}</span>
-        <span class="trest">总容量 <b>${esc(fmtSize(total))}</b> · 剩余 <b class="${error ? 'warn' : ''}">${esc(layout.free > 0 ? fmtSize(layout.free) : '不足')}</b></span>
+        <span class="trest">总容量 <b data-total>${esc(fmtSize(total))}</b> · 剩余 <b data-rest class="${error ? 'warn' : ''}">${esc(layout.free > 0 ? fmtSize(layout.free) : '不足')}</b></span>
       </div>
       <div class="szrow">
         <span class="szname"><span class="lbadge" style="background:${fsColor('NTFS')}">C</span>系统分区（Windows）</span>
@@ -276,12 +274,13 @@ function stepSizeHtml() {
       </div>
       ${extraRowsHtml(target)}
       ${addButton}
-      <div class="wzbar" data-disk="${target.diskNumber}" tabindex="0" title="拖动分隔条调整系统分区大小">
+      <div class="wzbar" data-disk="${target.diskNumber}" tabindex="0" title="拖动分隔条调容量：C|D 改系统分区，D|E 改两个数据分区的比例">
         <span class="wseg sys" style="width:${layout.sysPct.toFixed(2)}%"><span>系统 ${esc(target.sysGb)} GB</span></span>
         <span class="wseg dat" style="width:${layout.dataPct.toFixed(2)}%"><span>数据 ${esc(target.dataGb)} GB</span></span>
         ${extraSegs}
         <span class="wseg free" style="width:${layout.freePct.toFixed(2)}%"><span>${(layout.free / GB) >= 1 ? `未分配 ${Math.round(layout.free / GB)} GB` : ''}</span></span>
-        <span class="wgrip" style="left:${layout.sysPct.toFixed(2)}%"></span>
+        <span class="wgrip" data-grip="sys" style="left:${layout.sysPct.toFixed(2)}%" title="拖动调整系统分区大小"></span>
+        ${extras.length ? `<span class="wgrip" data-grip="data" style="left:${(layout.sysPct + layout.dataPct).toFixed(2)}%" title="拖动调整 D / E 容量"></span>` : ''}
       </div>
       <div class="tgt-f">
         <span class="${error ? 'errmsg' : 'szsub'}" data-err="${target.diskNumber}">${esc(error || layoutText(target))}</span>
@@ -306,9 +305,11 @@ function layoutText(target) {
   const extras = Array.isArray(target.extras) ? target.extras : [];
   const parts = [
     `系统 ${Math.round(Number(target.sysGb) || 0)} GB`,
-    `数据 ${Math.round(Number(target.dataGb) || 0)} GB`,
+    `数据(D) ${Math.round(Number(target.dataGb) || 0)} GB`,
   ];
-  for (const extra of extras) parts.push(`额外 ${Math.round(Number(extra.sizeGb) || 0)} GB`);
+  for (const extra of extras) {
+    parts.push(`数据(${extraLetter(extras.indexOf(extra))}) ${Math.round(Number(extra.sizeGb) || 0)} GB`);
+  }
   const spare = unallocatedBytes(total, target.sysGb, target.dataGb, extras);
   const tail = spare >= GB / 2 ? ` · 未分配 ${fmtSize(spare)}` : '';
   return `${efiText()} + ${parts.join(' + ')}${tail}`;
@@ -355,17 +356,6 @@ function bindStepSize() {
       const extra = (target.extras || [])[Number(input.dataset.index)];
       if (extra && !(Number(extra.sizeGb) >= MIN_EXTRA_GB)) extra.sizeGb = MIN_EXTRA_GB;
       renderInstall();
-    });
-  });
-
-  $$('#wzBody select[data-fs="extra"]').forEach((select) => {
-    select.addEventListener('change', () => {
-      const target = targetOf(Number(select.dataset.disk));
-      const extra = target && (target.extras || [])[Number(select.dataset.index)];
-      if (!extra) return;
-      extra.fs = select.value;
-      state.wizard.ack = false;
-      renderFoot();
     });
   });
 
@@ -418,7 +408,6 @@ function updateSizeVisual(target) {
   const sysSeg = card.querySelector('.wseg.sys');
   const dataSeg = card.querySelector('.wseg.dat');
   const freeSeg = card.querySelector('.wseg.free');
-  const grip = card.querySelector('.wgrip');
   if (sysSeg) { sysSeg.style.width = `${sysPct}%`; sysSeg.firstElementChild.textContent = `系统 ${Math.round(target.sysGb)} GB`; }
   if (dataSeg) { dataSeg.style.width = `${dataPct}%`; dataSeg.firstElementChild.textContent = `数据 ${Math.round(target.dataGb)} GB`; }
   card.querySelectorAll('.wseg.ext').forEach((seg, index) => {
@@ -431,18 +420,22 @@ function updateSizeVisual(target) {
     freeSeg.style.width = `${freePct}%`;
     freeSeg.firstElementChild.textContent = spare / GB >= 1 ? `未分配 ${Math.round(spare / GB)} GB` : '';
   }
-  if (grip) grip.style.left = `${sysPct}%`;
+  card.querySelectorAll('.wgrip').forEach((grip) => {
+    if (grip.dataset.grip === 'data') grip.style.left = `${sysPct + dataPct}%`;
+    else grip.style.left = `${sysPct}%`;
+  });
   const error = targetError(target);
   const box = card.querySelector(`[data-err="${target.diskNumber}"]`);
   if (box) {
     box.className = error ? 'errmsg' : 'szsub';
     box.textContent = error || layoutText(target);
   }
-  const rest = card.querySelector('.trest b');
-  if (rest) {
+  // 只更新“剩余”，别把“总容量”那个 <b> 也改掉（拖动时曾经把总容量写成剩余值）
+  const restBox = card.querySelector('.trest [data-rest]');
+  if (restBox) {
     const spare = targetRest(target);
-    rest.textContent = spare > 0 ? fmtSize(spare) : '不足';
-    rest.classList.toggle('warn', spare <= 0);
+    restBox.textContent = spare > 0 ? fmtSize(spare) : '不足';
+    restBox.classList.toggle('warn', spare <= 0);
   }
 }
 
@@ -451,20 +444,57 @@ function bindDrag(bar) {
   const disk = diskOf(bar.dataset.disk);
   if (!target || !disk) return;
   const total = Number(disk.size_bytes) || GB;
+  const totalGb = toGb(total);
+  const extras = () => (Array.isArray(target.extras) ? target.extras : []);
+  const extrasGb = () => extras().reduce((sum, extra) => sum + (Number(extra.sizeGb) || 0), 0);
+  // 向下取整：吸收变化的那一侧永远不吃掉最后 0.1 GB，保证总和不超过真实容量。
+  const floor1 = (value) => Math.floor(value * 10) / 10;
+  const round1 = (value) => Math.round(value * 10) / 10;
+  let mode = 'sys';
+
+  /** C|D 分界：C 变大变小都由 D 吸收，E 固定。 */
+  const applySys = (ratio) => {
+    const restGb = extrasGb();
+    const maxSys = Math.max(MIN_SYS_GB, floor1(totalGb - RESERVE_GB - restGb - MIN_DATA_GB));
+    target.sysGb = clamp(round1(totalGb * ratio), MIN_SYS_GB, maxSys);
+    target.dataGb = Math.max(MIN_DATA_GB, floor1(totalGb - target.sysGb - restGb - RESERVE_GB));
+  };
+
+  /** D|E 分界：两者总量不变，只在中间挪——所以永远不会超过盘容量。 */
+  const applySplit = (ratio) => {
+    const list = extras();
+    if (!list.length) return;
+    const available = totalGb - Number(target.sysGb || 0) - RESERVE_GB;
+    const dataGb = clamp(
+      round1(totalGb * ratio - Number(target.sysGb || 0)),
+      MIN_DATA_GB,
+      Math.max(MIN_DATA_GB, floor1(available - MIN_EXTRA_GB)),
+    );
+    target.dataGb = dataGb;
+    list[0].sizeGb = Math.max(MIN_EXTRA_GB, floor1(available - dataGb));
+  };
+
+  const syncInputs = () => {
+    const card = bar.parentElement;
+    const sysInput = card.querySelector('input[data-size="sys"]');
+    const dataInput = card.querySelector('input[data-size="data"]');
+    const extraInput = card.querySelector('input[data-size="extra"]');
+    if (sysInput) sysInput.value = target.sysGb;
+    if (dataInput) dataInput.value = target.dataGb;
+    const extra = extras()[0];
+    if (extraInput && extra) extraInput.value = extra.sizeGb;
+  };
+
   const drag = (clientX) => {
     const rect = bar.getBoundingClientRect();
     if (!rect.width) return;
     const ratio = clamp((clientX - rect.left) / rect.width, 0, 1);
-    const maxSys = Math.max(MIN_SYS_GB, toGb(total) - MIN_DATA_GB - RESERVE_GB);
-    const sysGb = clamp(Math.round(toGb(total) * ratio), MIN_SYS_GB, maxSys);
-    target.sysGb = sysGb;
-    target.dataGb = Math.max(MIN_DATA_GB, Math.round((toGb(total) - sysGb - RESERVE_GB) * 10) / 10);
-    const input = bar.parentElement.querySelector('input[data-size="sys"]');
-    const dataInput = bar.parentElement.querySelector('input[data-size="data"]');
-    if (input) input.value = sysGb;
-    if (dataInput) dataInput.value = target.dataGb;
+    if (mode === 'data') applySplit(ratio);
+    else applySys(ratio);
+    syncInputs();
     updateSizeVisual(target);
   };
+
   const onMove = (event) => {
     if (!bar.classList.contains('drag')) return;
     drag(event.clientX);
@@ -478,6 +508,9 @@ function bindDrag(bar) {
     renderFoot();
   };
   bar.addEventListener('pointerdown', (event) => {
+    const grip = event.target && event.target.closest ? event.target.closest('.wgrip') : null;
+    // 拖到哪根分隔条就调哪一段；点条的空白处仍然按老习惯调系统分区
+    mode = grip && grip.dataset.grip === 'data' ? 'data' : 'sys';
     bar.classList.add('drag');
     drag(event.clientX);
     document.addEventListener('pointermove', onMove);
@@ -487,8 +520,25 @@ function bindDrag(bar) {
   bar.addEventListener('keydown', (event) => {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
     const step = event.key === 'ArrowLeft' ? -1 : 1;
-    target.sysGb = clamp(Math.round(target.sysGb) + step, MIN_SYS_GB, Math.max(MIN_SYS_GB, Math.round(toGb(total)) - MIN_DATA_GB));
-    target.dataGb = Math.max(MIN_DATA_GB, Math.round((toGb(total) - target.sysGb) * 10) / 10);
+    if (extras().length && event.shiftKey) {
+      // Shift + 左右：调 D|E 分界
+      const available = totalGb - Number(target.sysGb || 0) - RESERVE_GB;
+      const dataGb = clamp(
+        round1(Number(target.dataGb || 0) + step),
+        MIN_DATA_GB,
+        Math.max(MIN_DATA_GB, floor1(available - MIN_EXTRA_GB)),
+      );
+      target.dataGb = dataGb;
+      extras()[0].sizeGb = Math.max(MIN_EXTRA_GB, floor1(available - dataGb));
+    } else {
+      const restGb = extrasGb();
+      target.sysGb = clamp(
+        Math.round(target.sysGb) + step,
+        MIN_SYS_GB,
+        Math.max(MIN_SYS_GB, Math.floor(totalGb) - MIN_DATA_GB - Math.ceil(restGb)),
+      );
+      target.dataGb = Math.max(MIN_DATA_GB, floor1(totalGb - target.sysGb - restGb - RESERVE_GB));
+    }
     renderInstall();
     event.preventDefault();
   });

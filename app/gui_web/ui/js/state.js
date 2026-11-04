@@ -225,7 +225,18 @@ export function targetError(target) {
   return checkLayout(disk.size_bytes, target.sysGb, target.dataGb, target.extras || []);
 }
 
-/** 加一个额外数据分区（E）。空间不够时先从 D 里挪一块，挪不动就返回 false。 */
+/** 数据分区（D 与 E）统一使用的文件系统。
+ *
+ * 跟随设置里的 `defaultFs`，但只允许 NTFS / exFAT（后端拒绝额外分区的 FAT32，
+ * 大容量 FAT32 在 diskpart 里本来就格不了），其它值一律回落 NTFS。
+ * 界面上不给 E 改文件系统，保证它和 D 一致——也避免用户把一个分区搞成 FAT32。
+ */
+export function dataFs() {
+  const raw = String((state.settings && state.settings.defaultFs) || 'NTFS').trim().toUpperCase();
+  return raw === 'EXFAT' ? 'exFAT' : 'NTFS';
+}
+
+/** 加一个数据分区（E）。默认与 D 平分剩余容量；放不下两张下限时返回 false。 */
 export function addExtraPartition(diskNumber) {
   const target = targetOf(diskNumber);
   const disk = diskOf(diskNumber);
@@ -233,16 +244,23 @@ export function addExtraPartition(diskNumber) {
   if (!Array.isArray(target.extras)) target.extras = [];
   if (target.extras.length >= MAX_EXTRAS) return false;
 
+  // 可分配给数据分区的总量 = 总容量 − 系统分区 − 给 EFI/对齐留的余量
   const totalGb = toGb(disk.size_bytes);
-  let size = Math.floor(totalGb - Number(target.sysGb || 0) - Number(target.dataGb || 0) - RESERVE_GB);
-  if (size < MIN_EXTRA_GB) {
-    // 盘上没剩多少空间：从第一个数据分区里挪，但不让它低于下限。
-    const movable = Math.floor(Number(target.dataGb || 0) - MIN_DATA_GB);
-    if (movable < MIN_EXTRA_GB) return false;
-    size = Math.min(movable, Math.max(MIN_EXTRA_GB, 20));
-    target.dataGb = Math.max(MIN_DATA_GB, Number(target.dataGb || 0) - size);
+  const available = Math.round((totalGb - Number(target.sysGb || 0) - RESERVE_GB) * 10) / 10;
+  if (!(available > 0)) return false;
+
+  let dataGb = Math.floor((available / 2) * 10) / 10;
+  if (dataGb < MIN_DATA_GB) dataGb = MIN_DATA_GB;
+  let extraGb = Math.floor((available - dataGb) * 10) / 10;
+  if (extraGb < MIN_EXTRA_GB) {
+    extraGb = MIN_EXTRA_GB;
+    dataGb = Math.round((available - extraGb) * 10) / 10;
   }
-  target.extras.push({ sizeGb: Math.max(MIN_EXTRA_GB, size), fs: 'NTFS' });
+  // 两个分区都有下限（D ≥ 20 GB、E ≥ 1 GB），放不下就放弃
+  if (dataGb < MIN_DATA_GB || extraGb < MIN_EXTRA_GB) return false;
+
+  target.dataGb = dataGb;
+  target.extras.push({ sizeGb: extraGb, fs: dataFs() });
   state.wizard.ack = false;
   return true;
 }
@@ -262,17 +280,18 @@ export function targetsValid() {
 /** 每块盘的通知 payload：POST /api/prepare 的 selection 形态。 */
 export function selectionPayload() {
   const selection = {};
-  const dataFs = String((state.settings && state.settings.defaultFs) || 'NTFS');
+  const fs = dataFs();
   for (const target of state.wizard.targets) {
     const entry = { c_size: Number(target.sysGb) };
     const extras = Array.isArray(target.extras) ? target.extras : [];
     if (extras.length) {
       // 有额外分区时必须给出显式列表：第一个是 D，其余是 E/F……
+      // 文件系统统一取 dataFs()，界面上的 E 没有选择器（与 D 一致）。
       entry.data_partitions = [
-        { size_gb: Number(target.dataGb), file_system: dataFs },
+        { size_gb: Number(target.dataGb), file_system: fs },
         ...extras.map((extra) => ({
           size_gb: Number(extra.sizeGb),
-          file_system: String(extra.fs || 'NTFS'),
+          file_system: fs,
         })),
       ];
     } else {

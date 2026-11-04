@@ -300,8 +300,8 @@ export function checkLayout(totalBytes, sysGb, dataGb, extras = [], efiMb = 100)
   let need = Math.round(efi * MB) + fromGb(sys) + fromGb(data) + MB;
   for (const extra of extras || []) {
     const gb = Number((extra && extra.sizeGb) || 0);
-    if (!(gb > 0)) return '额外分区要填大小';
-    if (gb < MIN_EXTRA_GB) return `额外分区至少 ${MIN_EXTRA_GB} GB`;
+    if (!(gb > 0)) return '数据分区要填大小';
+    if (gb < MIN_EXTRA_GB) return `数据分区至少 ${MIN_EXTRA_GB} GB`;
     need += fromGb(gb);
   }
   if (need > total) return `超过磁盘容量 ${fmtSize(total)}`;

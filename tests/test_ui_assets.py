@@ -138,14 +138,19 @@ def test_install_wizard_can_add_extra_partition() -> None:
     install = (JS / "view-install.js").read_text(encoding="utf-8")
     assert "data-add" in install
     assert "data-remove" in install
-    assert "额外数据分区" in install
-    assert 'data-fs="extra"' in install
+    # E 行就叫「数据分区」，且没有文件系统选择器（跟 D 保持一致，固定 NTFS/exFAT）
+    assert "额外数据分区" not in install
+    assert 'data-fs="extra"' not in install
+    assert "数据分区" in install
     assert "partition_plan" in install
 
     state_js = (JS / "state.js").read_text(encoding="utf-8")
     assert "data_partitions" in state_js
     assert "addExtraPartition" in state_js
     assert "removeExtraPartition" in state_js
+    # 加 E 时与 D 平分容量；文件系统统一走 dataFs()
+    assert "available / 2" in state_js
+    assert "export function dataFs()" in state_js
 
     css = (UI / "css" / "app.css").read_text(encoding="utf-8")
     assert ".addpart" in css

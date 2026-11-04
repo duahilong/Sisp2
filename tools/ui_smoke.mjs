@@ -271,15 +271,86 @@ async function main() {
       await sleep(300);
       summary.shots.push(await shoot('05b-install-step2-extra'));
       summary.steps.push({
-        step2extra: JSON.parse(await evaluate(`JSON.stringify({
-          clicked: ${added ? 'true' : 'false'},
-          rows: document.querySelectorAll('#wzBody .szrow.extra').length,
-          selects: document.querySelectorAll('#wzBody select[data-fs="extra"]').length,
-          segs: document.querySelectorAll('#wzBody .wseg').length,
-          error: (document.querySelector('#wzBody .errmsg') || {}).textContent || '',
-          canAddMore: Boolean(document.querySelector('#wzBody button[data-add]')),
-        })`)),
+        step2extra: JSON.parse(await evaluate(`(function () {
+          const row = document.querySelector('#wzBody .szrow.extra');
+          const nameEl = row && row.querySelector('.szname');
+          const inputs = Array.from(document.querySelectorAll('#wzBody .szrow input[data-size]'));
+          const dataInput = inputs.find((el) => el.dataset.size === 'data');
+          const extraInput = inputs.find((el) => el.dataset.size === 'extra');
+          const dataGb = dataInput ? Number(dataInput.value) : 0;
+          const extraGb = extraInput ? Number(extraInput.value) : 0;
+          return JSON.stringify({
+            clicked: ${added ? 'true' : 'false'},
+            rows: document.querySelectorAll('#wzBody .szrow.extra').length,
+            selects: document.querySelectorAll('#wzBody .szrow.extra select').length,
+            segs: document.querySelectorAll('#wzBody .wseg').length,
+            label: nameEl ? String(nameEl.textContent || '') : '',
+            rowText: row ? String(row.innerText || '') : '',
+            dataGb: dataGb,
+            extraGb: extraGb,
+            splitOk: dataGb > 0 && extraGb > 0 && Math.abs(dataGb - extraGb) <= 1.5,
+            error: (document.querySelector('#wzBody .errmsg') || {}).textContent || '',
+            canAddMore: Boolean(document.querySelector('#wzBody button[data-add]')),
+          });
+        })()`)),
       });
+      // 两条分隔条：C|D 与 D|E。拖 D|E 只挪比例（总量不变），拖 C|D 到最右也不能超盘。
+      const dragged = await evaluate(`(function () {
+        const bar = document.querySelector('#wzBody .wzbar');
+        if (!bar) return JSON.stringify({ reason: 'no bar' });
+        const readValues = () => {
+          const out = {};
+          document.querySelectorAll('#wzBody .szrow input[data-size]').forEach((el) => {
+            out[el.dataset.size] = Number(el.value);
+          });
+          return out;
+        };
+        const total = (values) => Math.round(((values.sys || 0) + (values.data || 0) + (values.extra || 0)) * 10) / 10;
+        const rect = bar.getBoundingClientRect();
+        const fire = (element, type, x) => element.dispatchEvent(
+          new PointerEvent(type, { clientX: x, bubbles: true, cancelable: true }),
+        );
+        const dragTo = (grip, ratio) => {
+          const x0 = rect.left + rect.width * ((parseFloat(grip.style.left) || 0) / 100);
+          const x1 = rect.left + rect.width * ratio;
+          fire(grip, 'pointerdown', x0);
+          fire(document, 'pointermove', x1);
+          fire(document, 'pointerup', x1);
+        };
+        const grips = Array.from(bar.querySelectorAll('.wgrip'));
+        const sysGrip = grips.find((el) => el.dataset.grip === 'sys');
+        const dataGrip = grips.find((el) => el.dataset.grip === 'data');
+        const before = readValues();
+        if (dataGrip) dragTo(dataGrip, 0.25);
+        const afterSplit = readValues();
+        // 再把 C|D 分隔条拖到最右：系统分区不能把盘撑爆
+        let afterSys = afterSplit;
+        if (sysGrip) {
+          dragTo(sysGrip, 0.999);
+          afterSys = readValues();
+        }
+        // 盘容量直接读“总容量”那个 <b>（拖动时只有“剩余”会变）
+        const totalEl = document.querySelector('#wzBody .trest [data-total]');
+        const caption = String((totalEl || {}).textContent || '');
+        const capacityGb = parseFloat(caption) || 0;
+        return JSON.stringify({
+          grips: grips.length,
+          hasSysGrip: Boolean(sysGrip),
+          hasDataGrip: Boolean(dataGrip),
+          before: before,
+          afterSplit: afterSplit,
+          afterSys: afterSys,
+          splitChanged: before.data !== afterSplit.data || before.extra !== afterSplit.extra,
+          splitTotalBefore: total(before),
+          splitTotalAfter: total(afterSplit),
+          sysTotalAfter: total(afterSys),
+          capacityGb: capacityGb,
+          caption: caption,
+        });
+      })()`);
+      summary.shots.push(await shoot('05b2-install-step2-drag'));
+      summary.steps.push({ step2drag: JSON.parse(dragged) });
+
       const removed = await evaluate(`(function () {
         const rm = document.querySelector('#wzBody button[data-remove]');
         if (!rm) return false;
@@ -331,7 +402,7 @@ async function main() {
             rows: document.querySelectorAll('#wzBody .sum table tr').length,
             start: (document.querySelector('#startBtn') || {}).disabled,
             error: (document.querySelector('#wzBody .warnbox') || {}).innerText || '',
-            planExtra: text.indexOf('额外数据分区') >= 0,
+            planDataRows: (text.match(/数据分区/g) || []).length,
             planUnalloc: text.indexOf('未分配') >= 0,
             planLetters: text.indexOf('盘符') >= 0,
             text: text.slice(0, 400),
@@ -392,10 +463,27 @@ async function main() {
       const extra = extraStep.step2extra;
       if (!extra.clicked) problems.push('第 2 步没有“➕ 添加数据分区”按钮');
       if (extra.rows !== 1) problems.push(`点 ➕ 之后额外分区行数为 ${extra.rows}（期望 1）`);
-      if (extra.selects !== 1) problems.push(`额外分区缺少文件系统选择（${extra.selects}）`);
+      if (extra.selects !== 0) problems.push('数据分区不应该再有文件系统选择器（固定跟 D 一致）');
       if (extra.segs < 4) problems.push(`分区条只有 ${extra.segs} 段（期望 C/D/E/未分配 至少 4 段）`);
-      if (extra.error) problems.push(`加了额外分区后第 2 步报错：${extra.error}`);
-      if (extra.canAddMore) problems.push('已经有一个额外分区了，➕ 按钮还应该禁用/隐藏');
+      if (extra.error) problems.push(`加了数据分区后第 2 步报错：${extra.error}`);
+      if (extra.canAddMore) problems.push('已经有一个数据分区了，➕ 按钮还应该禁用/隐藏');
+      if (!String(extra.rowText).includes('数据分区')) problems.push('E 行的名字应该就是“数据分区”');
+      if (String(extra.rowText).includes('额外')) problems.push('界面文案里还残留“额外”两个字');
+      if (!extra.splitOk) {
+        problems.push(`D/E 没有平分容量（D=${extra.dataGb} GB，E=${extra.extraGb} GB）`);
+      }
+    }
+    const dragStep = (summary.steps.find((step) => step.step2drag) || {}).step2drag;
+    if (dragStep) {
+      if (dragStep.grips !== 2) problems.push(`加了数据分区后应该有 2 条可拖分隔条（实际 ${dragStep.grips}）`);
+      if (!dragStep.hasDataGrip) problems.push('没有 D/E 之间的分隔条');
+      if (!dragStep.splitChanged) problems.push('拖动 D/E 分隔条没有改变 D 与 E 的大小');
+      if (Math.abs(dragStep.splitTotalBefore - dragStep.splitTotalAfter) > 1) {
+        problems.push(`拖 D/E 分隔条改变了总容量（${dragStep.splitTotalBefore} → ${dragStep.splitTotalAfter} GB）`);
+      }
+      if (dragStep.capacityGb && dragStep.sysTotalAfter > dragStep.capacityGb + 0.5) {
+        problems.push(`拖动后总量 ${dragStep.sysTotalAfter} GB 超过了盘容量 ${dragStep.capacityGb} GB`);
+      }
     }
     const removedStep = summary.steps.find((step) => step.step2extraRemoved);
     if (removedStep && removedStep.step2extraRemoved.rows !== 0) {
@@ -403,7 +491,9 @@ async function main() {
     }
     const step4 = (summary.steps.find((step) => step.step4) || {}).step4;
     if (step4 && !step4.error) {
-      if (!step4.planExtra) problems.push('第 4 步计划表里没有“额外数据分区”（partition_plan 没传到界面）');
+      if ((step4.planDataRows || 0) < 2) {
+        problems.push(`第 4 步计划表里只有一个数据分区（${step4.planDataRows}，期望 2：D 和 E）`);
+      }
       if (!step4.planLetters) problems.push('第 4 步没有显示计划盘符');
     }
 
