@@ -281,9 +281,13 @@ dism /Capture-Image /ImageFile:D:\sisp-test\test2.wim /CaptureDir:D:\sisp-test\s
 盘消失 / 身份不一致 / 受保护 / 通过）、执行器失败分支（dism 87、bcdboot 2、
 verify 拒绝、diskpart 超时，bcdboot 失败仍释放盘符）、设置导出/导入往返与坏文件。
 
-**提权**：spec 里给 GUI exe 加了 `uac_admin=True`，双击就弹 UAC；打包后实测
-`requireAdministrator` 在 exe 里可搜到（`asInvoker` 不存在）。以前是“能打开界面、
-预检报需要管理员、却没有入口提权”。
+**提权**：早期版本把 GUI exe 声明成 `requireAdministrator`（spec `uac_admin=True`），
+双击就弹 UAC；后来发现这与 WebView2 硬冲突——WebView2 的运行时只能以 Medium IL 启动，
+提权进程下要把 `msedgewebview2.exe` 降权拉起，而那条路要借 `explorer.exe`，失败时就是
+`msedgewebview2 has stopped working` + `Error launching CrashSender.exe`。
+现在清单是 `asInvoker`，写盘能力在界面用 UAC 拉起的后端子进程（`--backend`）里；
+打包后应能在 exe 里搜到 `asInvoker`、搜不到 `requireAdministrator`（`tests/test_packaging.py`
+与 `tests/test_gui_backend.py` 钉住了这两头）。
 
 **A5 顺带暴露并修掉**：镜像路径没归一化，设置里写 `D:/x/test.wim` 时 dism 报退出码 87
 （`parameter is incorrect`）——而且发生在清盘之后。现在 `_apply_image_defaults` /
@@ -314,7 +318,7 @@ verify 拒绝、diskpart 超时，bcdboot 失败仍释放盘符）、设置导�
 | A1 | 真实计划 `executable=true`，`partition_plan` 的角色是 `efi/windows/data/data2`，`drive_letters` 有 `data2`，`unallocated_bytes > 0` |
 | A2 | 计划大小与输入一致：C 122880 MB / D 307200 MB / E 204800 MB |
 | A3–A4 | 提交进入 `waiting_confirmation`；`confirm` 被接受（`typeToConfirm` 开启，输入盘号） |
-| A5–A6 | 任务 `ok`、进度 100%、六步全绿；`verify` 报 **GPT、5 个分区**（MSR + ESP + C + D + E）并确认 `bootmgfw.efi` / `SYSTEM` |
+| A5–A6 | 任务 `ok`、进度 100%、六步全绿；`verify` 报 **GPT、5 个分区**（MSR + ESP + C + D + E）并确认 `bootmgfw.efi` / `SYSTEM`（旧行为；现在 MSR 会被删掉，应为 4 个分区，见上一节） |
 | A7 | 重扫一致：MSR 15.98 MB、ESP **100 MB**（= 计划里的 `efi_size_mb`，隐藏卷没有盘符所以 `file_system`/`label` 为空，只能按 `type=System` + 大小认）、C/D 两块 NTFS、`Data2` 为 **exFAT 200 GB** |
 | A8 | 任务日志 269 行里能找到 `create partition primary size=307200`、`create partition primary size=204800`、`format quick fs=exfat label=Data2` |
 | A9 | 临时目录没有残留 `sisp-diskpart-*` |
@@ -337,6 +341,53 @@ MSR 16 MB + ESP 100 MB + C 120 GB + D 300 GB（NTFS）+ E 200 GB（exFAT），
    不是之前手工填的 300 MB）；
 2. `GET /api/jobs/{id}/log` 返回的是 `{path, lines[], total}`，不是 `{text}`；
    用 `data.text` 取值会得到 `None`（4 个字符），误判成“日志为空”。
+
+### 去掉 MSR：最终布局 EFI + C + D(+E)（2026-11，源码脚本在 VM 实测）
+
+`convert gpt` 会自动在盘首建一个约 16 MB 的 MSR，所以真正跑出来的盘是 `MSR + ESP + C + D`。
+本轮按“两段式 diskpart + 按 GPT 类型精确删 MSR”改成不留 MSR（设计细节见
+[architecture.md](architecture.md#分区时的-msr-处理)）。
+
+VM 环境：`DESKTOP-FODEEKK`，Windows 10 22H2（19045），diskpart 10.0.19041.3636，
+Disk 0 = 40 GB RAW 测试盘（Disk 1 是系统盘，全程只读）。测试用的两段脚本和
+MSR 查询语句都是**从代码直接生成**的（`_wipe_script()` / `_diskpart_script()` /
+`_find_msr_partition()` 的内联 PowerShell），不是手写的，保证验的就是产品命令。
+
+| 步骤 | 结果 |
+| --- | --- |
+| 第一段 `select disk 0 / clean / convert gpt / exit` | 成功；随后 `Get-Partition` 看到 `#1 Reserved 15.98 MB`，`GptType={e3c9e316-…}` |
+| MSR 查询（与 `_find_msr_partition()` 同一条 PowerShell） | 返回 `1` |
+| 第二段（`select partition 1` + `delete partition override` + 建分区） | 全部成功，`diskpart` 逐条 succeeded |
+| 最终布局（C 10 GB + D 吃满） | `#1 System 100 MB@1 MB` / `#2 Basic 10240 MB(G:)` / `#3 Basic 30618 MB(H:)`，**没有 Reserved**，`NumberOfPartitions=3`、`LargestFree=0` |
+| 重扫后 MSR 是否回来 | `Update-HostStorageCache` + 3 s → MSR 数量 **0**；`Test-Path F:\` 为 True（ESP 无盘符但可写，`bcdboot /s F:` 可用） |
+| 加 E（4 分区） | `#1 System 100 MB` / `#2 10240 MB` / `#3 5120 MB` / `#4 25498 MB`，`NumberOfPartitions=4`、`LargestFree=0`、MSR 数量 0 |
+| 盘上本来就没 MSR（查询返回空） | `_find_msr_partition()` 返回 `None` → 脚本里不出现任何 `delete partition`，直接建分区 |
+| 真实 `_VERIFY_SCRIPT` 跑在那块盘上 | 输出 `partition_style=GPT`、3 个分区（`type=System` + 2 个 `Basic`）；喂给 `_verify_verdict(…, min_partitions=3)` 因为没装镜像只报 `bootmgfw.efi` / `SYSTEM` 缺失（预期），**没有报“分区数不符”或“保留分区”** |
+
+删 MSR 后盘首不会留空洞：EFI 依然落在 `offset=1 MB`（`delete partition override` 把
+16 MB 还给了空闲区，随后 `create partition efi` 从最前面分配）。测完已 `clean` 回 RAW，
+临时脚本全部删除。
+
+**打包 exe 整盘安装（2026-11，VM 实测，`8a377e26…` 那只 exe）**：把新 exe 传到 VM
+（`Invoke-WebRequest` 从主机 `http://192.168.227.1:8930/`，SHA256 与 `SHA256SUMS.txt` 一致），
+`Sisp2.exe --serve --port 8911 --settings …` 起真模式实例（`/api/info` 报 `dry_run=false`），
+目标盘是 200 GB 动态 VHD（diskpart `create vdisk … type=expandable`）挂上的 Disk 2：
+
+| 用例 | 做法 | 结果 |
+| --- | --- | --- |
+| R1 | prepare [2] + confirm 文本 `2`；镜像 `test-full.wim`（没有 `config\SYSTEM`） | 六步里前五步 ok，**verify 失败**：“系统分区里没有 Windows 系统文件”，详情里的分区列表是 `#1=100 MB、#2(F:)=120 GB、#3(G:)=79.90 GB`（**3 个、无 Reserved**）——说明新判据既不误报 MSR，也仍然抓得住“镜像不完整” |
+| R2 | 同上，镜像换 `test2.wim` | 仍然 verify 失败（该 WIM 只带 `Windows\Boot` 与 `System32` 的几个 dll） |
+| R3 | 用 `test3.wim`（`src2` + `System32\config\SYSTEM` 与 `ntoskrnl.exe` 标志文件） | **六步全绿**、`ok`、100%；verify 报 `GPT、3 个分区：#1=100.00 MB、#2(F:)=120.00 GB、#3(G:)=79.90 GB；引导 bootmgfw.efi；系统 SYSTEM` |
+| R4 | 同上但加 E：`data_partitions=[30 GB, auto]` | **六步全绿**、verify 报 `GPT、4 个分区…#4(J:)=49.90 GB`；`Get-Partition` 看到 `System 100 MB / 120 GB / 30 GB / 51 GB`，`NumberOfPartitions=4`、`LargestFree=0`、**MSR 数量 0** |
+
+R1 的日志里能直接看到两段式：先 `clean` + `convert gpt` 的 diskpart，再一行
+「发现自动生成的 MSR 分区 #1，将在建分区前删除」，紧接着是
+`select partition 1` / `delete partition override` / `create partition efi size=100`。
+三个任务（`disk2-983a2361` / `disk2-ec9a3ea8` / `disk2-ababd6df`）共完成 3 次
+清盘+建分区，每次都不留 MSR；测完 detach VHD、删 `test3.wim`/`src3`，Disk 0 回到 RAW。
+
+`verify` 也随之从“分区数 ≥ 计划”收紧成“分区数 == 计划 且 没有 Reserved/MSR”：
+上表 A5–A6 那轮记录的“5 个分区（MSR + ESP + C + D + E）”是**旧行为**，现在是 4 个。
 
 ## 3.1 VM 实测记录（2026-11-03，界面设置接管业务配置之后）
 

@@ -12,6 +12,15 @@ python -m app.gui_web.main --serve --port 8765
 
 参数：`-j/--config`、`--dry-run`、`--elevate`、`--debug`、`--serve`、`--port`（默认 8765）、`--host`（默认 `127.0.0.1`）、`--settings`、`--width`、`--height`。桌面模式需要 pywebview；`--serve` 不依赖它。两种模式都加载同一个本机 HTTP 服务。
 
+桌面模式的进程模型：**窗口进程不提权**（exe 清单 `asInvoker`），它会用 UAC 拉起
+`Sisp2.exe --backend --serve --host 127.0.0.1 --port <N> --parent-pid <界面 pid>`
+作为提权后端，窗口加载后端提供的 `http://127.0.0.1:<N>/`。所以：
+
+- 界面进程不持有管理员令牌，也不建 `WorkflowController`（所有业务状态都在后端）；
+- `--backend` / `--parent-pid` 是内部参数（argparse 里 `SUPPRESS`），不要手工依赖；
+- 后端只监听回环地址，且父进程消失时自己退出；
+- 提权被取消时退回进程内服务（普通权限），此时真实写盘会被预检拦住。
+
 有效 GUI dry-run 是 `--dry-run OR settings.dryRunByDefault`；两者默认均为 false。该值在启动时锁定为硬上限，`POST /api/session` 传 `dry_run:false` 或 `POST /api/prepare` 传 `dry_run:false` 都不能升级为真实执行。`POST /api/session` 与 `POST /api/prepare` 的 `dry_run` 可省略，省略表示**沿用进程模式**（前端刷新会话时不再把强制演练悄悄降级成真实模式）。服务必须单进程单 worker，因为任务和缓冲状态保存在内存。端口被占用入口返回 4；FastAPI 自动文档地址默认为 `http://127.0.0.1:8765/docs`（地址随 host/port 改变）。
 
 ## 路由
@@ -35,7 +44,7 @@ python -m app.gui_web.main --serve --port 8765
 | `POST /api/images` | `{directory?, path?}` 列镜像目录或读某个镜像的索引（`dism /Get-WimInfo`；ISO 挂载后必定卸载） |
 | `GET /api/boot/report` | 扫描各盘的 Windows 目录与 ESP，返回可修复性报告 |
 | `POST /api/boot/repair` | `{disk_number}`；临时盘符挂 ESP → `bcdboot … /f UEFI` → 重新扫描，结束必定释放盘符；真实模式受闸门与 `confirmDelete` 约束 |
-| `POST /api/partition/plan` | `{disk_number, actions}`；**永远 dry_run**，只生成 diskpart 脚本 |
+| `POST /api/partition/plan` | `{disk_number, actions}`；**永远 dry_run**，只生成 diskpart 脚本（单盘操作路径；整盘安装的脚本预览在 `prepare()` 的 `diskpart_preview`，含“清盘 + 删 MSR + 建分区”两段） |
 | `POST /api/partition/execute` | `{disk_number, actions, confirm_text?}`；`confirmDelete` 开启时确认文本必须是盘号或型号，ESP/MSR/恢复分区不可删 |
 | `POST /api/events/poll` | `{cursor, limit}`，游标轮询补发 |
 | `GET /api/events?cursor=N` | SSE 事件流；可读 `Last-Event-ID` |

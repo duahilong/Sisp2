@@ -42,27 +42,55 @@ python packaging/build.py
 | 设置 `settings.json` | `%APPDATA%\Sisp\` | 与源码运行完全一致，exe 升级不会丢；设置页可导出/导入换机 |
 | 窗口位置 `window.json` | `%APPDATA%\Sisp\` | 受 `rememberWindow` 控制 |
 | 执行日志、`app.log` | 设置里的 `logDir` | 无控制台窗口时，这里是唯一的诊断出口 |
-| 解包目录 | `%TEMP%\_MEIxxxx` | onefile 临时目录，退出后自动清理 |
+| 解包目录 | `%LOCALAPPDATA%\Sisp\run\_MEIxxxx` | onefile 临时目录（spec 的 `runtime_tmpdir`），退出后自动清理 |
 
 如果 exe 安装在 `C:\Program Files\` 之类没有写权限的目录，复制配置会失败，
 程序改用包内模板继续运行（只读）；这种情况下用 `-j` 指定别处的配置即可。
 
 ## 提权
 
-打包清单直接声明 `requireAdministrator`（spec 里的 `uac_admin=True`）：双击 exe 就弹 UAC。
-这是个会清盘的磁盘工具，「能打开界面但什么都写不了」比「启动时就要权限」更糟。
+**界面进程不提权。** 打包清单是 `asInvoker`（spec 里 `uac_admin=False`），双击 exe
+不会弹 UAC；需要管理员权限的写盘由界面用 UAC 拉起的**后端子进程**承担：
 
-- 判断「有没有管理员」是 `app/gui/elevation.py` 的 `IsUserAnAdmin()`，预检仍会复核一次；
-- `--elevate` 还留着（从终端启动、或想显式重启时用），走 `ShellExecuteW(..., "runas", ...)`；
-- 拒绝 UAC 时 Windows 直接不启动进程，不会出现半残界面；
+```
+Sisp2.exe                      (asInvoker, 只有窗口 + WebView2)
+  └─ Sisp2.exe --backend --serve --port N --parent-pid <界面 pid>   (runas, 提权)
+        加载的是同一个 exe、同一个本机 HTTP 服务
+```
+
+为什么不能像以前那样直接把 exe 声明成 `requireAdministrator`：**WebView2 的运行时不支持
+跑在高完整性（High IL）进程里**。它必须把 `msedgewebview2.exe` 降到 Medium IL 启动，
+而这条降权路径要借 `explorer.exe` 代劳（见 WebView2Feedback #2984 与微软
+“Develop secure WebView2 apps”）。一旦降权子进程创建失败，用户看到的就是：
+
+```
+msedgewebview2 has stopped working
+Error launching CrashSender.exe
+```
+
+第二行是崩溃报告器也拉不起来的二次报错，不是根因。另一个死结：提权进程下
+`WEBVIEW2_*` 环境变量会被忽略，所以“设个环境变量绕过”在这个场景里行不通。
+
+细节：
+
+- 界面侧判断「有没有管理员」是 `app/gui/elevation.py` 的 `IsUserAnAdmin()`，预检仍会复核；
+- 后端由 `app/gui_web/main.py` 的 `spawn_privileged_backend()` 拉起，参数里带
+  `--parent-pid`：**父进程一退出后端就自己退**（界面没有权限结束一个提权进程，
+  所以清理只能由后端自己完成，界面被强杀也不会留下持管理员令牌的 HTTP 服务）；
+- 用户在 UAC 上点“否”时不会白屏退出：退回**进程内**的普通权限服务，界面照常打开，
+  真正写盘会被预检拦住（`需要管理员权限：请以管理员身份重新启动`）；
+- 桌面模式下 `--elevate` 不再需要（后端天然走 UAC）；`--serve` 仍可用它自提权；
+- WebView2 的 user data folder 固定在 `%LOCALAPPDATA%\Sisp\WebView2`（`webview.start(storage_path=...)`），
+  不再用 `%TEMP%` 下那份易被清掉/被多份 pywebview 应用共用的目录——crashpad
+  起不来时同样会弹 `Error launching CrashSender.exe`；
 - 产物验证方法：`[Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes('Sisp2.exe'))`
-  里能搜到 `requireAdministrator`（VM 上实测通过）。
+  里应能搜到 `asInvoker`，搜不到 `requireAdministrator`。
 
 ## 运行方式
 
 ```powershell
-.\Sisp2.exe                       # 桌面窗口（默认）
-.\Sisp2.exe --dry-run             # 强制演练，永不写盘
+.\Sisp2.exe                       # 桌面窗口（默认；会弹一次 UAC 拉起提权后端）
+.\Sisp2.exe --dry-run             # 强制演练，永丂写盘
 .\Sisp2.exe --serve --port 8765   # 浏览器模式，自己开浏览器访问 127.0.0.1:8765
 .\Sisp2.exe --settings D:\cfg\settings.json   # 指定设置文件
 ```
@@ -104,12 +132,12 @@ python packaging/build.py
 | --- | --- |
 | `GET /static/js/main.js`、`/static/css/app.css` | 都返回 200（证明资源真的进了包） |
 | 打包后的界面冒烟（`tools/ui_smoke.mjs` 对 `Sisp2.exe --serve`） | `ok=true`，10 张截图全部 54–105 KB，磁盘树 9 个节点、设置页 34 行、第 4 步计划表 9 行 |
-| `Sisp2.exe --serve` 走 REST 真实整盘安装（2 TB 测试盘） | 六步全绿、`progress` 6/6、分区为 MSR/ESP 300 MB/C 120 GB/D 300 GB，日志 11.8 KB 可读 |
+| `Sisp2.exe --serve` 走 REST 真实整盘安装（2 TB 测试盘） | 六步全绿、`progress` 6/6、分区为 MSR/ESP 300 MB/C 120 GB/D 300 GB，日志 11.8 KB 可读（旧记录；现在 MSR 会在建分区前删掉，布局是 ESP + C + D(+E)，见 [testing.md](testing.md) 的 MSR 一节） |
 | 同一 exe 的真实分区操作 | `/api/partition/execute` 建 50 GB NTFS 分区成功，日志含 diskpart 输出，temp 目录无残留 |
 
 ## 启动耗时
 
-单文件 exe 每次启动都要把包解到 `%TEMP%\_MEIxxxxxx`，所以首启比源码运行慢。
+单文件 exe 每次启动都要把包解到 `%LOCALAPPDATA%\Sisp\run\_MEIxxxxxx`，所以首启比源码运行慢。
 计时口径：从进程创建到 `GET /health` 返回 200（`--serve --dry-run`）。
 
 | 场景 | 观察值 |
@@ -128,14 +156,18 @@ python packaging/build.py
 - **未签名**：会触发 SmartScreen「未知发布者」，也会被杀软按“打包的 Python
   程序”对待。正式分发建议买代码签名证书并对产物签名。
 - **onefile 启动慢**：每次启动都要把整包（dll + pyc + datas，约 18 MB）解到
-  `%TEMP%\_MEIxxxx`，再加载解释器与 FastAPI，杀软还会扫一遍新写出的文件。
+  `%LOCALAPPDATA%\Sisp\run`（默认是 `%TEMP%`），再加载解释器与 FastAPI，杀软还会扫一遍新写出的文件。
   要快就 `--onedir`（不解包），或把 exe 交给安装器分发；`--runtime-tmpdir` 换到
   固定 SSD 路径能省一点，但省不掉解包本身。具体耗时见上面「启动耗时」一节。
 - **个别受策略管理的目录里，单文件 exe 起不来**：现象是弹窗
-  `Could not create temporary directory!`（PyInstaller bootloader 无法在 `%TEMP%`
-  建解包目录）。把**同一个 exe** 换个目录（例如 `D:\sisp2-release\`）就能正常运行，
-  说明与产物本身无关，而是那台机器的目录/沙箱策略。遇到时先换目录，再考虑给
-  `%TEMP%` 加白名单。
+  `Could not create temporary directory!`（PyInstaller bootloader 无法创建解包目录，
+  `CreateDirectoryW` 连试 5 次失败）。它跟两个东西有关，**与产物本身无关**：
+  - 解包目标：现在固定为 `%LOCALAPPDATA%\Sisp\run`（spec 的 `runtime_tmpdir`），
+    不再用 `%TEMP%`——`%TEMP%` 被组策略、沙箱、杀软或清理工具管着的机器上这里会失败；
+  - 启动位置：某些沙箱/EDR 会限制“从特定目录启动的进程”只能写那个目录内部，
+    此时把**同一个 exe** 换到普通目录（例如 `D:\sisp2-release\`）双击就能正常运行。
+
+  排查时先看 `%LOCALAPPDATA%\Sisp\run` 能不能建目录，再换一个启动位置试。
 - **`app.log` 是唯一日志出口**：`--windowed` 没有控制台，`print` 的内容会进
   `os.devnull`，排查问题请看设置里 `logDir` 下的 `app.log`。
 - **不能跨平台**：产物含 Windows 专属的 WebView2 / WinForms 组件。

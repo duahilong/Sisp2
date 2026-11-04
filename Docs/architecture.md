@@ -14,12 +14,30 @@
 2. `refresh_disks()` 可重新扫描；`check_config()` 单独重验配置。
 3. `prepare()` 根据选盘与配置构造分区计划、盘符、身份快照及检查/阻断信息。优先级从弱到强是：业务配置 → 界面设置 → 向导里这块盘的逐盘覆盖（之前顺序反了，设置会把用户在第 2/3 步填的大小与镜像改回去，已修）。盘符分配会避开磁盘摘要、系统盘符以及 OS 层已占用/遗留的“幽灵盘符”（例如 EFI 隐藏卷留下的 DriveInfo 条目）。**镜像在这一步就要“可应用性”校验**：ISO 直接拒（dism 不能 `/Apply-Image` 到分区，提示先取 `sources\install.wim`）、非 WIM/ESD/SWM 拒、dism 读不到索引或索引不存在也拒——都会变成 `plan.blockers` 并让“开始”置灰，避免“清完盘才发现镜像用不了”。
 
-**分区布局是显式模型**：`app/application/partitions.py` 的 `plan_partitions()` 把 `partition_info` 解析成 `[EFI, Windows, Data(, Data2)]`，真实执行器拼 diskpart 脚本、容量预检、dry-run 预览、界面第 4 步摘要都消费同一份结果（以前这三处各写一遍，加一个分区要改三处）。向导第 2 步可以再加一个数据分区（E）：此时 payload 用 `data_partitions` 列表逐项给大小与文件系统（NTFS/exFAT），剩余容量保持未分配，界面会把它算出来并标注。盘符按角色分配：`efi` / `windows` / `data` / `data2`，每块盘 3 个或 4 个。
+**分区布局是显式模型**：`app/application/partitions.py` 的 `plan_partitions()` 把 `partition_info` 解析成 `[EFI, Windows, Data(, Data2)]`，真实执行器拼 diskpart 脚本、容量预检、dry-run 预览、界面第 4 步摘要都消费同一份结果（以前这三处各写一遍，加一个分区要改三处）。向导第 2 步可以再加一个数据分区（E）：此时 payload 用 `data_partitions` 列表逐项给大小与文件系统（NTFS/exFAT）。
+**最后一个数据分区默认让 diskpart 吃掉剩余空间**（`size_mb=None` → `create partition primary` 不带 `size=`）：
+比界面自己算「总容量 − C − EFI − 对齐余量」更准，也不会出现「界面上刚好、diskpart 报空间不足」。
+计划表里它显示为 `剩余空间（约 X GB）`，但实际大小仍由 diskpart 决定（`estimate_mb` 只用于展示）。盘符按角色分配：`efi` / `windows` / `data` / `data2`，每块盘 3 个或 4 个。
 
 第 2 步的容量条有两条可拖分隔条：**C|D** 改系统分区（变化由 D 吸收，E 不动），**D|E** 只调整两个数据分区的比例（D+E 总量不变）。两者都做了下限钳制（C ≥ 60 GB、D ≥ 20 GB、E ≥ 1 GB）并向下取整，所以拖动**永远不会超过硬盘真实容量**；加 E 时默认与 D 平分剩余容量。E 的文件系统不在界面上单独选择——它与 D 一致（`dataFs()`：跟随设置 `defaultFs`，非 NTFS/exFAT 一律回落 NTFS）。
 4. `submit()` 默认创建等待确认的任务；`confirm()` 对无阻断的任务开始调度。确认通过（勾选 + 盘号/型号）后会按任务盘号重新补齐隐式白名单——刷新页面会重开会话并撤销隐式授权，不补就会“确认时报白名单为空”。
-5. JobManager 调用服务执行任务。真实服务在执行前检查 dry-run 策略、白名单、身份复核及执行器；执行器按分区、镜像、引导、校验步骤调用系统命令，并在任务结束后释放 EFI 盘符（避免隐藏卷盘符在下次清盘后残留成幽灵盘符）。**`verify` 判定“装完能不能开机”，不只数分区**：分区表是 GPT、分区数 ≥ 计划分区数（三分区布局是 3，加 E 是 4；盘上还有 diskpart 自动建的 16MB MSR，所以用“至少”判定）、EFI 分区里真的有 `EFI\Microsoft\Boot\bootmgfw.efi`（或 `EFI\BOOT\BOOTX64.EFI`）、系统分区里真的有 `Windows\System32\config\SYSTEM`（或 `ntoskrnl.exe`）；缺一项就判失败，并把证据写进步骤 `details`。
+5. JobManager 调用服务执行任务。真实服务在执行前检查 dry-run 策略、白名单、身份复核及执行器；执行器按分区、镜像、引导、校验步骤调用系统命令，并在任务结束后释放 EFI 盘符（避免隐藏卷盘符在下次清盘后残留成幽灵盘符）。**`verify` 判定“装完能不能开机”，不只数分区**：分区表是 GPT、分区数**等于**计划分区数（三分区布局是 3，加 E 是 4）、盘上没有 Reserved/MSR 分区、EFI 分区里真的有 `EFI\Microsoft\Boot\bootmgfw.efi`（或 `EFI\BOOT\BOOTX64.EFI`）、系统分区里真的有 `Windows\System32\config\SYSTEM`（或 `ntoskrnl.exe`）；缺一项就判失败，并把证据写进步骤 `details`。
 6. 运行结果由任务状态和事件返回；取消为协作式，已运行的系统命令不会因此立即中断。
+
+## 分区时的 MSR 处理
+
+`convert gpt` 会**自动**在盘首建一个约 16 MB 的 MSR（Microsoft Reserved）分区——这不是我们脚本里的命令，是 Windows 的行为（Windows 10 19045 / diskpart 10.0.19041 实测：`p1 Reserved 15.98 MB`，GPT 类型 `e3c9e316-0b5c-4db8-817d-f92df00215ae`）。产品要求的最终布局是 **EFI + C + D(+E)**，没有 MSR，所以执行器把分区拆成两段 diskpart：
+
+1. `select disk N` → `clean` → `convert gpt` → `exit`（这一段之后 MSR 就存在了，`tracker["diskpart_ran"]` 在这里置位）；
+2. PowerShell 按 GPT 类型查出那个 MSR 的分区号（`Get-Partition -DiskNumber N | Where GptType -like '*e3c9e316-…*'`），交给 `partitions.strip_msr_lines()` 生成 `select partition k` + `delete partition override`，再接上 `diskpart_lines(parts)`。
+
+为什么不在首段里直接写 `select partition 1` + `delete partition override`：万一某台机器没自动建 MSR，`select partition 1` 会报错，**整条 diskpart 脚本会中止**，装机直接失败。所以只对“查到的 MSR”动手：
+
+- 查到 → 删掉再建分区（删完后盘首空闲与后面合并，实测 EFI 依然落在 `offset=1 MB`，不会留 16 MB 空洞）；
+- 查不到 → 不删任何东西，直接建分区；
+- **查询本身失败（PowerShell 报错/超时）→ 中止任务并报错**，绝不猜一个分区号去删（猜错就是删掉真分区）。
+
+代价：盘上没有 MSR 后，动态磁盘转换、部分内核内存转储、某些 BitLocker 配置会受限——这是产品明确接受的取舍。演练预览（`build_diskpart_preview()`）会把两段脚本都展示出来，MSR 那两行以 `REM` 形式出现（预览时不知道真实分区号）；第 4 步确认页也会多一行“MSR 分区 · 约 16 MB · 由 `convert gpt` 自动生成，执行时删除”。
 
 ## 演练与真实模式的判定
 
