@@ -300,6 +300,41 @@ verify 拒绝、diskpart 超时，bcdboot 失败仍释放盘符）、设置导�
 - **diskpart 脚本残留在 temp 目录**：`mkstemp` 的 fd 没关，Windows 上 `unlink` 因占用失败；
 - **分区日志没有 diskpart 输出**：攒行日志在写完最后一行后没再 flush。
 
+### 额外数据分区（E）与四分区真实写盘（2026-11，源码 + exe）
+
+本轮把分区布局收敛成 `app/application/partitions.py` 的显式模型，界面第 2 步加了
+「➕ 添加数据分区」。验证脚本 `D:\sisp-test\v13\run_extra.py`（只走 REST）在两个实例上
+各跑一遍：**源码实例**（8898）与 **打包 exe**（同一个 8898，Python 3.15.2），每轮 11 个用例。
+
+| 用例 | 断言 |
+|---|---|
+| A1 | 真实计划 `executable=true`，`partition_plan` 的角色是 `efi/windows/data/data2`，`drive_letters` 有 `data2`，`unallocated_bytes > 0` |
+| A2 | 计划大小与输入一致：C 122880 MB / D 307200 MB / E 204800 MB |
+| A3–A4 | 提交进入 `waiting_confirmation`；`confirm` 被接受（`typeToConfirm` 开启，输入盘号） |
+| A5–A6 | 任务 `ok`、进度 100%、六步全绿；`verify` 报 **GPT、5 个分区**（MSR + ESP + C + D + E）并确认 `bootmgfw.efi` / `SYSTEM` |
+| A7 | 重扫一致：MSR 15.98 MB、ESP **100 MB**（= 计划里的 `efi_size_mb`，隐藏卷没有盘符所以 `file_system`/`label` 为空，只能按 `type=System` + 大小认）、C/D 两块 NTFS、`Data2` 为 **exFAT 200 GB** |
+| A8 | 任务日志 269 行里能找到 `create partition primary size=307200`、`create partition primary size=204800`、`format quick fs=exfat label=Data2` |
+| A9 | 临时目录没有残留 `sisp-diskpart-*` |
+| A10–A11 | 3 个数据分区、额外分区大小为 0 都在**计划阶段**被拒（「最多只能有 2 个数据分区」/「分区配置无效：第 2 个数据分区必须填写大小」） |
+
+结果：**源码 11/11、exe 11/11**。两次真实任务的作业号是 `disk1-4a83dec4`（源码）与
+`disk1-3714fc51`（exe），都是 6/6 绿、约 2.8 s；盘符按当时已占用的字母顺延（实测
+`F/I/J/L` 与 `F/G/H/K`——`data2` 一定排在 `data` 后面）。写完盘上就是
+MSR 16 MB + ESP 100 MB + C 120 GB + D 300 GB（NTFS）+ E 200 GB（exFAT），
+`1.82 TB` 的盘还剩 1.33 TB 未分配——这正是“全部显式大小”的预期形态。
+
+界面侧用打包 exe 起了 dry-run 实例（8899）跑 `tools/ui_smoke.mjs`：`ok=true`，
+12 张截图，其中 `step2extra` 断言到 `rows=1 / selects=1 / segs=4 / canAddMore=false`、
+删除后 `rows=0`，第 4 步 `planExtra / planUnalloc / planLetters` 全为真。
+
+顺带记两个**测试脚本**的坑（不是产品缺陷）：
+
+1. ESP 是隐藏卷，`Get-Volume` 拿不到文件系统，重扫里 `file_system`/`label` 都是空——
+   断言要按 `type=System` 且大小等于计划里的 `efi_size_mb`（这次配置是默认 100 MB，
+   不是之前手工填的 300 MB）；
+2. `GET /api/jobs/{id}/log` 返回的是 `{path, lines[], total}`，不是 `{text}`；
+   用 `data.text` 取值会得到 `None`（4 个字符），误判成“日志为空”。
+
 ## 3.1 VM 实测记录（2026-11-03，界面设置接管业务配置之后）
 
 测试机：`DESKTOP-FODEEKK`，Windows 10 22H2（19045），Python 3.15.2，node v26.13.0。
