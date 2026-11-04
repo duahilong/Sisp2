@@ -129,6 +129,39 @@ def test_partition_defaults_reserve_space_for_efi() -> None:
     assert "RESERVE_GB" in install
 
 
+def test_install_wizard_can_add_extra_partition() -> None:
+    """第 2 步的 ➕ / ✕、E 行、data_partitions 载荷都不能被删掉。
+
+    真的点按钮由 ``tools/ui_smoke.mjs`` 负责（它在浏览器里加一次 E、删一次、
+    再加回来，并要求第 4 步出现“额外数据分区”）；这里只防静态回退。
+    """
+    install = (JS / "view-install.js").read_text(encoding="utf-8")
+    assert "data-add" in install
+    assert "data-remove" in install
+    assert "额外数据分区" in install
+    assert 'data-fs="extra"' in install
+    assert "partition_plan" in install
+
+    state_js = (JS / "state.js").read_text(encoding="utf-8")
+    assert "data_partitions" in state_js
+    assert "addExtraPartition" in state_js
+    assert "removeExtraPartition" in state_js
+
+    css = (UI / "css" / "app.css").read_text(encoding="utf-8")
+    assert ".addpart" in css
+    assert ".szrow.extra" in css
+
+
+def test_extra_partition_limit_matches_backend() -> None:
+    """前端最多 N 个额外分区必须等于后端布局允许的个数，否则会被后端打回。"""
+    from app.application.partitions import MAX_DATA_PARTITIONS
+
+    derive = (JS / "derive.js").read_text(encoding="utf-8")
+    match = re.search(r"export const MAX_EXTRAS = (\d+);", derive)
+    assert match, "derive.js 里找不到 MAX_EXTRAS"
+    assert int(match.group(1)) == MAX_DATA_PARTITIONS - 1
+
+
 def test_frontend_static_check() -> None:
     proc = subprocess.run(
         [sys.executable, str(ROOT / "tools" / "ui_check.py")],

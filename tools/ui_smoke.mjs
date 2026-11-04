@@ -260,6 +260,49 @@ async function main() {
         })`)),
       });
 
+      // 加一个额外数据分区（E）：➏ → 多一行 + 进度条多一段 + 能选文件系统，
+      // 然后删掉，确认回到 C/D 两行——两个方向都要通，否则用户会卡在“加错了删不掉”。
+      const added = await evaluate(`(function () {
+        const add = document.querySelector('#wzBody button[data-add]');
+        if (!add) return false;
+        add.click();
+        return true;
+      })()`);
+      await sleep(300);
+      summary.shots.push(await shoot('05b-install-step2-extra'));
+      summary.steps.push({
+        step2extra: JSON.parse(await evaluate(`JSON.stringify({
+          clicked: ${added ? 'true' : 'false'},
+          rows: document.querySelectorAll('#wzBody .szrow.extra').length,
+          selects: document.querySelectorAll('#wzBody select[data-fs="extra"]').length,
+          segs: document.querySelectorAll('#wzBody .wseg').length,
+          error: (document.querySelector('#wzBody .errmsg') || {}).textContent || '',
+          canAddMore: Boolean(document.querySelector('#wzBody button[data-add]')),
+        })`)),
+      });
+      const removed = await evaluate(`(function () {
+        const rm = document.querySelector('#wzBody button[data-remove]');
+        if (!rm) return false;
+        rm.click();
+        return true;
+      })()`);
+      await sleep(200);
+      summary.steps.push({
+        step2extraRemoved: JSON.parse(await evaluate(`JSON.stringify({
+          clicked: ${removed ? 'true' : 'false'},
+          rows: document.querySelectorAll('#wzBody .szrow.extra').length,
+        })`)),
+      });
+
+      // 再加回去，让后面第 3、4 步和真实写盘都是“四个分区”的路径
+      await evaluate(`(function () {
+        const add = document.querySelector('#wzBody button[data-add]');
+        if (add) add.click();
+        return true;
+      })()`);
+      await sleep(250);
+      summary.shots.push(await shoot('05c-install-step2-extra-again'));
+
       await evaluate(`document.querySelector('#wzNext').click(); true`);
       await sleep(600);
       summary.shots.push(await shoot('06-install-step3'));
@@ -281,11 +324,19 @@ async function main() {
       await sleep(300);
       summary.shots.push(await shoot('07-install-step4'));
       summary.steps.push({
-        step4: JSON.parse(await evaluate(`JSON.stringify({
-          rows: document.querySelectorAll('#wzBody .sum table tr').length,
-          start: (document.querySelector('#startBtn') || {}).disabled,
-          error: (document.querySelector('#wzBody .warnbox') || {}).innerText || '',
-        })`)),
+        step4: JSON.parse(await evaluate(`(function () {
+          const body = document.querySelector('#wzBody') || { innerText: '' };
+          const text = String(body.innerText || '');
+          return JSON.stringify({
+            rows: document.querySelectorAll('#wzBody .sum table tr').length,
+            start: (document.querySelector('#startBtn') || {}).disabled,
+            error: (document.querySelector('#wzBody .warnbox') || {}).innerText || '',
+            planExtra: text.indexOf('额外数据分区') >= 0,
+            planUnalloc: text.indexOf('未分配') >= 0,
+            planLetters: text.indexOf('盘符') >= 0,
+            text: text.slice(0, 400),
+          });
+        })()`)),
       });
     }
 
@@ -335,6 +386,25 @@ async function main() {
     }
     if (summary.steps.some((step) => step.settings && step.settings.rows < 20)) {
       problems.push('设置页渲染的行数过少');
+    }
+    const extraStep = summary.steps.find((step) => step.step2extra);
+    if (extraStep) {
+      const extra = extraStep.step2extra;
+      if (!extra.clicked) problems.push('第 2 步没有“➕ 添加数据分区”按钮');
+      if (extra.rows !== 1) problems.push(`点 ➕ 之后额外分区行数为 ${extra.rows}（期望 1）`);
+      if (extra.selects !== 1) problems.push(`额外分区缺少文件系统选择（${extra.selects}）`);
+      if (extra.segs < 4) problems.push(`分区条只有 ${extra.segs} 段（期望 C/D/E/未分配 至少 4 段）`);
+      if (extra.error) problems.push(`加了额外分区后第 2 步报错：${extra.error}`);
+      if (extra.canAddMore) problems.push('已经有一个额外分区了，➕ 按钮还应该禁用/隐藏');
+    }
+    const removedStep = summary.steps.find((step) => step.step2extraRemoved);
+    if (removedStep && removedStep.step2extraRemoved.rows !== 0) {
+      problems.push('点 ✕ 之后额外分区没有被删掉');
+    }
+    const step4 = (summary.steps.find((step) => step.step4) || {}).step4;
+    if (step4 && !step4.error) {
+      if (!step4.planExtra) problems.push('第 4 步计划表里没有“额外数据分区”（partition_plan 没传到界面）');
+      if (!step4.planLetters) problems.push('第 4 步没有显示计划盘符');
     }
 
     console.log(JSON.stringify({ ok: problems.length === 0, problems, ...summary }, null, 2));

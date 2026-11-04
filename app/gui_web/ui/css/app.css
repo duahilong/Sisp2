@@ -928,3 +928,26 @@ input.confirm.bad{border-color:var(--danger);box-shadow:0 0 0 2px var(--danger-b
 .banner.danger .bi{background:var(--danger)}
 .banner.ok{border-color:#A8C9B9;background:var(--ok-bg);color:var(--ok)}
 .banner.ok .bi{background:var(--ok)}
+
+/* 步骤 2：额外数据分区（E）。加一个分区就多一行，最多 1 行（见 derive.MAX_EXTRAS） */
+.tgt .szrow.extra{grid-template-columns:172px 88px 26px 96px 24px}
+.szrow select{
+  height:27px;padding:0 6px;border:1px solid var(--line);border-radius:2px;background:#fff;
+  font-size:12px;color:var(--ink2);outline:none;
+}
+.szrow select:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-bg)}
+.szrow .rm{
+  width:24px;height:24px;padding:0;line-height:1;border:1px solid var(--line);border-radius:2px;
+  background:#fff;color:var(--muted);font-size:12px;cursor:pointer;
+}
+.szrow .rm:hover{border-color:var(--danger);color:var(--danger);background:var(--danger-bg)}
+.addpart{
+  display:block;width:calc(100% - 20px);margin:6px 10px 0;height:28px;
+  border:1px dashed #B9C6D4;border-radius:3px;background:#FAFCFF;color:var(--ink2);
+  font-size:12px;cursor:pointer;
+}
+.addpart:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-bg)}
+.wzbar .wseg.ext{background:#1F8A70}
+:root[data-theme="dark"] .szrow select,
+:root[data-theme="dark"] .szrow .rm{background:#1B2733;border-color:#2C3A48;color:var(--ink2)}
+:root[data-theme="dark"] .addpart{background:#16202A;border-color:#2C3A48}

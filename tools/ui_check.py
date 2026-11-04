@@ -33,7 +33,7 @@ _IMPORT_RE = re.compile(r"""from\s+['"]\./([\w.-]+\.js)['"]""")
 _ATTR_RE = re.compile(r"""(?:href|src)="(/static/[^"]+)\"""")
 
 DERIVE_SCRIPT = """
-import { fmtSize, fsClass, segments, checkSizes, partShortName, suggestLetter } from './derive.js';
+import { fmtSize, fsClass, segments, checkSizes, checkLayout, unallocatedBytes, partShortName, suggestLetter } from './derive.js';
 
 const GB = 1024 ** 3;
 const esp = { partition_number: 1, size_bytes: 100 * 1024 * 1024,
@@ -59,6 +59,11 @@ const out = {
   too_big: checkSizes(100 * GB, 120, 380) !== '',
   efi_reserved: checkSizes(100 * GB, 60, 39.5, 1024) !== '',
   efi_fits: checkSizes(100 * GB, 60, 39, 300),
+  layout_no_extras: checkLayout(1000 * GB, 120, 380),
+  layout_ok: checkLayout(1000 * GB, 120, 380, [{ sizeGb: 200 }]),
+  layout_rest: unallocatedBytes(1000 * GB, 120, 380, [{ sizeGb: 200 }]) > 0,
+  layout_zero_extra: checkLayout(1000 * GB, 120, 380, [{ sizeGb: 0 }]) !== '',
+  layout_overflow: checkLayout(500 * GB, 120, 380, [{ sizeGb: 200 }]) !== '',
 };
 console.log(JSON.stringify(out));
 """
@@ -76,6 +81,11 @@ EXPECTED = {
     "too_big": True,
     "efi_reserved": True,
     "efi_fits": "",
+    "layout_no_extras": "",
+    "layout_ok": "",
+    "layout_rest": True,
+    "layout_zero_extra": True,
+    "layout_overflow": True,
 }
 
 

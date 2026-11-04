@@ -12,11 +12,13 @@ import { api, ApiError } from './api.js';
 import { $, $$, esc, on } from './dom.js';
 import {
   fmtSize, segments, fsColor, isSelectable,
-  protectionText, clamp, MIN_SYS_GB, MIN_DATA_GB, toGb, fromGb, RESERVE_GB,
+  protectionText, clamp, MIN_SYS_GB, MIN_DATA_GB, MIN_EXTRA_GB, MAX_EXTRAS,
+  toGb, fromGb, RESERVE_GB, extraColor, extraLetter, unallocatedBytes,
 } from './derive.js';
 import {
   state, diskOf, targetOf, targetError, targetRest, addTarget, removeTarget,
-  selectionPayload, resetWizard, STEP_LABELS, JOB_STATUS_TEXT,
+  addExtraPartition, removeExtraPartition, selectionPayload, resetWizard,
+  STEP_LABELS, JOB_STATUS_TEXT,
 } from './state.js';
 import { pushLog, toast, confirmDialog, openModal, jobStatusText } from './shell.js';
 import { lostPartitionsText } from './view-main.js';
@@ -30,6 +32,13 @@ const images = {
 };
 
 const ROLE_TEXT = { efi: 'EFI 分区', windows: '系统分区', data: '数据分区' };
+
+/** 角色 → 界面名字：额外数据分区是 data2、data3…… */
+function roleLabel(role) {
+  if (ROLE_TEXT[role]) return ROLE_TEXT[role];
+  if (String(role).startsWith('data')) return '额外数据分区';
+  return String(role || '分区');
+}
 
 /* 进度页里每块盘的内联日志：来自 GET /api/jobs/{id}/log 的尾部，轮询刷新。 */
 const logCache = new Map();
@@ -201,24 +210,57 @@ function efiText() {
 }
 
 /* ---- 第 2 步 ---- */
+/** 一块盘的分区布局（字节 + 百分比），进度条和脚注共用。 */
+function layoutOf(target, total) {
+  const sysBytes = fromGb(Number(target.sysGb) || 0);
+  const dataBytes = fromGb(Number(target.dataGb) || 0);
+  const extraBytes = (Array.isArray(target.extras) ? target.extras : [])
+    .map((extra) => fromGb(Number(extra.sizeGb) || 0));
+  const used = sysBytes + dataBytes + extraBytes.reduce((sum, bytes) => sum + bytes, 0);
+  const free = Math.max(0, total - used);
+  const pct = (bytes) => (total ? (bytes / total) * 100 : 0);
+  return {
+    sysBytes,
+    dataBytes,
+    extraBytes,
+    free,
+    sysPct: pct(sysBytes),
+    dataPct: pct(dataBytes),
+    extraPct: extraBytes.map(pct),
+    freePct: pct(free),
+  };
+}
+
+function extraRowsHtml(target) {
+  const extras = Array.isArray(target.extras) ? target.extras : [];
+  return extras.map((extra, index) => `<div class="szrow extra">
+        <span class="szname"><span class="lbadge" style="background:${extraColor(index)}">${extraLetter(index)}</span>额外数据分区</span>
+        <input type="number" min="${MIN_EXTRA_GB}" step="1" value="${esc(extra.sizeGb)}" data-size="extra" data-index="${index}" data-disk="${target.diskNumber}">
+        <span class="unit">GB</span>
+        <select data-fs="extra" data-index="${index}" data-disk="${target.diskNumber}" title="文件系统">
+          ${['NTFS', 'exFAT'].map((fs) => `<option${String(extra.fs || 'NTFS') === fs ? ' selected' : ''}>${fs}</option>`).join('')}
+        </select>
+        <button class="rm" data-remove="${index}" data-disk="${target.diskNumber}" title="删除这个分区">✕</button>
+      </div>`).join('');
+}
+
 function stepSizeHtml() {
   const cards = state.wizard.targets.map((target) => {
     const disk = diskOf(target.diskNumber);
     if (!disk) return '';
     const total = Number(disk.size_bytes) || GB;
-    const sysBytes = fromGb(target.sysGb);
-    const dataBytes = fromGb(target.dataGb);
-    const rest = Math.max(0, total - sysBytes - dataBytes);
+    const layout = layoutOf(target, total);
     const error = targetError(target);
-    const restGb = Math.max(0, toGb(rest));
-    const sysPct = (sysBytes / total) * 100;
-    const dataPct = (dataBytes / total) * 100;
-    const freePct = Math.max(0, 100 - sysPct - dataPct);
+    const extras = Array.isArray(target.extras) ? target.extras : [];
+    const extraSegs = layout.extraBytes.map((bytes, index) => `<span class="wseg ext" data-extra="${index}" style="width:${layout.extraPct[index].toFixed(2)}%;background:${extraColor(index)}"><span>${extraLetter(index)} ${Math.round(Number(extras[index].sizeGb) || 0)} GB</span></span>`).join('');
+    const addButton = extras.length < MAX_EXTRAS
+      ? `<button class="addpart" data-add="${target.diskNumber}">➕ 添加数据分区</button>`
+      : '<div class="szsub">已添加额外分区（最多 1 个）</div>';
     return `<div class="tgt" data-disk="${target.diskNumber}">
       <div class="tgt-h">
         <span class="tn">磁盘 ${target.diskNumber}</span>
         <span class="tm">${esc(disk.model || '')} · ${esc(disk.partition_style || '')}</span>
-        <span class="trest">总容量 <b>${esc(fmtSize(total))}</b> · 剩余 <b class="${error ? 'warn' : ''}">${esc(rest > 0 ? fmtSize(rest) : '不足')}</b></span>
+        <span class="trest">总容量 <b>${esc(fmtSize(total))}</b> · 剩余 <b class="${error ? 'warn' : ''}">${esc(layout.free > 0 ? fmtSize(layout.free) : '不足')}</b></span>
       </div>
       <div class="szrow">
         <span class="szname"><span class="lbadge" style="background:${fsColor('NTFS')}">C</span>系统分区（Windows）</span>
@@ -230,16 +272,19 @@ function stepSizeHtml() {
         <span class="szname"><span class="lbadge" style="background:${fsColor('NTFS')}">D</span>数据分区</span>
         <input type="number" min="${MIN_DATA_GB}" step="1" value="${esc(target.dataGb)}" data-size="data" data-disk="${target.diskNumber}">
         <span class="unit">GB</span>
-        <span class="szsub">${esc(state.settings && state.settings.defaultFs ? state.settings.defaultFs : 'NTFS')} · 剩余空间都给它</span>
+        <span class="szsub">${esc(state.settings && state.settings.defaultFs ? state.settings.defaultFs : 'NTFS')} · 建完即可用</span>
       </div>
+      ${extraRowsHtml(target)}
+      ${addButton}
       <div class="wzbar" data-disk="${target.diskNumber}" tabindex="0" title="拖动分隔条调整系统分区大小">
-        <span class="wseg sys" style="width:${sysPct.toFixed(2)}%"><span>系统 ${esc(target.sysGb)} GB</span></span>
-        <span class="wseg dat" style="width:${dataPct.toFixed(2)}%"><span>数据 ${esc(target.dataGb)} GB</span></span>
-        <span class="wseg free" style="width:${freePct.toFixed(2)}%"><span>${restGb >= 1 ? `未用 ${restGb.toFixed(0)} GB` : ''}</span></span>
-        <span class="wgrip" style="left:${sysPct.toFixed(2)}%"></span>
+        <span class="wseg sys" style="width:${layout.sysPct.toFixed(2)}%"><span>系统 ${esc(target.sysGb)} GB</span></span>
+        <span class="wseg dat" style="width:${layout.dataPct.toFixed(2)}%"><span>数据 ${esc(target.dataGb)} GB</span></span>
+        ${extraSegs}
+        <span class="wseg free" style="width:${layout.freePct.toFixed(2)}%"><span>${(layout.free / GB) >= 1 ? `未分配 ${Math.round(layout.free / GB)} GB` : ''}</span></span>
+        <span class="wgrip" style="left:${layout.sysPct.toFixed(2)}%"></span>
       </div>
       <div class="tgt-f">
-        <span class="${error ? 'errmsg' : 'szsub'}" data-err="${target.diskNumber}">${esc(error || `${efiText()} + 系统 ${target.sysGb} GB + 数据 ${target.dataGb} GB`) }</span>
+        <span class="${error ? 'errmsg' : 'szsub'}" data-err="${target.diskNumber}">${esc(error || layoutText(target))}</span>
         <span class="presets" data-disk="${target.diskNumber}">
           ${[100, 120, 150, 200].map((gb) => `<button data-preset="${gb}">${gb}</button>`).join('')}
         </span>
@@ -249,9 +294,24 @@ function stepSizeHtml() {
 
   return `<div class="wz-inner">
     <h3 class="wz-h">分区与格式化</h3>
-    <p class="wz-p">每块盘会被重新分区：EFI 分区 + 系统分区 + 数据分区，GPT + UEFI。数字只影响三个分区的大小，盘上原有数据会全部丢失。</p>
+    <p class="wz-p">每块盘会被重新分区：EFI 分区 + 系统分区 + 数据分区，GPT + UEFI。需要的话可以再加一个数据分区（E）。数字只影响分区大小，剩余容量保持未分配，盘上原有数据会全部丢失。</p>
     ${cards || '<div class="empty-hint">还没有选盘</div>'}
   </div>`;
+}
+
+/** 脚注：各分区大小 + 会有多少容量保持未分配。 */
+function layoutText(target) {
+  const disk = diskOf(target.diskNumber);
+  const total = Number(disk && disk.size_bytes) || 0;
+  const extras = Array.isArray(target.extras) ? target.extras : [];
+  const parts = [
+    `系统 ${Math.round(Number(target.sysGb) || 0)} GB`,
+    `数据 ${Math.round(Number(target.dataGb) || 0)} GB`,
+  ];
+  for (const extra of extras) parts.push(`额外 ${Math.round(Number(extra.sizeGb) || 0)} GB`);
+  const spare = unallocatedBytes(total, target.sysGb, target.dataGb, extras);
+  const tail = spare >= GB / 2 ? ` · 未分配 ${fmtSize(spare)}` : '';
+  return `${efiText()} + ${parts.join(' + ')}${tail}`;
 }
 
 function bindStepSize() {
@@ -273,6 +333,55 @@ function bindStepSize() {
       const key = input.dataset.size === 'sys' ? 'sysGb' : 'dataGb';
       const min = input.dataset.size === 'sys' ? MIN_SYS_GB : MIN_DATA_GB;
       if (!(target[key] >= min)) target[key] = min;
+      renderInstall();
+    });
+  });
+
+  $$('#wzBody input[data-size="extra"]').forEach((input) => {
+    input.addEventListener('input', () => {
+      const target = targetOf(Number(input.dataset.disk));
+      if (!target) return;
+      const extra = (target.extras || [])[Number(input.dataset.index)];
+      if (!extra) return;
+      const value = Number(input.value);
+      extra.sizeGb = Number.isFinite(value) ? value : 0;
+      state.wizard.ack = false;
+      updateSizeVisual(target);
+      renderFoot();
+    });
+    input.addEventListener('blur', () => {
+      const target = targetOf(Number(input.dataset.disk));
+      if (!target) return;
+      const extra = (target.extras || [])[Number(input.dataset.index)];
+      if (extra && !(Number(extra.sizeGb) >= MIN_EXTRA_GB)) extra.sizeGb = MIN_EXTRA_GB;
+      renderInstall();
+    });
+  });
+
+  $$('#wzBody select[data-fs="extra"]').forEach((select) => {
+    select.addEventListener('change', () => {
+      const target = targetOf(Number(select.dataset.disk));
+      const extra = target && (target.extras || [])[Number(select.dataset.index)];
+      if (!extra) return;
+      extra.fs = select.value;
+      state.wizard.ack = false;
+      renderFoot();
+    });
+  });
+
+  $$('#wzBody button[data-add]').forEach((button) => {
+    button.addEventListener('click', () => {
+      if (!addExtraPartition(Number(button.dataset.add))) {
+        toast('这块盘没有空间再加一个分区了', 'err');
+        return;
+      }
+      renderInstall();
+    });
+  });
+
+  $$('#wzBody button[data-remove]').forEach((button) => {
+    button.addEventListener('click', () => {
+      removeExtraPartition(Number(button.dataset.disk), Number(button.dataset.remove));
       renderInstall();
     });
   });
@@ -299,27 +408,35 @@ function updateSizeVisual(target) {
   if (!card) return;
   const disk = diskOf(target.diskNumber);
   const total = Number(disk && disk.size_bytes) || GB;
-  const sysBytes = fromGb(target.sysGb);
-  const dataBytes = fromGb(target.dataGb);
-  const sysPct = clamp((sysBytes / total) * 100, 0, 100);
-  const dataPct = clamp((dataBytes / total) * 100, 0, 100 - sysPct);
-  const freePct = Math.max(0, 100 - sysPct - dataPct);
+  const layout = layoutOf(target, total);
+  const extras = Array.isArray(target.extras) ? target.extras : [];
+  const sysPct = clamp(layout.sysPct, 0, 100);
+  const dataPct = clamp(layout.dataPct, 0, 100 - sysPct);
+  const extraPct = layout.extraPct.map((pct) => clamp(pct, 0, 100));
+  const extrasTotal = extraPct.reduce((sum, pct) => sum + pct, 0);
+  const freePct = Math.max(0, 100 - sysPct - dataPct - extrasTotal);
   const sysSeg = card.querySelector('.wseg.sys');
   const dataSeg = card.querySelector('.wseg.dat');
   const freeSeg = card.querySelector('.wseg.free');
   const grip = card.querySelector('.wgrip');
   if (sysSeg) { sysSeg.style.width = `${sysPct}%`; sysSeg.firstElementChild.textContent = `系统 ${Math.round(target.sysGb)} GB`; }
   if (dataSeg) { dataSeg.style.width = `${dataPct}%`; dataSeg.firstElementChild.textContent = `数据 ${Math.round(target.dataGb)} GB`; }
+  card.querySelectorAll('.wseg.ext').forEach((seg, index) => {
+    if (!(index in extraPct)) return;
+    seg.style.width = `${extraPct[index]}%`;
+    seg.firstElementChild.textContent = `${extraLetter(index)} ${Math.round(Number(extras[index] && extras[index].sizeGb) || 0)} GB`;
+  });
   if (freeSeg) {
+    const spare = Math.max(0, targetRest(target));
     freeSeg.style.width = `${freePct}%`;
-    freeSeg.firstElementChild.textContent = freePct > 6 ? `未用 ${Math.max(0, targetRest(target)) / GB >= 1 ? `${Math.round(targetRest(target) / GB)} GB` : ''}` : '';
+    freeSeg.firstElementChild.textContent = spare / GB >= 1 ? `未分配 ${Math.round(spare / GB)} GB` : '';
   }
   if (grip) grip.style.left = `${sysPct}%`;
   const error = targetError(target);
   const box = card.querySelector(`[data-err="${target.diskNumber}"]`);
   if (box) {
     box.className = error ? 'errmsg' : 'szsub';
-    box.textContent = error || `${efiText()} + 系统 ${Math.round(target.sysGb)} GB + 数据 ${Math.round(target.dataGb)} GB`;
+    box.textContent = error || layoutText(target);
   }
   const rest = card.querySelector('.trest b');
   if (rest) {
@@ -540,23 +657,35 @@ function stepConfirmHtml() {
     const disk = item.disk || diskOf(plan.disk_number);
     const letters = plan.drive_letters || {};
     const targets = state.wizard.targets.find((t) => Number(t.diskNumber) === Number(plan.disk_number));
-    // 分区大小以执行计划里的真实值为准（界面输入只是入参，后端会再叠一层默认值）
+    // 分区行以执行计划里的 partition_plan 为准（后端解析后的真实大小 + 盘符）；
+    // 只有老后端没有这个字段时才退回按配置估算。
+    const planned = Array.isArray(plan.partition_plan) ? plan.partition_plan : [];
     const info = (item.spec && item.spec.config_payload && item.spec.config_payload.partition_info) || {};
     const efiMb = Number(info.efi_size_mb) || 0;
     const cGb = Number(info.c_size_gb) || (targets ? Number(targets.sysGb) : 0);
     const dataGb = Number(info.data_size_gb) || (targets ? Number(targets.dataGb) : 0);
     const dataFs = String(info.data_fs || (state.settings && state.settings.defaultFs) || 'NTFS');
-    const letterText = Object.keys(ROLE_TEXT)
+    const partRows = planned.length
+      ? planned.map((part) => `<tr><td class="k">${esc(roleLabel(part.role))}</td><td>${esc(part.size_display || '')} · ${esc(part.file_system || '')}${part.letter ? ` · 盘符 ${esc(part.letter)}:` : ''}</td></tr>`).join('')
+      : [
+        `<tr><td class="k">EFI 分区</td><td>${efiMb > 0 ? `${Math.round(efiMb)} MB` : '配置文件默认'} · FAT32</td></tr>`,
+        `<tr><td class="k">系统分区</td><td>${cGb > 0 ? `${cGb} GB` : '配置文件默认'} · NTFS</td></tr>`,
+        `<tr><td class="k">数据分区</td><td>${dataGb > 0 ? `${dataGb} GB` : '剩余空间'} · ${esc(dataFs)}</td></tr>`,
+      ].join('');
+    const unalloc = Number(plan.unallocated_bytes) || 0;
+    const unallocRow = unalloc > 0
+      ? `<tr><td class="k">未分配</td><td>${esc(fmtSize(unalloc))}（保持为空闲空间，不建分区）</td></tr>`
+      : '';
+    const letterText = Object.keys(letters)
       .filter((role) => letters[role])
-      .map((role) => `${ROLE_TEXT[role]} ${letters[role]}:`)
+      .map((role) => `${roleLabel(role)} ${letters[role]}:`)
       .join(' / ') || '由后端分配';
     return `<div class="sum" style="margin-bottom:10px">
       <table>
         <tr><td class="k">磁盘</td><td class="v">磁盘 ${esc(plan.disk_number)} · ${esc(plan.model || '')}</td></tr>
         <tr><td class="k">容量</td><td>${esc(plan.size_display || fmtSize(disk ? disk.size_bytes : 0))}</td></tr>
-        <tr><td class="k">EFI 分区</td><td>${efiMb > 0 ? `${Math.round(efiMb)} MB` : '配置文件默认'} · FAT32</td></tr>
-        <tr><td class="k">系统分区</td><td>${cGb > 0 ? `${cGb} GB` : '配置文件默认'} · NTFS</td></tr>
-        <tr><td class="k">数据分区</td><td>${dataGb > 0 ? `${dataGb} GB` : '剩余空间'} · ${esc(dataFs)}</td></tr>
+        ${partRows}
+        ${unallocRow}
         <tr><td class="k">计划盘符</td><td>${esc(letterText)}</td></tr>
         <tr><td class="k">版本</td><td>${esc(versionText(targets))}</td></tr>
         <tr><td class="k">模式</td><td>${plan.dry_run ? '演练（不写盘）' : '<b style="color:var(--danger)">真实写盘</b>'}</td></tr>

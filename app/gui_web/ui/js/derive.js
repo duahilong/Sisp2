@@ -266,21 +266,57 @@ export function rulerTicks(totalBytes) {
   }));
 }
 
-/** 分区大小校验（与后端 _check_partition_fit 同口径，错误提示给界面用）。
+/** 额外数据分区（E）的限制：最多 1 个，最小 1 GB。 */
+export const MAX_EXTRAS = 1;
+export const MIN_EXTRA_GB = 1;
+
+/** 额外分区的段颜色（与分区地图里的数据卷同色系，但更深一点以免混淆）。 */
+export function extraColor(index) {
+  return ["#1F8A70", "#3E7CB1", "#9C6644"][Number(index) % 3];
+}
+
+/** 额外数据分区的角色/徽标：索引 0 是 E，1 是 F……（C=系统、D=第一个数据分区） */
+export function extraLetter(index) {
+  return String.fromCharCode("E".charCodeAt(0) + Number(index));
+}
+
+/** 分区大小校验（与后端 plan_partitions/check_layout 同口径，错误提示给界面用）。
  *
  * ``efiMb`` 是 EFI 分区大小：它来自配置文件（``partition_info.efi_size_mb``，
  * 常见 100/300 MB），界面拿不到，所以按 100 MB 估一个下限；真实的
  * EFI 大小在第 4 步的执行计划里能读到，超了后端也会直接把阻断项写回来。
+ *
+ * ``extras`` 是额外数据分区数组（``[{sizeGb}]``），每一项都必须显式给大小——
+ * 只有最后一个有大小，剩下的是“未分配”，界面会单独提示。
  */
-export function checkSizes(totalBytes, sysGb, dataGb, efiMb = 100) {
+export function checkLayout(totalBytes, sysGb, dataGb, extras = [], efiMb = 100) {
   const total = Number(totalBytes) || 0;
   const sys = Number(sysGb) || 0;
   const data = Number(dataGb) || 0;
   const efi = Math.max(0, Number(efiMb) || 0);
   if (!(sys > 0) || !(data > 0)) return '两个分区都要填大小';
   if (sys < MIN_SYS_GB) return `系统分区至少 ${MIN_SYS_GB} GB`;
-  if (data < MIN_DATA_GB) return `数据分区至少 ${MIN_DATA_GB} GB`;
-  const need = Math.round(efi * MB) + fromGb(sys) + fromGb(data) + MB;
+  if (data < MIN_DATA_GB) return `第一个数据分区至少 ${MIN_DATA_GB} GB`;
+  let need = Math.round(efi * MB) + fromGb(sys) + fromGb(data) + MB;
+  for (const extra of extras || []) {
+    const gb = Number((extra && extra.sizeGb) || 0);
+    if (!(gb > 0)) return '额外分区要填大小';
+    if (gb < MIN_EXTRA_GB) return `额外分区至少 ${MIN_EXTRA_GB} GB`;
+    need += fromGb(gb);
+  }
   if (need > total) return `超过磁盘容量 ${fmtSize(total)}`;
   return '';
+}
+
+/** 兼容老调用方：没有额外分区时就是原来的两分区校验。 */
+export function checkSizes(totalBytes, sysGb, dataGb, efiMb = 100) {
+  return checkLayout(totalBytes, sysGb, dataGb, [], efiMb);
+}
+
+/** 按计划建完分区后剩下的未分配字节数（0 表示正好用完）。 */
+export function unallocatedBytes(totalBytes, sysGb, dataGb, extras = [], efiMb = 100) {
+  const total = Number(totalBytes) || 0;
+  let used = Math.round((Number(efiMb) || 0) * MB) + fromGb(Number(sysGb) || 0) + fromGb(Number(dataGb) || 0) + MB;
+  for (const extra of extras || []) used += fromGb(Number((extra && extra.sizeGb) || 0));
+  return Math.max(0, total - used);
 }

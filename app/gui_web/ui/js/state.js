@@ -6,7 +6,10 @@
  * 约定：**只有 views 里的 render*() 读 state，事件处理只改 state 然后 notify()**。
  */
 
-import { clamp, freeBytes, isSelectable, checkSizes, RESERVE_GB } from './derive.js';
+import {
+  clamp, freeBytes, isSelectable, checkLayout,
+  MIN_DATA_GB, MIN_EXTRA_GB, MAX_EXTRAS, RESERVE_GB, toGb,
+} from './derive.js';
 
 export const STEP_LABELS = {
   efi: '清盘并重建分区表',
@@ -202,6 +205,7 @@ export function addTarget(diskNumber) {
     diskNumber: Number(diskNumber),
     sysGb: sizes.sysGb,
     dataGb: sizes.dataGb,
+    extras: [],        // 额外数据分区（E）：[{sizeGb, fs}]，最多 MAX_EXTRAS 个
     imagePath: '',
     imageIndex: null,
     imageLabel: '',
@@ -218,7 +222,36 @@ export function removeTarget(diskNumber) {
 export function targetError(target) {
   const disk = diskOf(target.diskNumber);
   if (!disk) return '硬盘已不在列表里';
-  return checkSizes(disk.size_bytes, target.sysGb, target.dataGb);
+  return checkLayout(disk.size_bytes, target.sysGb, target.dataGb, target.extras || []);
+}
+
+/** 加一个额外数据分区（E）。空间不够时先从 D 里挪一块，挪不动就返回 false。 */
+export function addExtraPartition(diskNumber) {
+  const target = targetOf(diskNumber);
+  const disk = diskOf(diskNumber);
+  if (!target || !disk) return false;
+  if (!Array.isArray(target.extras)) target.extras = [];
+  if (target.extras.length >= MAX_EXTRAS) return false;
+
+  const totalGb = toGb(disk.size_bytes);
+  let size = Math.floor(totalGb - Number(target.sysGb || 0) - Number(target.dataGb || 0) - RESERVE_GB);
+  if (size < MIN_EXTRA_GB) {
+    // 盘上没剩多少空间：从第一个数据分区里挪，但不让它低于下限。
+    const movable = Math.floor(Number(target.dataGb || 0) - MIN_DATA_GB);
+    if (movable < MIN_EXTRA_GB) return false;
+    size = Math.min(movable, Math.max(MIN_EXTRA_GB, 20));
+    target.dataGb = Math.max(MIN_DATA_GB, Number(target.dataGb || 0) - size);
+  }
+  target.extras.push({ sizeGb: Math.max(MIN_EXTRA_GB, size), fs: 'NTFS' });
+  state.wizard.ack = false;
+  return true;
+}
+
+export function removeExtraPartition(diskNumber, index) {
+  const target = targetOf(diskNumber);
+  if (!target || !Array.isArray(target.extras)) return;
+  target.extras.splice(Number(index), 1);
+  state.wizard.ack = false;
 }
 
 export function targetsValid() {
@@ -229,11 +262,22 @@ export function targetsValid() {
 /** 每块盘的通知 payload：POST /api/prepare 的 selection 形态。 */
 export function selectionPayload() {
   const selection = {};
+  const dataFs = String((state.settings && state.settings.defaultFs) || 'NTFS');
   for (const target of state.wizard.targets) {
-    const entry = {
-      c_size: Number(target.sysGb),
-      data_size: Number(target.dataGb),
-    };
+    const entry = { c_size: Number(target.sysGb) };
+    const extras = Array.isArray(target.extras) ? target.extras : [];
+    if (extras.length) {
+      // 有额外分区时必须给出显式列表：第一个是 D，其余是 E/F……
+      entry.data_partitions = [
+        { size_gb: Number(target.dataGb), file_system: dataFs },
+        ...extras.map((extra) => ({
+          size_gb: Number(extra.sizeGb),
+          file_system: String(extra.fs || 'NTFS'),
+        })),
+      ];
+    } else {
+      entry.data_size = Number(target.dataGb);
+    }
     if (target.imagePath) entry.win_gho = target.imagePath;
     if (target.imageIndex) entry.image_index = Number(target.imageIndex);
     selection[target.diskNumber] = entry;
@@ -245,7 +289,12 @@ export function selectionPayload() {
 export function targetRest(target) {
   const disk = diskOf(target.diskNumber);
   const total = Number(disk && disk.size_bytes) || 0;
-  const rest = total - (Number(target.sysGb) || 0) * (1024 ** 3) - (Number(target.dataGb) || 0) * (1024 ** 3);
+  const extras = (Array.isArray(target.extras) ? target.extras : [])
+    .reduce((sum, extra) => sum + (Number(extra.sizeGb) || 0), 0);
+  const rest = total
+    - (Number(target.sysGb) || 0) * (1024 ** 3)
+    - (Number(target.dataGb) || 0) * (1024 ** 3)
+    - extras * (1024 ** 3);
   return rest;
 }
 
