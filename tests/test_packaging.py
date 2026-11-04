@@ -108,11 +108,41 @@ def test_make_icon_produces_valid_ico(tmp_path: Path) -> None:
     assert (bi_width, bi_height) == (256, 512)  # 高度含 AND 掩码
 
 
-def test_gui_exe_requests_admin() -> None:
-    """磁盘工具双击就应提权：清单里必须有 ``uac_admin=True``。
+def test_gui_exe_does_not_require_admin() -> None:
+    """窗口 exe 的清单必须是 ``asInvoker``，不能是 ``requireAdministrator``。
 
-    否则普通权限下能打开界面、预检报「需要管理员」，用户却没有任何入口提权。
+    WebView2 的运行时不支持跑在高完整性（High IL）进程里：它需要把
+    ``msedgewebview2.exe`` 降到 Medium IL 启动，而这条降权路径要借
+    ``explorer.exe`` 代劳（微软 “Develop secure WebView2 apps” 也明确要求把
+    WebView2 宿主放在普通权限进程里）。以前写 ``uac_admin=True``，在部分机器上直接
+    崩成 ``msedgewebview2 has stopped working`` + ``Error launching CrashSender.exe``。
+
+    需要管理员的写盘改由界面用 UAC 拉起的后端子进程（``--backend``）承担。
     """
     text = (PACKAGING / "Sisp2.spec").read_text(encoding="utf-8")
-    gui_block = text[text.index('name="Sisp2"') : text.index('name="Sisp2"') + 400]
-    assert "uac_admin=True" in gui_block
+    gui_block = text[text.index('name="Sisp2"') : text.index('name="Sisp2"') + 600]
+    assert "uac_admin=False" in gui_block
+    assert "uac_admin=True" not in gui_block
+
+
+def test_onefile_unpack_dir_does_not_use_temp() -> None:
+    """onefile 的解包目录必须固定到 ``%LOCALAPPDATA%``，不要用默认的 ``%TEMP%``。
+
+    ``%TEMP%`` 被组策略/沙箱/杀软管住的机器上，PyInstaller bootloader 会直接弹
+    ``Could not create temporary directory!``（``CreateDirectoryW`` 连试 5 次失败），
+    用户看到的就是“双击没反应 + 一个错误弹窗”。
+
+    三条硬约束（都由 bootloader 的 ``_pyi_create_runtime_tmpdir()`` 决定）：
+
+    1. 必须能用 ``ExpandEnvironmentStringsW`` 展开（所以写 ``%LOCALAPPDATA%`` 这类变量）；
+    2. 不能写相对路径——``_wfullpath()`` 按**当前工作目录**解析，双击与快捷方式结果不同；
+    3. 不能指到 exe 同目录——exe 装在 ``C:/Program Files`` 之类只读位置时就解不开了。
+    """
+    text = (PACKAGING / "Sisp2.spec").read_text(encoding="utf-8")
+    match = re.search(r'^    runtime_tmpdir=(.+?),?$', text, re.MULTILINE)
+    assert match, "spec 里找不到 runtime_tmpdir"
+    value = match.group(1).strip()
+    assert value != "None", "runtime_tmpdir 不能是 None（会退回到 %TEMP%）"
+    assert "%LOCALAPPDATA%" in value
+    assert "%TEMP%" not in value and "%TMP%" not in value
+    assert not re.fullmatch(r'"[^%\\]*"', value), "runtime_tmpdir 不能是相对路径"

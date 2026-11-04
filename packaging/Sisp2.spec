@@ -88,13 +88,23 @@ gui_exe = EXE(
     gui.datas,
     [],
     name="Sisp2",
-    # 这是个会清盘的磁盘工具：启动时就要 UAC 提权，避免“能打开但什么都写不了”。
-    uac_admin=True,
+    # 不要写 requireAdministrator：WebView2 跑不了 High IL 进程（它要把
+    # msedgewebview2.exe 降到 Medium IL，而这条降权路径要借 explorer.exe），
+    # 强行提权就会崩成 “msedgewebview2 has stopped working”。
+    # 需要管理员的写盘动作由界面通过 UAC 拉起的后端子进程（--backend）承担。
+    uac_admin=False,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    runtime_tmpdir=None,
+    # onefile 的解包目录：默认（None）会解到 %TEMP%\_MEIxxxx。%TEMP% 在部分机器上
+    # 被组策略/沙箱/杀软管着，bootloader 会直接弹 “Could not create temporary
+    # directory!”（连 CreateDirectoryW 都失败，重试 5 次就放弃）。这里固定到
+    # %LOCALAPPDATA%\Sisp\run：与 exe 位置无关、用户一定可写、不会被临时目录清理
+    # 工具随手删掉。bootloader 会用 ExpandEnvironmentStringsW 展开这个变量并自动建目录。
+    # 注意：不能写相对路径（会按“当前工作目录”解析），也不能写 exe 同目录
+    # （exe 装在 Program Files 之类只读位置时就解不开了）。
+    runtime_tmpdir="%LOCALAPPDATA%\\Sisp\\run",
     console=False,  # 无控制台窗口；诊断信息走 app.log
     disable_windowed_traceback=False,
     argv_emulation=False,
