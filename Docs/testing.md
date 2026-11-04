@@ -19,7 +19,7 @@ python -m pytest tests/ -q
 - 测试使用替身扫描器/执行器和注入依赖，不碰真实磁盘；
 - SSE 测试会在后台线程启动真实 uvicorn（随机空闲端口），因此依赖 `uvicorn`；
 - 覆盖重点：任务状态机、重复提交、取消、演练硬上限、盘符规划、设置校验与 BOM、写盘闸门、SSE 帧。
-- 当前基线：217 passed（专用 VM Windows 10 22H2 + Python 3.15.2 同口径，ruff 全绿）。其中前端相关三组：
+- 当前基线：235 passed（专用 VM Windows 10 22H2 + Python 3.15.2 同口径，ruff 全绿）。其中前端相关三组：
   `tests/test_ui_assets.py`（资源引用、薄壳、设置页字段对账、CSS 与纯函数约定）、
   `tests/test_partition_boot_image.py`（分区/引导/镜像三个模块的纯逻辑）、
   `tests/test_web_api.py` 新增的静态托管、日志尾部、分区确认、会话模式等用例。
@@ -251,6 +251,34 @@ dism /Capture-Image /ImageFile:D:\sisp-test\test2.wim /CaptureDir:D:\sisp-test\s
   “业务配置 → 界面设置 → 逐盘覆盖”从弱到强。
 - **预检 key 漂移**：新增预检项忘了加进 `workflow._CHECK_KEYS`，界面拿到的是 `check_6` 这种
   漂移 key。已补映射，并加了“每个 `CHECK_*` 名字都必须有 key”的回归测试。
+
+### P1：授权竞态、危险路径测试与提权（2026-11，exe 实测）
+
+| 用例 | 做法 | 期望 | VM 结果 |
+| --- | --- | --- | --- |
+| A1 | 真实模式 `prepare`（`test2.wim`） | `executable=true`，盘符齐全 | ✅ |
+| A2 | `submit` | 任务 `waiting_confirmation` | ✅ |
+| A3 | 重新 `POST /api/session`（模拟刷新页面） | 隐式授权被撤销 | ✅ |
+| A4 | 带确认文本 `confirm` | 被接受，不再报“不在白名单” | ✅ |
+| A5 | 等任务结束 | `ok`、100%、verify 通过 | ✅ |
+| A6 | 不带确认文本 `confirm` | `E_CONFIRM`，且不产生授权 | ✅ |
+
+`confirm()` 现在在确认文本校验通过后按任务盘号重新 `authorize_disks()`：
+刷新页面会重开会话并清空隐式授权，不补这一步的话，已排队任务确认时会被
+「不在允许写盘的白名单内（当前白名单: 空）」挡掉（fail-closed，但用户看不懂）。
+确认文本不对则不授权（A6 覆盖）。
+
+同一轮还补了 17 条危险路径测试：五道闸门逐条分支（dry-run / 白名单 / 弱身份 /
+盘消失 / 身份不一致 / 受保护 / 通过）、执行器失败分支（dism 87、bcdboot 2、
+verify 拒绝、diskpart 超时，bcdboot 失败仍释放盘符）、设置导出/导入往返与坏文件。
+
+**提权**：spec 里给 GUI exe 加了 `uac_admin=True`，双击就弹 UAC；打包后实测
+`requireAdministrator` 在 exe 里可搜到（`asInvoker` 不存在）。以前是“能打开界面、
+预检报需要管理员、却没有入口提权”。
+
+**A5 顺带暴露并修掉**：镜像路径没归一化，设置里写 `D:/x/test.wim` 时 dism 报退出码 87
+（`parameter is incorrect`）——而且发生在清盘之后。现在 `_apply_image_defaults` /
+`_merge_payload(win_gho)` 统一 `str(Path(...).expanduser())`，VM 上就是拿正斜杠路径跑通的。
 
 ### 只有打包后才暴露的问题（已修）
 

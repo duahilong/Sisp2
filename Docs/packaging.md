@@ -49,12 +49,14 @@ python packaging/build.py
 
 ## 提权
 
-程序不会自动要管理员权限：
+打包清单直接声明 `requireAdministrator`（spec 里的 `uac_admin=True`）：双击 exe 就弹 UAC。
+这是个会清盘的磁盘工具，「能打开界面但什么都写不了」比「启动时就要权限」更糟。
 
-- 判断「有没有管理员」是 `app/gui/elevation.py` 的 `IsUserAnAdmin()`；
-- 需要提权时用 `--elevate`：`Sisp2.exe --elevate`，
-  内部走 `ShellExecuteW(..., "runas", ...)`，冻结后重启的是 exe 自身；
-- 不提权也能跑：预检会把「管理员权限检查」标成失败，写盘会失败，dry-run 照常。
+- 判断「有没有管理员」是 `app/gui/elevation.py` 的 `IsUserAnAdmin()`，预检仍会复核一次；
+- `--elevate` 还留着（从终端启动、或想显式重启时用），走 `ShellExecuteW(..., "runas", ...)`；
+- 拒绝 UAC 时 Windows 直接不启动进程，不会出现半残界面；
+- 产物验证方法：`[Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes('Sisp2.exe'))`
+  里能搜到 `requireAdministrator`（VM 上实测通过）。
 
 ## 运行方式
 
