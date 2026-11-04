@@ -389,6 +389,42 @@ R1 的日志里能直接看到两段式：先 `clean` + `convert gpt` 的 diskpa
 `verify` 也随之从“分区数 ≥ 计划”收紧成“分区数 == 计划 且 没有 Reserved/MSR”：
 上表 A5–A6 那轮记录的“5 个分区（MSR + ESP + C + D + E）”是**旧行为**，现在是 4 个。
 
+### 永远 auto + 删完 MSR 立刻复查（2026-11，exe 实测）
+
+按“最后一个数据分区永远不带 `size=`、删 MSR 后立刻复查”重做的流程，在 VM 上用
+当轮打包的 exe（`10a76802…`）跑了两轮真实整盘安装（200 GB 动态 VHD → Disk 2）：
+
+| 轮次 | payload | 结果 |
+|---|---|---|
+| A | `efi 100 MB + C 120 GB + D auto` | **六步全绿**；`verify` 报 `GPT、3 个分区：#1=100.00 MB、#2(F:)=120.00 GB、#3(G:)=79.90 GB`；`MSR=0`、`LargestFree=0` |
+| B | `C 120 GB + D 30 GB + E auto` | **六步全绿**；`verify` 报 `GPT、4 个分区…#4(J:)=49.90 GB`；`MSR=0`、`LargestFree=0` |
+
+A 轮的执行日志按顺序出现了三段脚本，可以直接对着看：
+
+```
+[23:32:20]     select disk 2 / clean / convert gpt          ← 1/3 清盘
+[23:32:21] MSR：发现分区 #1（第 1 次查询）
+[23:32:21] --- diskpart 脚本（删除 MSR）---                   ← 2/3 删 MSR（独立一段）
+[23:32:21]     select disk 2 / select partition 1 / delete partition override
+[23:32:23] 复查 MSR：盘上没有 MSR 分区（已查 3 次）
+[23:32:23] MSR 分区已删除，复查确认不存在
+[23:32:23]     select disk 2 / create partition efi size=100
+              create partition primary size=122880
+              create partition primary                       ← 3/3 最后一项不带 size=
+```
+
+`Get-Partition` 看到的落盘：`System 100 MB @1 MB` / `Basic 122880 MB(F:)` /
+`Basic 81818 MB(G:)`，`NumberOfPartitions=3`、`LargestFree=0`。
+两轮跑完 detach VHD、删 `test3.wim`/`src3`，Disk 0 回到 RAW。
+
+界面侧（dry-run 实例 8903 + `tools/ui_smoke.mjs`）：`ok=true`，
+第 2 步在“加 E”之后 `E 的输入框只读`、`D 可编辑`、进度条 3 段（没有未分配）、
+脚注写成 `… + 数据(E) 剩余（约 178 GB）`；第 4 步不再有“未分配”行。
+
+同一轮补的 12 条测试钉住了这些约定：`check_layout` 的 3 MB 余量
+（`size-2MB` 通过 / `size-1MB` 拒绝）、`_layout_verdict` 的四种失败分支、
+删 MSR 失败 / 复查仍有 MSR / 建完复核失败都在 `dism` 之前中止。
+
 ## 3.1 VM 实测记录（2026-11-03，界面设置接管业务配置之后）
 
 测试机：`DESKTOP-FODEEKK`，Windows 10 22H2（19045），Python 3.15.2，node v26.13.0。

@@ -42,7 +42,7 @@ Sisp2 有两类配置：**界面设置**是日常入口（GUI 全部参数都在
 |---|---|
 | `partition_info` | 可省略；存在时须为对象。`efi_size_mb`、`c_size_gb` 若提供须为正数。这几项在设置页都有对应项（`efiDefaultMb`/`sysDefaultGb`/`dataDefaultGb`/`defaultFs`）。 |
 | `partition_info.data_size_gb` | 可空、`""`、`"auto"` 或数字；结构校验允许非负数（错误文案称正数），实际 runner 将其转整数，0/缺省按剩余空间处理。**`data_partitions` 存在时被它取代。** |
-| `partition_info.data_partitions` | 可选数组，1–2 项（最多再加一个数据分区，即 E）。每项给 `size_gb`（正整数，也接受 `size_mb`）与 `file_system`（`NTFS`/`exFAT`，不支持 FAT32）。**只有最后一项可以是 `auto`/缺省**（表示吃掉剩余空间，diskpart 不写 `size=`），中间的项 `auto` 会被拒绝。结构错误在预检阶段就阻断，不会等到清盘。 |
+| `partition_info.data_partitions` | 可选数组，1–2 项（最多再加一个数据分区，即 E）。每项给 `size_gb`（正整数，也接受 `size_mb`）与 `file_system`（`NTFS`/`exFAT`，不支持 FAT32）。**只有最后一项可以是 `auto`/缺省**（表示吃掉剩余空间，diskpart 不写 `size=`），中间的项 `auto` 会被拒绝。界面生成的配置**总是**把最后一项写成 `auto`（最后那个分区的输入框是只读的）；手写配置可以给显式值，但那样就要自己留够 3 MB 的 GPT 余量。结构错误在预检阶段就阻断，不会等到清盘。 |
 | `image_info` | 可省略；存在时须为对象。`image_path` 可省略/空值，若提供须为字符串；`image_index` 未由此结构校验器验证。 |
 | `excluded_disk_names` | 可省略；若提供须为数组。型号包含名单文字（不区分大小写）时保护该盘：安装向导里置灰、整盘安装被拒、**分区与修复引导同样被拒**。设置页的 `excludedDiskNames` 与它是并集关系（两处都生效）。 |
 | 其他键 | 结构校验允许并透传；具体是否被业务读取须逐项核实。 |

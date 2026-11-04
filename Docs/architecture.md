@@ -21,23 +21,41 @@
 
 第 2 步的容量条有两条可拖分隔条：**C|D** 改系统分区（变化由 D 吸收，E 不动），**D|E** 只调整两个数据分区的比例（D+E 总量不变）。两者都做了下限钳制（C ≥ 60 GB、D ≥ 20 GB、E ≥ 1 GB）并向下取整，所以拖动**永远不会超过硬盘真实容量**；加 E 时默认与 D 平分剩余容量。E 的文件系统不在界面上单独选择——它与 D 一致（`dataFs()`：跟随设置 `defaultFs`，非 NTFS/exFAT 一律回落 NTFS）。
 4. `submit()` 默认创建等待确认的任务；`confirm()` 对无阻断的任务开始调度。确认通过（勾选 + 盘号/型号）后会按任务盘号重新补齐隐式白名单——刷新页面会重开会话并撤销隐式授权，不补就会“确认时报白名单为空”。
-5. JobManager 调用服务执行任务。真实服务在执行前检查 dry-run 策略、白名单、身份复核及执行器；执行器按分区、镜像、引导、校验步骤调用系统命令，并在任务结束后释放 EFI 盘符（避免隐藏卷盘符在下次清盘后残留成幽灵盘符）。**`verify` 判定“装完能不能开机”，不只数分区**：分区表是 GPT、分区数**等于**计划分区数（三分区布局是 3，加 E 是 4）、盘上没有 Reserved/MSR 分区、EFI 分区里真的有 `EFI\Microsoft\Boot\bootmgfw.efi`（或 `EFI\BOOT\BOOTX64.EFI`）、系统分区里真的有 `Windows\System32\config\SYSTEM`（或 `ntoskrnl.exe`）；缺一项就判失败，并把证据写进步骤 `details`。
+5. JobManager 调用服务执行任务。真实服务在执行前检查 dry-run 策略、白名单、身份复核及执行器；执行器按分区、镜像、引导、校验步骤调用系统命令，并在任务结束后释放 EFI 盘符（避免隐藏卷盘符在下次清盘后残留成幽灵盘符）。**`verify` 判定“装完能不能开机”，不只数分区**：分区表是 GPT、分区数**等于**计划分区数（三分区布局是 3，加 E 是 4）、盘上没有 Reserved/MSR 分区、盘上没有大块未分配（最后那个分区吃满）、EFI 分区里真的有 `EFI\Microsoft\Boot\bootmgfw.efi`（或 `EFI\BOOT\BOOTX64.EFI`）、系统分区里真的有 `Windows\System32\config\SYSTEM`（或 `ntoskrnl.exe`）；缺一项就判失败，并把证据写进步骤 `details`。
 6. 运行结果由任务状态和事件返回；取消为协作式，已运行的系统命令不会因此立即中断。
 
 ## 分区时的 MSR 处理
 
-`convert gpt` 会**自动**在盘首建一个约 16 MB 的 MSR（Microsoft Reserved）分区——这不是我们脚本里的命令，是 Windows 的行为（Windows 10 19045 / diskpart 10.0.19041 实测：`p1 Reserved 15.98 MB`，GPT 类型 `e3c9e316-0b5c-4db8-817d-f92df00215ae`）。产品要求的最终布局是 **EFI + C + D(+E)**，没有 MSR，所以执行器把分区拆成两段 diskpart：
+`convert gpt` 会**自动**在盘首建一个约 16 MB 的 MSR（Microsoft Reserved）分区——这不是我们脚本里的命令，是 Windows 的行为（Windows 10 19045 / diskpart 10.0.19041 实测：`p1 Reserved 15.98 MB`，GPT 类型 `e3c9e316-0b5c-4db8-817d-f92df00215ae`）。产品要求的最终布局是 **EFI + C + D(+E)**，没有 MSR，所以执行器把分区拆成**三段 diskpart + 两次复核**：
 
-1. `select disk N` → `clean` → `convert gpt` → `exit`（这一段之后 MSR 就存在了，`tracker["diskpart_ran"]` 在这里置位）；
-2. PowerShell 按 GPT 类型查出那个 MSR 的分区号（`Get-Partition -DiskNumber N | Where GptType -like '*e3c9e316-…*'`），交给 `partitions.strip_msr_lines()` 生成 `select partition k` + `delete partition override`，再接上 `diskpart_lines(parts)`。
+| 阶段 | 做什么 | 失败时 |
+| --- | --- | --- |
+| ① 清盘 | `select disk N` → `clean` → `convert gpt` → `exit`（MSR 就是这一步自动出现的，`tracker["diskpart_ran"]` 在这里置位） | 立即失败，不碰后面的步骤 |
+| ② 删 MSR | PowerShell 按 GPT 类型查分区号 → `select disk N` / `select partition k` / `delete partition override` / `exit`，**单独一段脚本** | 退出码非 0 → 立即失败 |
+| ②' 复查 | 再查一次：还查得到 MSR → 中止，**绝不继续建分区** | 报“MSR 分区删除失败：删除后仍然存在（分区 #k）” |
+| ③ 建分区 | `select disk N` + `diskpart_lines(parts)`：EFI → C → D(+E)，最后一项不带 `size=` | 退出码非 0 → 立即失败 |
+| ③' 复核 | 查分区表：分区数 == 计划、没有 Reserved、EFI 在盘首且大小对、盘上没有大块空闲 | 在跑 `dism`（最长 3 小时）**之前**就报错 |
 
-为什么不在首段里直接写 `select partition 1` + `delete partition override`：万一某台机器没自动建 MSR，`select partition 1` 会报错，**整条 diskpart 脚本会中止**，装机直接失败。所以只对“查到的 MSR”动手：
+为什么不在清盘脚本里直接写 `select partition 1` + `delete partition override`：万一某台机器没自动建 MSR，`select partition 1` 会报错，**整条 diskpart 脚本会中止**，装机直接失败。所以只对“查到的 MSR”动手：
 
-- 查到 → 删掉再建分区（删完后盘首空闲与后面合并，实测 EFI 依然落在 `offset=1 MB`，不会留 16 MB 空洞）；
+- 查到 → 删掉并复查（删完后盘首空闲与后面合并，实测 EFI 依然落在 `offset=1 MB`，不会留 16 MB 空洞）；
 - 查不到 → 不删任何东西，直接建分区；
-- **查询本身失败（PowerShell 报错/超时）→ 中止任务并报错**，绝不猜一个分区号去删（猜错就是删掉真分区）。
+- **查询本身失败（PowerShell 报错/超时）→ 中止任务并报错**，绝不猜一个分区号去删（猜错就是删掉真分区）；
+- 查询带重试（3 次 × 300 ms）：`convert gpt` 刚结束时慢盘/RAID/USB 桥接上的分区枚举可能还没跟上，一次查不到就跳过删除会把 MSR 留在盘上。
 
-代价：盘上没有 MSR 后，动态磁盘转换、部分内核内存转储、某些 BitLocker 配置会受限——这是产品明确接受的取舍。演练预览（`build_diskpart_preview()`）会把两段脚本都展示出来，MSR 那两行以 `REM` 形式出现（预览时不知道真实分区号）；第 4 步确认页也会多一行“MSR 分区 · 约 16 MB · 由 `convert gpt` 自动生成，执行时删除”。
+为什么不靠 diskpart 的退出码判定成功：不同 build 对“某条命令失败”的退出码行为并不一致（19041 实测返回非 0，但别的版本有返回 0 的记录），所以第二段、第三段之后都各自查一次真实分区表。
+
+代价：盘上没有 MSR 后，动态磁盘转换、部分内核内存转储、某些 BitLocker 配置会受限——这是产品明确接受的取舍。演练预览（`build_diskpart_preview()`）把三段都展示出来，MSR 那两行以 `REM` 形式出现（预览时不知道真实分区号）；第 4 步确认页也会多一行“MSR 分区 · 约 16 MB · 由 `convert gpt` 自动生成，执行时删除”。
+
+## 最后一个数据分区永远吃满
+
+**界面永远把最后一个数据分区发成 `"auto"`**（`selectionPayload()`），diskpart 收到的是不带 `size=` 的 `create partition primary`，尺寸由它自己算。所以：
+
+- 界面上 D / E 的数字只是**预估**（`fitLayout()` 算出来的，用于显示和拖动），最后那个分区的输入框是只读的（`.szrow input[readonly]`）；
+- 没有 E 时，D 就是那个 auto 分区 —— 也就是说“把 D 调小、留一块未分配”这个能力已经取消，盘总是被填满；
+- 有 E 时，D 是显式分区（可编辑），E 是 auto；
+- 容量校验（`partitions.check_layout()`）只算**显式项**：EFI + C +（有 E 时的 D）。显式项留 3 MB 余量（`LAYOUT_SLACK_MB`：GPT 盘首 1 MB + 盘尾 1 MB + 1 MB 冗余），实测 40 GB 盘显式合计 = 容量 − 2 MB 时 diskpart 成功、= 容量 − 1 MB 时最后一个 `create` 失败（`exit=-2147024809`）；
+- 界面上不再有“未分配”这个概念：第 2 步进度条没有灰色段、第 4 步计划表没有“未分配”行，最后那个分区在计划表里显示成“剩余空间（约 X GB）”。
 
 ## 演练与真实模式的判定
 
