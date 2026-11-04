@@ -19,7 +19,7 @@ python -m pytest tests/ -q
 - 测试使用替身扫描器/执行器和注入依赖，不碰真实磁盘；
 - SSE 测试会在后台线程启动真实 uvicorn（随机空闲端口），因此依赖 `uvicorn`；
 - 覆盖重点：任务状态机、重复提交、取消、演练硬上限、盘符规划、设置校验与 BOM、写盘闸门、SSE 帧。
-- 当前基线：194 passed（专用 VM Windows 10 22H2 + Python 3.15.2 同口径）。其中前端相关三组：
+- 当前基线：217 passed（专用 VM Windows 10 22H2 + Python 3.15.2 同口径，ruff 全绿）。其中前端相关三组：
   `tests/test_ui_assets.py`（资源引用、薄壳、设置页字段对账、CSS 与纯函数约定）、
   `tests/test_partition_boot_image.py`（分区/引导/镜像三个模块的纯逻辑）、
   `tests/test_web_api.py` 新增的静态托管、日志尾部、分区确认、会话模式等用例。
@@ -115,7 +115,13 @@ python -m app.gui_web.main -j D:\sisp-test\config.json --serve --port 8765
 命令行入口已移除：真实执行的授权来自“界面勾选 + 输入确认文本”，
 护栏来自设置里的 `typeToConfirm` / `protectSystemDisk`。（历史记录里的 `--test-mode` 只允许
 虚拟盘，该开关随命令行入口一起移除。）
-预期六步全部成功：EFI / Windows / Data 分区 → dism 应用 → bcdboot → verify。
+预期结果（取决于测试镜像）：
+
+- 镜像里**真的有 Windows 目录**（含 `Windows\Boot` 与 `Windows\System32\config\SYSTEM`）：
+  六步全绿，verify 会报到 `引导 bootmgfw.efi；系统 SYSTEM`；
+- 镜像**只有引导文件**（为了跑通 `bcdboot` 而用 `C:\Windows\Boot` 捕的合成镜像）：
+  前五步成功，**verify 判失败**（“系统分区里没有 Windows 系统文件”）。这是设计如此：
+  装完能不能开机，以分区里的实际文件为准，不以命令退出码为准。
 
 GUI 真实路径（需要管理员）：
 
@@ -145,7 +151,7 @@ diskpart /s $env:TEMP\detach.txt
 ## 已通过的真实 VM 验证（2026-11）
 
 - Windows 10 22H2 + Python 3.15.2：`pytest tests/ -q` → 106 passed；
-- 真实执行在 8GB VHDX 上六步全部成功，`bcdboot` 写入 EFI，`verify` 识别 GPT/分区；
+- 真实执行在 8GB VHDX 上六步全部成功，`bcdboot` 写入 EFI，`verify` 识别 GPT/分区（当时 verify 只查分区表与分区数；2026-11 后 verify 还要求 EFI 引导文件与系统分区文件，这类只含引导文件的合成镜像会在 verify 判失败）；
 - 失败路径：错误镜像索引（dism 87）→ image 失败、boot/verify 跳过、退出码 3；缺镜像 → 预检阻断、退出码 2；容量不足 → 计划阶段阻断、退出码 2；受保护系统盘 → 退出码 4；
 - 安全闸门：真实身份通过；错误 UniqueId / 白名单外 / 服务 dry-run / 弱身份全部 `PermissionError`；受保护盘的计划会带阻断项，`confirm` 拒绝执行；
 - `typeToConfirm` 走 REST 实测：`/api/confirm` 不带文本、空白文本均返回 `E_CONFIRM`；盘号不匹配（`99`）与型号不匹配（`GeIL`）也返回 `E_CONFIRM`；`" disk 1 "` 这种带空格写法被接受并真的跑完六步；
@@ -208,6 +214,43 @@ diskpart /s $env:TEMP\detach.txt
   属预期）；`/api/boot/repair` 对没有 Windows 目录的盘返回明确原因，且不改动任何分区。
 
 > v1.0.1 打包产物的完整实测记录（用例、证据、限制）见[测试报告](test-report-1.0.1.md)。
+
+### 镜像闸门与 verify 判据（2026-11，源码 + exe 实测）
+
+两个改动针对同一后果：**盘已经清空，才发现镜像不能用 / 装不进去**。
+
+| 用例 | 做法 | 期望 | VM 结果 |
+| --- | --- | --- | --- |
+| G1 | 设置 `sysWim` 指向一个 `.iso` | 会话预检 `image_type` 失败 + 阻断项 | ✅ |
+| G2 | 同一 ISO 下走 `prepare` | `executable=false`，`checks.image` 失败，提示先取 `install.wim` | ✅ |
+| G3 | `test.wim` + `imageDefaultIndex=99` | 计划阻断：“镜像索引 99 不存在（可用索引：[1]）” | ✅ |
+| G4 | `test.wim` + 索引 1 | `executable=true`，`checks.image` 通过 | ✅ |
+| N1 | 只含引导文件的 `test.wim` + `sysBoot=C:\Windows` 真实安装 | 前五步成功，**verify 失败**：“系统分区里没有 Windows 系统文件（镜像没应用完整）” → 任务 failed | ✅ |
+| P1 | `test2.wim`（含 `Windows\Boot` + `System32\config\SYSTEM`）真实安装 | 六步全绿、100%，verify 报 `引导 bootmgfw.efi；系统 SYSTEM`，details 带两个真实路径 | ✅ |
+
+G3/G4 走的是真实 `dism /Get-WimInfo`（带 mtime 缓存），不是替身；N1/P1 都打在 2 TB 测试盘 Disk 1 上，
+Disk 0 全程只读。N1 是本轮最关键的证据：**旧实现会把它判成“成功”**（GPT + 4 个分区都对），
+新实现能识别出“引导写了但系统没装上”。
+
+测试夹具（VM 上现做，可复现）：
+
+```powershell
+# 负面用例：只有引导文件，没有 Windows 目录
+dism /Capture-Image /ImageFile:D:\sisp-test\test.wim /CaptureDir:D:\sisp-test\src /Name:SispTest /Compress:fast
+# 正面用例：引导文件 + Windows\System32\config\SYSTEM 等标志文件
+dism /Capture-Image /ImageFile:D:\sisp-test\test2.wim /CaptureDir:D:\sisp-test\src2 /Name:SispTest2 /Compress:fast
+```
+
+`sysBoot` 用 `C:\Windows`（真实的 Windows 目录）作为离线引导源，绕开合成镜像里
+`BCD-Template` / `bootstr.dll` 不全的问题；这条路径本身就是“离线引导文件”这个功能项。
+
+### 本轮顺带修的两个问题
+
+- **优先级顺序**：`prepare()` 先合并逐盘覆盖、再叠设置默认值，导致（a）设置页改了 `sysWim`
+  后第 4 步仍按旧镜像判定；（b）向导第 2 步填的 C/D 大小被设置默认值改回。已改成
+  “业务配置 → 界面设置 → 逐盘覆盖”从弱到强。
+- **预检 key 漂移**：新增预检项忘了加进 `workflow._CHECK_KEYS`，界面拿到的是 `check_6` 这种
+  漂移 key。已补映射，并加了“每个 `CHECK_*` 名字都必须有 key”的回归测试。
 
 ### 只有打包后才暴露的问题（已修）
 

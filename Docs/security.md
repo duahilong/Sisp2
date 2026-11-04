@@ -8,6 +8,8 @@ Sisp2 的真实写盘会清空目标盘。以下描述的是当前代码行为�
 
 确认环节有两道人工闸门，都由设置控制：`confirmBeforeStart` 决定界面是否要求先勾选「已核对目标磁盘」才能提交/确认；`typeToConfirm` 决定 `confirm()` 是否必须收到与盘号或型号匹配的 `confirm_text`（`1`、`disk 1`、`硬盘1`、型号等，忽略大小写与空白）。存在阻断项的计划会先被拒绝，提示里带不可选原因。
 
+计划阶段还有一道**镜像可应用性**门禁：ISO（dism 不能直接 `/Apply-Image` 到分区）、非 WIM/ESD/SWM 文件、dism 读不到索引、索引不存在，都会变成计划阻断项并让“开始”置灰。理由很实际：这些情况如果拖到写入阶段才发现，盘已经被 `clean` 了。装机结果也不以“命令退出码 0”为准：`verify` 会检查 EFI 分区里真的有 `bootmgfw.efi`、系统分区里真的有 `Windows\System32\config\SYSTEM`，缺失即判任务失败。
+
 GUI 的有效模式由命令行 `--dry-run` 与 `dryRunByDefault` 取逻辑或决定，并且构造时的 dry-run 是硬上限：后续界面或 API 的 `start_session(dry_run=false)`、`prepare(dry_run=false)` 不能关闭它。真实模式的 `prepare()` / `authorize_disks()` 只会把**本次勾选并确认过的盘**加入服务白名单；上一次 `prepare()` 隐式加入且本次未选中的盘会被撤出，新会话也会清空这些隐式授权。因此 GUI 选盘不是独立于该策略的额外白名单来源，使用者必须特别核对盘号与身份。
 
 系统/启动盘、离线盘、只读盘、含系统盘符的盘及型号命中 `excluded_disk_names` 的盘会被标为不可选。保护判断和执行前身份复核不能替代备份、人工核盘或隔离测试。
