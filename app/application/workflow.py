@@ -898,13 +898,20 @@ class WorkflowController:
             if disk is None:
                 raise WorkflowError(f"硬盘编号不存在: {disk_number}")
             drive_letters = selection.drive_letter_allocations.get(disk_number) or {}
-            payload = _merge_payload(session.config_payload, overrides.get(disk_number))
-            payload = _apply_partition_defaults(
-                payload,
+            # 优先级（从弱到强）：业务配置 → 界面设置 → 向导里这块盘的逐盘覆盖。
+            # 所以先把设置叠到会话载荷上，再合并逐盘覆盖——否则设置里的默认值
+            # 会把用户在向导第 2/3 步填的大小和镜像“改回去”。
+            base_payload = _apply_image_defaults(
+                session.config_payload,
+                self._settings(),
+                override=not session.config_explicit,
+            )
+            base_payload = _apply_partition_defaults(
+                base_payload,
                 self._live_partition_defaults(),
                 settings_win=not session.config_explicit,
             )
-            payload = _apply_image_defaults(payload, self._settings())
+            payload = _merge_payload(base_payload, overrides.get(disk_number))
             for message in _check_partition_fit(disk, payload):
                 raise WorkflowError(message)
             prepared.append(

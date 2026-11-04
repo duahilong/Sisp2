@@ -318,3 +318,76 @@ def test_preflight_iso_check_maps_to_image_type_key(tmp_path):
     checks = {item.key: item for item in _build_check_items(report["results"])}
     assert checks["image_type"].passed is False
     assert "ISO" in checks["image_type"].message
+
+
+# ------------------------------------- 优先级：设置 vs 配置 vs 向导逐盘覆盖
+def _settings_controller(settings: dict, image_path: str) -> WorkflowController:
+    def preflight(config_path=None, dry_run=False):
+        return {
+            "results": [{"name": "运行前检查", "passed": True, "message": "ok"}],
+            "config_payload": {
+                # 业务配置里的占位镜像：界面设置优先时应该被压掉
+                "partition_info": {"efi_size_mb": 100, "c_size_gb": 30},
+                "image_info": {"image_path": image_path, "image_index": 1},
+            },
+        }
+
+    return WorkflowController(
+        service=_FakeService([_disk(1)]),
+        dry_run=True,
+        preflight_runner=preflight,
+        settings_provider=lambda: dict(settings),
+        image_indexes=lambda path: [1],
+    )
+
+
+def test_prepare_reflects_live_settings_image(tmp_path):
+    """改设置里的 sysWim 之后，**下一次 prepare** 就要用它，不用重启会话。
+
+    以前 ``_apply_image_defaults`` 在 prepare 里以 override=False 调用，会话载荷
+    里已经有镜像路径就直接返回，于是设置页改了镜像也不生效（第 4 步仍报旧阻断）。
+    """
+    iso = tmp_path / "win11.iso"
+    iso.write_bytes(b"iso")
+    good = tmp_path / "win11.wim"
+    good.write_bytes(b"wim")
+
+    settings: dict[str, Any] = {"sysWim": str(iso), "imageDefaultIndex": 1}
+    controller = _settings_controller(settings, str(iso))
+    controller.start(None, dry_run=True)
+
+    blocked = controller.prepare([1])[0]
+    assert blocked.plan.executable is False
+    assert any("ISO" in blocker for blocker in blocked.plan.blockers)
+
+    settings["sysWim"] = str(good)
+    fixed = controller.prepare([1])[0]
+    assert fixed.plan.executable is True
+    assert not any("镜像" in blocker for blocker in fixed.plan.blockers)
+    assert fixed.spec.config_payload["image_info"]["image_path"] == str(good)
+
+
+def test_per_disk_overrides_beat_settings_defaults(tmp_path):
+    """向导第 2/3 步的逐盘输入必须压过设置里的默认值（否则用户填了也被改回去）。"""
+    wim = tmp_path / "win11.wim"
+    wim.write_bytes(b"wim")
+    other = tmp_path / "other.wim"
+    other.write_bytes(b"wim")
+
+    settings: dict[str, Any] = {
+        "sysWim": str(wim),
+        "imageDefaultIndex": 1,
+        "efiDefaultMb": 100,
+        "sysDefaultGb": 100,
+        "dataDefaultGb": 200,
+        "defaultFs": "NTFS",
+    }
+    controller = _settings_controller(settings, str(wim))
+    controller.start(None, dry_run=True)
+
+    prepared = controller.prepare({1: {"c_size": 30, "data_size": 20, "win_gho": str(other)}})[0]
+    info = prepared.spec.config_payload["partition_info"]
+
+    assert info["c_size_gb"] == 30
+    assert info["data_size_gb"] == 20
+    assert prepared.spec.config_payload["image_info"]["image_path"] == str(other)
