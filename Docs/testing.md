@@ -207,6 +207,8 @@ diskpart /s $env:TEMP\detach.txt
 - 修复引导：`/api/boot/report` 给出 `boot_ok` + `orphan_esp`（合成镜像没有 `Windows` 目录，
   属预期）；`/api/boot/repair` 对没有 Windows 目录的盘返回明确原因，且不改动任何分区。
 
+> v1.0.1 打包产物的完整实测记录（用例、证据、限制）见[测试报告](test-report-1.0.1.md)。
+
 ### 只有打包后才暴露的问题（已修）
 
 在源码模式下看不到的差异，靠 exe + 真机才浮出来：
