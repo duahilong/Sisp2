@@ -197,7 +197,8 @@ def _merge_payload(
     if isinstance(win_gho, str) and win_gho.strip():
         image_info = payload.setdefault("image_info", {})
         if isinstance(image_info, dict):
-            image_info["image_path"] = win_gho.strip()
+            # 归一化：用户/脚本可能写成 D:/x/test.wim，但 dism 只认反斜杠。
+            image_info["image_path"] = str(Path(win_gho.strip()).expanduser())
 
     # 界面第 3 步：每块盘可以选同一个镜像文件里的不同版本（索引）。
     image_index = overrides.get("image_index")
@@ -348,7 +349,7 @@ def _apply_image_defaults(
     wim = str(settings.get("sysWim") or "").strip()
     if not wim:
         return payload
-    info["image_path"] = wim
+    info["image_path"] = str(Path(wim).expanduser())
     try:
         index = int(settings.get("imageDefaultIndex") or 0)
     except (TypeError, ValueError):

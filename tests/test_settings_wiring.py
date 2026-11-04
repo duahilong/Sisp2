@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import pathlib
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -357,7 +358,7 @@ def test_default_system_image_from_settings() -> None:
     wf = _controller({"sysWim": r"D:\\sisp-test\\test.wim", "imageDefaultIndex": 3})
     wf.start(None, dry_run=True)
     payload = wf.session.config_payload
-    assert payload["image_info"]["image_path"] == r"D:\\sisp-test\\test.wim"
+    assert payload["image_info"]["image_path"] == str(Path(r"D:\\sisp-test\\test.wim"))
     assert payload["image_info"]["image_index"] == 3
 
 
@@ -373,7 +374,7 @@ def test_settings_image_overrides_config_when_config_not_explicit() -> None:
     )
     wf.start(None, dry_run=True)
     info = wf.session.config_payload["image_info"]
-    assert info["image_path"] == r"D:\\sisp-test\\test.wim"
+    assert info["image_path"] == str(Path(r"D:\\sisp-test\\test.wim"))
     assert info["image_index"] == 1
 
 

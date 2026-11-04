@@ -391,3 +391,19 @@ def test_per_disk_overrides_beat_settings_defaults(tmp_path):
     assert info["c_size_gb"] == 30
     assert info["data_size_gb"] == 20
     assert prepared.spec.config_payload["image_info"]["image_path"] == str(other)
+
+
+def test_image_path_is_normalized_for_dism(tmp_path):
+    """设置里写 ``D:/x/test.wim`` 也能用：dism 只认反斜杠，所以载荷里要归一化。"""
+    from pathlib import Path as _Path
+
+    wim = tmp_path / "win11.wim"
+    wim.write_bytes(b"wim")
+    slashed = str(wim).replace("\\", "/")
+    assert "/" in slashed or _Path(wim).drive  # 单字符路径在 Linux 上无分隔符，跳过
+
+    controller = _settings_controller({"sysWim": slashed, "imageDefaultIndex": 1}, slashed)
+    controller.start(None, dry_run=True)
+    prepared = controller.prepare([1])[0]
+
+    assert prepared.spec.config_payload["image_info"]["image_path"] == str(wim)
