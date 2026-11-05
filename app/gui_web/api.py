@@ -298,6 +298,8 @@ class WebApi:
             temp_dir=str(settings.get("sysTemp") or "") or None,
             log_dir=self._log_root,
             dry_run=self._service_dry_run(),
+            # GUI 是生产入口：用户点"修复引导"就是要真写盘，这里显式授权。
+            allow_real_disk=True,
         )
 
     # ------------------------------------------------------------------ 分区/引导

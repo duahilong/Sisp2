@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from app.safety_guard import ensure_command_allowed
+
 BCDBOOT_TIMEOUT = 120.0
 DISKPART_TIMEOUT = 120.0
 SCAN_TIMEOUT = 60
@@ -351,7 +353,10 @@ class BootRepairer:
         log_dir: str | None = None,
         dry_run: bool = False,
         which: Callable[[str], str | None] | None = None,
+        allow_real_disk: bool = False,
     ) -> None:
+        # 同 WindowsDiskRunner：默认不开真实写盘授权，只有 GUI/CLI 入口显式打开。
+        self.allow_real_disk = bool(allow_real_disk)
         self._gate = gate
         self._which = which or shutil.which
         self._scanner = scanner or scan
@@ -480,7 +485,7 @@ class BootRepairer:
 
     # ------------------------------------------------------------------ 命令
     def _run(self, command: Sequence[str]) -> tuple[int, str]:
-        return _spawn(command, BCDBOOT_TIMEOUT)
+        return _spawn(command, BCDBOOT_TIMEOUT, allow_real_disk=self.allow_real_disk)
 
     def _run_diskpart(self, lines: Sequence[str]) -> tuple[int, str]:
         if not self.diskpart:
@@ -490,7 +495,11 @@ class BootRepairer:
         )
         try:
             Path(script_path).write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
-            return _spawn([self.diskpart, "/s", script_path], DISKPART_TIMEOUT)
+            return _spawn(
+                [self.diskpart, "/s", script_path],
+                DISKPART_TIMEOUT,
+                allow_real_disk=self.allow_real_disk,
+            )
         finally:
             try:
                 Path(script_path).unlink()
@@ -502,7 +511,14 @@ def _step(key: str, title: str, status: str, message: str = "") -> dict[str, Any
     return {"key": key, "title": title, "status": status, "message": message}
 
 
-def _spawn(command: Sequence[str], timeout: float) -> tuple[int, str]:
+def _spawn(
+    command: Sequence[str],
+    timeout: float,
+    *,
+    allow_real_disk: bool = False,
+) -> tuple[int, str]:
+    # 护栏：bcdboot / diskpart 这类写盘命令必须先过授权检查。
+    ensure_command_allowed(command, allow_real_disk=allow_real_disk, source="BootRepairer")
     try:
         completed = subprocess.run(  # noqa: S603 - 固定命令 + 已校验参数
             list(command),

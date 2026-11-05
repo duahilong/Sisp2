@@ -58,6 +58,7 @@ from app.application.partitions import (
     strip_msr_lines,
 )
 from app.models import STEP_FAILED, STEP_OK, STEP_SKIPPED, StepResult, WorkerResult
+from app.safety_guard import ensure_command_allowed
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -569,7 +570,12 @@ class WindowsDiskRunner:
         dism: str | None = None,
         bcdboot: str | None = None,
         powershell: str | None = None,
+        allow_real_disk: bool = False,
     ) -> None:
+        # 真实写盘授权：默认关闭。生产入口 build_real_runner() 会显式打开；
+        # 测试/脚本里直接构造的 runner 只能"读"，执行 diskpart/format/bcdboot/dism
+        # 会被 app.safety_guard 拦下（2026-11-06 清盘事故的直接防线）。
+        self.allow_real_disk = bool(allow_real_disk)
         self.log_dir = log_dir
         self.diskpart = diskpart or self._which("diskpart.exe")
         self.dism = dism or self._which("dism.exe")
@@ -1470,6 +1476,16 @@ class WindowsDiskRunner:
         letters = dict(letters or {})
         env["VIX_EFI_LETTER"] = str(letters.get("efi") or "")
         env["VIX_WINDOWS_LETTER"] = str(letters.get("windows") or "")
+        verify_command = [
+            self.powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            _VERIFY_SCRIPT,
+        ]
+        ensure_command_allowed(
+            verify_command, allow_real_disk=self.allow_real_disk, source="WindowsDiskRunner._verify"
+        )
         try:
             completed = subprocess.run(  # noqa: S603 - 固定脚本，编号来自任务
                 [self.powershell, "-NoProfile", "-NonInteractive", "-Command", _VERIFY_SCRIPT],
@@ -1522,6 +1538,11 @@ class WindowsDiskRunner:
         *,
         env: Mapping[str, str] | None = None,
     ) -> tuple[int, str, float]:
+        # 护栏：危险命令（diskpart / format / bcdboot / dism）必须先过授权检查。
+        # 放在"写日志"之前——被拦下的命令不应该看起来像执行过。
+        ensure_command_allowed(
+            command, allow_real_disk=self.allow_real_disk, source="WindowsDiskRunner"
+        )
         started = datetime.now()
         log.write(f"$ {' '.join(command)}")
         try:
@@ -1577,4 +1598,7 @@ def build_real_runner(
     ``diskpart`` / ``dism`` 由界面设置（``extDiskpart`` / ``extDism``）传入；
     空值或 ``None`` 时回退到 PATH / System32 探测。
     """
-    return WindowsDiskRunner(log_dir=log_dir, diskpart=diskpart, dism=dism)
+    # 生产入口：这里是唯一显式打开"真实写盘"的地方。
+    return WindowsDiskRunner(
+        log_dir=log_dir, diskpart=diskpart, dism=dism, allow_real_disk=True
+    )

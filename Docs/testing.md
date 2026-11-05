@@ -2,6 +2,12 @@
 
 本项目会清空目标硬盘。测试分三层，**任何真实写盘都只能在一次性虚拟磁盘或专用测试 VM 上进行**。
 
+> **硬规则（2026-11-06 事故后加入）：`pytest` 里绝不允许真实写盘。**
+> `app/safety_guard.py` 会在执行前拦下 `diskpart` / `format` / `bcdboot` / `dism`
+> 以及含写盘 cmdlet 的 PowerShell 命令；`WindowsDiskRunner` / `BootRepairer`
+> 默认 `allow_real_disk=False`，`tests/conftest.py` 还会全局设置
+> `SISP_BLOCK_REAL_DISK=1`。事故经过与复盘见 `Docs/incident-2026-11-06-disk-wipe.md`。
+
 ## 1. 本机/CI：逻辑与安全分支
 
 ```powershell
@@ -520,4 +526,31 @@ node tools/ui_smoke.mjs --url http://127.0.0.1:8890/ --out build/shots-exe   # �
 1. 真实写盘前确认目标是**一次性虚拟盘**或专用测试机磁盘；
 2. 真实执行前在界面上核对盘号/型号并输入确认文本，并确认目标盘不在禁止名单里；
 3. 生产环境优先 `--dry-run` / `dryRunByDefault`；
-4. 不要在含重要数据的物理盘上运行任何真实执行测试。
+4. 不要在含重要数据的物理盘上运行任何真实执行测试；
+5. **单元测试里禁止真实盘号**：`tests/` 下的 `disk_number` 一律 ≥ 100（或使用虚构对象），
+   真实盘号只能出现在 VM 集成测试脚本里；
+6. **不要用"直接赋值"去 mock 实现细节**（`runner._run_diskpart = fake`）：
+   Python 不会校验属性是否存在，实现搬家后 mock 会静默失效；
+   正确做法是通过构造参数注入（`shell=` / `runner=`），或用 `monkeypatch.setattr`
+   让"方法已不存在"立刻报错；
+7. 改动执行器/分区/引导/镜像相关代码后，**先改对应测试、只跑受影响的单文件**，
+   确认没有 `diskpart` 进程，再跑全量。
+
+### 护栏自检（三条命令，任何一条不对劲就别跑全量）
+
+```powershell
+# 1) 测试环境下危险命令必须被拦（应打印 blocked）
+python -c "import os; os.environ['SISP_BLOCK_REAL_DISK']='1'; from app.safety_guard import ensure_command_allowed, RealDiskBlocked;try:
+    ensure_command_allowed(['diskpart.exe','/s','x'], allow_real_disk=True)
+except RealDiskBlocked:
+    print('blocked')"
+
+# 2) 未授权的 runner 必须拦
+python -c "from app.application.real_runner import WindowsDiskRunner, _CommandLog; from app.safety_guard import RealDiskBlocked;r=WindowsDiskRunner(diskpart='diskpart.exe');try:
+    r._run_diskpart(['select disk 999','clean'], _CommandLog(None))
+except RealDiskBlocked:
+    print('blocked')"
+
+# 3) 跑测试时确认没有 diskpart 进程（另开一个窗口）
+Get-Process diskpart -ErrorAction SilentlyContinue
+```
