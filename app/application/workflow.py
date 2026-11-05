@@ -677,6 +677,9 @@ class WorkflowController:
             value = str(settings.get(key) or "").strip()
             if value:
                 options[target] = value
+        # 布尔开关必须显式下发：`False` 会被上面的 `if value:` 过滤掉，
+        # 那样执行器只能看到默认值（True），开关就失效了。
+        options["release_efi_letter"] = bool(settings.get("releaseEfiLetter", True))
         return options
 
     def authorize_disks(

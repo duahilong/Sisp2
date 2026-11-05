@@ -240,6 +240,25 @@ def _to_text(value: Any) -> str | None:
     return text or None
 
 
+def _option_flag(options: Mapping[str, Any] | None, key: str, *, default: bool = True) -> bool:
+    """读一个布尔型 runner option；缺省/无法识别时用 ``default``。
+
+    只接受明确的假值（``False`` / ``0`` / ``"false"`` / ``"off"`` …），其余一律
+    当作 ``default``——这样"设置里没写"和"写了个奇怪的值"都不会把功能默认关掉。
+    """
+    if not isinstance(options, Mapping) or key not in options:
+        return default
+    value = options.get(key)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
 def _existing_dir(value: Any) -> str | None:
     """返回可用的临时目录（不存在则尝试创建）；不可用则返回 None。"""
     text = _to_text(value)
@@ -628,15 +647,17 @@ class WindowsDiskRunner:
                     on_step=on_step,
                 )
             finally:
-                if tracker["diskpart_ran"]:
-                    self._release_efi_letter(
-                        disk_number,
-                        letters.get("efi"),
-                        log,
-                        efi_partition=tracker.get("efi_partition"),
-                        env=env,
-                        temp_dir=_existing_dir(options.get("temp_dir")),
-                    )
+                # 释放 EFI 临时盘符是独立的收尾动作，受设置 releaseEfiLetter 控制；
+                # 关掉时盘符会一直留在盘上（下次 clean 前不会被系统自动摘掉）。
+                self._release_efi_letter_if_enabled(
+                    disk_number=disk_number,
+                    letter=letters.get("efi"),
+                    log=log,
+                    options=options,
+                    tracker=tracker,
+                    env=env,
+                    temp_dir=_existing_dir(options.get("temp_dir")),
+                )
 
         finished = datetime.now()
         duration = (finished - started).total_seconds()
@@ -1248,6 +1269,49 @@ class WindowsDiskRunner:
                 os.remove(path)
             except OSError:
                 pass
+
+    def _release_efi_letter_if_enabled(
+        self,
+        *,
+        disk_number: int,
+        letter: str | None,
+        log: _CommandLog,
+        options: Mapping[str, Any] | None,
+        tracker: Mapping[str, Any] | None,
+        env: Mapping[str, str] | None = None,
+        temp_dir: str | None = None,
+    ) -> None:
+        """任务收尾：按设置决定是否释放 EFI 临时盘符。
+
+        这是“释放”这段逻辑的唯一入口，``run()`` 的 ``finally`` 只调它一次：
+
+        - 设置 ``releaseEfiLetter`` 为真（默认）→ 走 ``_release_efi_letter()``，
+          按“磁盘 + 分区号”把临时盘符摘掉（避免隐藏卷盘符残留成幽灵盘符）；
+        - 关掉 → 只写一条日志，**不动盘**，盘符留着给用户手动使用/排查。
+
+        只有本次任务真的动过盘（``tracker["diskpart_ran"]``）才考虑释放，
+        否则连盘都没碰，没什么可摘的。
+        """
+        tracker = tracker or {}
+        if not tracker.get("diskpart_ran"):
+            return
+        if not letter:
+            return
+        wanted = str(letter).strip().upper()
+        if not _option_flag(options, "release_efi_letter", default=True):
+            log.write(
+                f"已关闭 EFI 盘符释放（设置 releaseEfiLetter=false），保留 {wanted}: "
+                "不执行 remove letter"
+            )
+            return
+        self._release_efi_letter(
+            disk_number,
+            wanted,
+            log,
+            efi_partition=tracker.get("efi_partition"),
+            env=env,
+            temp_dir=temp_dir,
+        )
 
     def _release_efi_letter(
         self,

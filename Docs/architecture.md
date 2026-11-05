@@ -62,7 +62,35 @@
 这样“分区没做对”和“镜像有问题”是两类失败，排查时不会混在一起；分区阶段失败时
 盘上只留有分区、没有写入任何系统数据。
 
-## 分区阶段的验收（对照计划逐项验证）
+## EFI 盘符的生命周期
+
+ESP（EFI 系统分区）在 Windows 里是隐藏卷：`Get-Partition.DriveLetter` 对它永远为空，
+即使临时挂了字母也一样，只有 `Win32_LogicalDiskToPartition` 能关联出那个字母。所以
+执行器按「磁盘号 + 分区号」定位它，不按字母找归属。
+
+盘符的时间线：
+
+| 时机 | 动作 |
+| --- | --- |
+| 阶段 1/3 建分区 | EFI 分区 `assign letter=<efi>`（计划里的字母，来自 `drive_letters.py` 的盘符池） |
+| 阶段 2/3 镜像 | 用不着 EFI 盘符（`dism` 只写 C） |
+| 阶段 2/3 引导 | `bcdboot <C>:\Windows /s <EFI>: /f UEFI`——**必须还挂着字母** |
+| 阶段 3/3 校验 | 通过同一个字母检查 `\EFI\Microsoft\Bootootmgfw.efi`、`BOOTX64.EFI` |
+| 任务收尾（`finally`） | `_release_efi_letter_if_enabled()`：默认 `remove letter`，摘掉临时盘符 |
+
+释放动作是唯一的、独立的入口（`_release_efi_letter_if_enabled`），在 `run()` 的
+`finally` 里只调一次，受设置 `releaseEfiLetter` 控制：
+
+- **开（默认）**：按「磁盘 + 分区号」发 `select disk N` / `select partition k` /
+  `remove letter=X`，避免隐藏卷的临时盘符残留成幽灵盘符（残留会让下次 `clean` 后
+  的 `assign letter` 失败）；
+- **关**：一条 diskpart 都不执行，连 ESP 分区号都不查，只写日志
+  「已关闭 EFI 盘符释放（设置 releaseEfiLetter=false），保留 E:」。
+
+关掉之后的代价：盘符一直占着（用户可用盘符少一个），而且下次对这个盘 `clean` 之后，
+旧盘符会变成指向不存在卷的幽灵盘符。适合“装完想手动进 ESP 看一眼引导文件”的场景。
+
+## 分区阶段的验收## 分区阶段的验收（对照计划逐项验证）
 
 建完分区后立刻查一次真实分区表 + 卷信息，交给纯函数 `_partition_verdict()` 对照计划检查。
 **这一步只看“分区做对没有”**，不要求镜像/引导已写入，所以能在 `dism` 之前拦住问题。

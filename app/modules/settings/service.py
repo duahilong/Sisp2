@@ -68,6 +68,8 @@ DEFAULTS: dict[str, Any] = {
     "protectSystemDisk": True,
     "dryRunByDefault": False,
     "blockUnverified": True,
+    # 任务结束后是否释放 EFI 分区的临时盘符（关掉时盘符会一直留着）
+    "releaseEfiLetter": True,
     "excludedDiskNames": [],
     "logRetentionDays": 30,
     # 日志
@@ -108,6 +110,7 @@ _BOOL_KEYS = {
     "protectSystemDisk",
     "dryRunByDefault",
     "blockUnverified",
+    "releaseEfiLetter",
     "extEnabled",
     "extConfirm",
 }

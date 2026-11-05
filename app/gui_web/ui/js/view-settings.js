@@ -68,6 +68,7 @@ const FIELDS = [
   { section: 'safety', key: 'protectSystemDisk', kind: 'bool', effect: '立即生效', hint: '系统盘/引导盘一律拒绝写。' },
   { section: 'safety', key: 'dryRunByDefault', kind: 'bool', effect: '下次启动生效', hint: '打开后启动就是演练模式，重启程序才换回真实模式。' },
   { section: 'safety', key: 'blockUnverified', kind: 'bool', effect: '立即生效', hint: '拿不到 UniqueId/序列号就拒绝写盘。' },
+  { section: 'safety', key: 'releaseEfiLetter', kind: 'bool', effect: '下次任务生效', hint: '任务结束后摘掉 EFI 分区的临时盘符；关掉会让它一直占着一个盘符。' },
   { section: 'safety', key: 'excludedDiskNames', kind: 'list', effect: '立即生效', hint: '一行一个硬盘型号（子串匹配，不区分大小写）；命中的盘禁止安装、分区和修复引导。' },
   { section: 'safety', key: 'logRetentionDays', kind: 'int', effect: '下次清理生效', hint: '超过天数的任务日志会被删。' },
 
@@ -105,6 +106,7 @@ const LABELS = {
   sysDrivers: '驱动目录',
   sysTemp: '临时目录',
   protectSystemDisk: '保护系统盘',
+  releaseEfiLetter: '任务结束后释放 EFI 盘符',
   dryRunByDefault: '默认演练模式',
   blockUnverified: '身份不明的磁盘禁止写入',
   excludedDiskNames: '禁止操作的硬盘型号',

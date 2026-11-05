@@ -87,6 +87,28 @@ def test_preflight_rejects_wrong_path_kind(tmp_path) -> None:
 
 
 # ------------------------------------------------------------------ 工作流
+def test_workflow_passes_release_switch_both_ways() -> None:
+    """releaseEfiLetter 是布尔：True/False 都要原样下发（False 不能被当空值丢掉）。"""
+    for value, expected in ((True, True), (False, False)):
+        wf = WorkflowController(
+            service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
+            dry_run=True,
+            preflight_runner=lambda path: {"results": [], "config_payload": {}},
+            settings_provider=lambda v=value: {"releaseEfiLetter": v},
+        )
+        assert wf._runner_options()["release_efi_letter"] is expected
+
+
+def test_workflow_release_switch_defaults_to_on() -> None:
+    wf = WorkflowController(
+        service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
+        dry_run=True,
+        preflight_runner=lambda path: {"results": [], "config_payload": {}},
+        settings_provider=dict,
+    )
+    assert wf._runner_options()["release_efi_letter"] is True
+
+
 def test_workflow_maps_settings_to_runner_options() -> None:
     wf = WorkflowController(
         service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
@@ -105,6 +127,8 @@ def test_workflow_maps_settings_to_runner_options() -> None:
         "unattend_path": r"D:\answer.xml",
         "drivers_path": r"D:\drivers",
         "boot_source": r"D:\boot",
+        # 布尔开关总是下发（False 也要传下去，否则关不掉释放行为）
+        "release_efi_letter": True,
     }
 
 
@@ -136,7 +160,8 @@ def test_workflow_survives_broken_settings_provider() -> None:
         settings_provider=boom,
     )
     assert wf._settings() == {}
-    assert wf._runner_options() == {}
+    # 设置读不到时开关回落默认值 True
+    assert wf._runner_options() == {"release_efi_letter": True}
 
 
 # ------------------------------------------------------------------ 执行器
@@ -275,7 +300,8 @@ def test_workflow_ignores_blank_setting_values(bad: str) -> None:
         preflight_runner=lambda path: {"results": [], "config_payload": {}},
         settings_provider=lambda: {"sysTemp": bad},
     )
-    assert wf._runner_options() == {}
+    # 布尔开关总是在（默认 True），空字符串项不该混进来
+    assert wf._runner_options() == {"release_efi_letter": True}
 
 
 def _noop(*_args: Any, **_kwargs: Any) -> WorkerResult:

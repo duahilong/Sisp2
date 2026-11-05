@@ -197,7 +197,7 @@ diskpart /s $env:TEMP\detach.txt
 - `tools/ui_check.py` 通过：10 个 ES 模块语法正常、`/static` 引用全部落地、
   `derive.js` 在 node 里跑通（含 EFI 预留的容量校验）；
 - VM 上没有 Chrome，`tools/ui_smoke.mjs` 自动改用 Edge 跑通：10 张截图都在 50 KB 以上，
-  主页面 `tree=9`、设置页 34 行、第 4 步计划表 9 行、修复引导弹窗有 1 条 finding；
+  主页面 `tree=9`、设置页 35 行、第 4 步计划表 9 行、修复引导弹窗有 1 条 finding；
 - 新增接口在 VM 上用真实数据验证：`/api/images` 读出 `test.wim` 的索引 1（SispTest）、
   `/api/boot/report` 给出 `boot_ok` + ESP 分区 1、
   `/api/jobs/{id}/log` 在没配 `logDir` 时回 `message` 而不是报错；
@@ -229,9 +229,9 @@ diskpart /s $env:TEMP\detach.txt
 
 - 从 `main` 现打现测（Python 3.15.2 / PyInstaller 6.22.3）：`Sisp2.exe` 18.1 MB（当时还带 `Sisp2-CLI.exe`，现已移除）；
 - `Sisp2.exe --serve`（真机 + 设置文件）：`/api/info` 报 `1.0.0 / 3.15.2 / dry_run=False`，
-  `/static/js/main.js`、`/static/css/app.css` 均 200，设置 34 项、6 个分组、12 个路径键；
+  `/static/js/main.js`、`/static/css/app.css` 均 200，设置 35 项、6 个分组、12 个路径键；
 - 浏览器冒烟（`tools/ui_smoke.mjs` → Edge）：`ok=true`，10 张截图 53–105 KB，
-  磁盘树按分区数增长、设置页 34 行、第 4 步计划表 9 行（真实模式显示“真实写盘”）；
+  磁盘树按分区数增长、设置页 35 行、第 4 步计划表 9 行（真实模式显示“真实写盘”）；
 - **真实整盘安装**（走 REST：prepare → submit → confirm，盘号 1、C 120 GB、D 300 GB、
   镜像用 `D:\sisp-test\test.wim` 索引 1）：六步全绿、`progress` 6/6=100%、
   `result.steps` 六步 `ok`，完成后分区为 MSR 15.98 MB / ESP 300 MB / C 120 GB NTFS
@@ -460,7 +460,7 @@ A 轮的执行日志按顺序出现了三段脚本，可以直接对着看：
 | `python -m compileall -q app tests tools packaging` | ok |
 | `python tools/ui_check.py` | 10 个模块通过 |
 | `python -m pytest tests/ -q` | **197 passed**（6.2s） |
-| 浏览器冒烟（dry-run，3 块盘） | `ok=true`，10 张截图，树 10 节点，设置页 34 行 |
+| 浏览器冒烟（dry-run，3 块盘） | `ok=true`，10 张截图，树 10 节点，设置页 35 行 |
 | 浏览器冒烟（真实模式，写盘后） | `ok=true`，树 14 节点（4 个分区），计划表 9 行，无阻断 |
 | **真实整盘安装**（200 GB 可扩展 VHDX，走 REST） | **六步全绿**：EFI 100 MB(E:) → Windows 120 GB(H:) → 数据 70 GB(I:) → dism 应用 test.wim → bcdboot → 校验 GPT/4 分区 |
 

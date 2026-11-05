@@ -690,6 +690,101 @@ def _esp_payload(number=1):
     }
 
 
+def test_option_flag_reads_bools_leniently():
+    """release_efi_letter 是布尔开关：缺省/怪值都按默认，只有明确的假才是假。"""
+    from app.application.real_runner import _option_flag
+
+    assert _option_flag({}, "release_efi_letter") is True
+    assert _option_flag({"release_efi_letter": True}, "release_efi_letter") is True
+    assert _option_flag({"release_efi_letter": False}, "release_efi_letter") is False
+    assert _option_flag({"release_efi_letter": "false"}, "release_efi_letter") is False
+    assert _option_flag({"release_efi_letter": "0"}, "release_efi_letter") is False
+    assert _option_flag({"release_efi_letter": "off"}, "release_efi_letter") is False
+    assert _option_flag({"release_efi_letter": "1"}, "release_efi_letter") is True
+    assert _option_flag({"release_efi_letter": "也许"}, "release_efi_letter") is True
+    assert _option_flag(None, "release_efi_letter") is True
+
+
+def test_release_efi_letter_switch_off_keeps_letter():
+    """关掉 releaseEfiLetter → 一条 remove 都不发，只在日志里说明。"""
+    runner = WindowsDiskRunner()
+    seen: list[list[str]] = []
+    log = _CommandLog(None)
+    runner._run_diskpart = lambda lines, log_, timeout=600.0, **kwargs: (
+        seen.append(list(lines)) or (0, "ok")
+    )
+
+    runner._release_efi_letter_if_enabled(
+        disk_number=2,
+        letter="E",
+        log=log,
+        options={"release_efi_letter": False},
+        tracker={"diskpart_ran": True, "efi_partition": 1},
+    )
+
+    assert seen == []
+    assert "已关闭 EFI 盘符释放" in log.summary()
+
+
+def test_release_efi_letter_switch_on_removes_letter():
+    runner = WindowsDiskRunner()
+    seen: list[list[str]] = []
+    log = _CommandLog(None)
+    runner._run_diskpart = lambda lines, log_, timeout=600.0, **kwargs: (
+        seen.append(list(lines)) or (0, "ok")
+    )
+    runner._esp_partition_number = lambda disk, log_: 1  # type: ignore[method-assign]
+
+    runner._release_efi_letter_if_enabled(
+        disk_number=2,
+        letter="E",
+        log=log,
+        options={"release_efi_letter": True},
+        tracker={"diskpart_ran": True, "efi_partition": 1},
+    )
+
+    assert seen == [["select disk 2", "select partition 1", "remove letter=E", "exit"]]
+
+
+def test_release_efi_letter_switch_off_does_not_even_query():
+    """关掉开关时连 ESP 分区号都不查（不碰盘，性能与安全都更好）。"""
+    runner = WindowsDiskRunner()
+    log = _CommandLog(None)
+
+    def boom(*_a, **_k):
+        raise AssertionError("关掉开关时不该执行任何 diskpart")
+
+    runner._run_diskpart = boom  # type: ignore[method-assign]
+    runner._esp_partition_number = boom  # type: ignore[method-assign]
+
+    runner._release_efi_letter_if_enabled(
+        disk_number=2,
+        letter="E",
+        log=log,
+        options={"release_efi_letter": False},
+        tracker={"diskpart_ran": True},
+    )
+    assert "已关闭 EFI 盘符释放" in log.summary()
+
+
+def test_release_efi_letter_switch_skips_when_disk_untouched():
+    """任务根本没动过盘（前置失败）→ 开关开着也不去释放。"""
+    runner = WindowsDiskRunner()
+    seen: list[list[str]] = []
+    runner._run_diskpart = lambda lines, log, timeout=600.0, **kwargs: (
+        seen.append(list(lines)) or (0, "ok")
+    )
+
+    runner._release_efi_letter_if_enabled(
+        disk_number=2,
+        letter="E",
+        log=_CommandLog(None),
+        options={"release_efi_letter": True},
+        tracker={"diskpart_ran": False},
+    )
+    assert seen == []
+
+
 def test_release_efi_letter_uses_disk_and_partition_not_letter():
     """按“磁盘号 + 分区号”释放，不再 ``select volume <字母>``。
 
@@ -792,6 +887,47 @@ def test_release_efi_letter_skips_without_letter():
     runner._release_efi_letter(2, None, _CommandLog(None))
 
     assert seen == []
+
+
+def test_runner_keeps_efi_letter_when_switch_off(tmp_path):
+    """同一个任务，release_efi_letter=False → 全流程一条 remove letter 都没有。"""
+    image = tmp_path / "tiny.wim"
+    image.write_bytes(b"x")
+    runner = WindowsDiskRunner(
+        diskpart="diskpart.exe",
+        dism="dism.exe",
+        bcdboot="bcdboot.exe",
+        powershell="powershell.exe",
+    )
+    scripts: list[list[str]] = []
+    runner._run_diskpart = lambda lines, log, timeout=600.0, **kwargs: (
+        scripts.append(list(lines)) or (0, "ok")
+    )
+    runner._find_msr_partition = lambda disk_number, log, **_: None  # type: ignore[method-assign]
+    runner._verify_partitions_after_create = (  # type: ignore[method-assign]
+        lambda disk, parts, log: (True, "ok", {"efi_partition": 1})
+    )
+    runner._apply_image = lambda image_path, index, target, log, **kwargs: (87, "bad image", 0.1)
+
+    spec = SimpleNamespace(
+        disk_number=2,
+        config_payload={
+            "partition_info": {
+                "efi_size_mb": 100,
+                "c_size_gb": 3,
+                "data_size_gb": "auto",
+                "allow_small_partitions": True,
+            },
+            "image_info": {"image_path": str(image), "image_index": 1},
+        },
+        drive_letters={"efi": "E", "windows": "F", "data": "G"},
+        runner_options={"release_efi_letter": False},
+    )
+
+    result = runner.run(spec, threading.Event())
+
+    assert result.success is False
+    assert not any("remove letter" in line for script in scripts for line in script)
 
 
 def test_runner_releases_efi_letter_even_when_image_fails(tmp_path):

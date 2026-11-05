@@ -65,6 +65,7 @@ Sisp2 有两类配置：**界面设置**是日常入口（GUI 全部参数都在
 | `excludedDiskNames` | `[]` | 字符串数组；一行一个硬盘**型号子串**（不区分大小写），命中即禁止操作该盘：向导置灰、整盘安装被拒、分区与修复引导同样被拒。与业务 JSON 的 `excluded_disk_names` 取并集，且不受任何开关影响 |
 | `protectSystemDisk` | `true` | 布尔值；控制系统盘/启动盘/含系统盘符的盘是否不可选，执行层闸门复用同一判定 |
 | `blockUnverified` | `true` | 布尔值；控制缺少 `UniqueId`/`SerialNumber` 的盘是否不可选，执行层闸门同样生效 |
+| `releaseEfiLetter` | `true` | 布尔值；任务收尾是否释放 EFI（ESP）分区的临时盘符。关掉后临时盘符会一直留在盘上（方便手动查看引导文件），但会占用一个盘符；下次 `clean` 前不会被系统自动摘掉 |
 | `sysDefaultGb` | `120` | 整数 60–2000；作为 `partition_info.c_size_gb` 的来源。无 `-j` 时**覆盖**业务 JSON，显式 `-j` 时只补缺失字段 |
 | `efiDefaultMb` | `100` | 整数 64–1024；EFI（ESP）分区大小，替代原先写死的 100 MB；向导第 2 步只显示不可改 |
 | `imageDefaultIndex` | `0` | 整数 0–99；默认镜像里取第几个版本，`0` = 交给 dism 用第一个；向导第 3 步可逐盘覆盖 |
