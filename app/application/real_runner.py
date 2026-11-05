@@ -43,8 +43,11 @@ from typing import Any
 
 from app.application.contracts import format_size
 from app.application.partitions import (
+    BASIC_GPT,
     BYTES_PER_MB,
     ESP_GPT,
+    MIN_DATA_GB,
+    MIN_EXTRA_DATA_GB,
     MSR_GPT,
     PartitionLayoutError,
     PlannedPartition,
@@ -122,19 +125,40 @@ _PARTITIONS_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
 $number = [int]$env:VIX_DISK_NUMBER
 $disk = Get-Disk -Number $number
-$items = foreach ($part in Get-Partition -DiskNumber $number -ErrorAction SilentlyContinue) {
-    [pscustomobject]@{
-        number       = [int]$part.PartitionNumber
-        size_bytes   = [long]$part.Size
-        offset_bytes = [long]$part.Offset
-        type         = [string]$part.Type
-        gpt_type     = [string]$part.GptType
-        drive_letter = if ($part.DriveLetter) { [string]$part.DriveLetter } else { $null }
+
+# 分区 → 盘符的映射：ESP 是隐藏卷，Get-Partition 的 DriveLetter 是空的，
+# 但 WMI 的 Win32_LogicalDiskToPartition 能看到它临时分配的字母。
+# 注意 Win32_DiskPartition 的编号从 0 开始，Get-Partition 从 1 开始。
+$mounted = @{}
+foreach ($rel in Get-CimInstance Win32_LogicalDiskToPartition -ErrorAction SilentlyContinue) {
+    $m1 = [regex]::Match([string]$rel.Antecedent, 'Disk #(\d+), Partition #(\d+)')
+    $m2 = [regex]::Match([string]$rel.Dependent, '([A-Z]):')
+    if ($m1.Success -and $m2.Success) {
+        $key = $m1.Groups[1].Value + ':' + ([int]$m1.Groups[2].Value + 1)
+        $mounted[$key] = $m2.Groups[1].Value
     }
 }
+
+$items = foreach ($part in Get-Partition -DiskNumber $number -ErrorAction SilentlyContinue) {
+    $vol = $part | Get-Volume -ErrorAction SilentlyContinue
+    $key = [string]$number + ':' + [string]([int]$part.PartitionNumber)
+    [pscustomobject]@{
+        number         = [int]$part.PartitionNumber
+        size_bytes     = [long]$part.Size
+        offset_bytes   = [long]$part.Offset
+        type           = [string]$part.Type
+        gpt_type       = [string]$part.GptType
+        drive_letter   = if ($part.DriveLetter) { [string]$part.DriveLetter } else { $null }
+        mounted_letter = $mounted[$key]
+        file_system    = if ($vol) { [string]$vol.FileSystem } else { $null }
+        label          = if ($vol) { [string]$vol.FileSystemLabel } else { $null }
+    }
+}
+
 [pscustomobject]@{
     disk_number     = $number
     partition_style = [string]$disk.PartitionStyle
+    disk_size_bytes = [long]$disk.Size
     largest_free    = [long]$disk.LargestFreeExtent
     partitions      = @($items)
 } | ConvertTo-Json -Depth 4 -Compress
@@ -260,24 +284,45 @@ def _is_reserved_partition(part: Mapping[str, Any]) -> bool:
     return str(part.get("type") or "").strip().lower() == "reserved"
 
 
-def _layout_verdict(
+def _partition_verdict(
     payload: Mapping[str, Any],
     parts: Sequence[PlannedPartition],
 ) -> tuple[bool, str, dict[str, Any]]:
-    """建分区后立刻复核：分区数、无 MSR、EFI 在盘首且大小对、盘已吃满。
+    """对照**分区计划**逐项验证盘上的实际结果（分区阶段的最后一道关）。
 
-    与 ``_verify_verdict`` 的区别：这里只看**分区表长得对不对**，不要求镜像和
-    引导已经写进去。所以它能在 ``dism``（最长 3 小时）之前就把布局问题拦下来。
-    纯函数，方便用假 payload 测各种失败分支。
+    这一关只看“分区做对了没有”，不要求镜像/引导已经写进去，所以它在
+    ``dism``（最长 3 小时）之前就能把问题拦住。检查项与计划的对应关系：
+
+    ==================  ==========================================================
+    分区表与数量        GPT、分区数 == 计划数、没有 Reserved/MSR
+    顺序与类型          按 offset 排序后的第 i 个分区，GPT 类型必须是计划里的那个
+                        （EFI → ESP GUID，C/D/E → Basic Data）
+    容量                显式分区 |实际 − 计划| ≤ 1 MB；最后那个 auto 分区不能用显式
+                        值去比，但要够自己的下限
+    容量闭合            sum(实际分区) + GPT 首尾 2 MB == 盘容量（±2 MB）
+    盘符                计划里的盘符必须真的挂在这个分区上（C/D/E 硬校验；ESP 的
+                        临时字母在 Get-Partition 里看不到，用 WMI 关联查，查不到
+                        只记 warning）
+    卷标                EFI / Windows / Data / Data2 —— 与计划一致
+    文件系统            FAT32 / NTFS / exFAT —— 与计划一致
+    盘已吃满            LargestFreeExtent ≤ 2 MB（最后一个分区不带 size=）
+    ==================  ==========================================================
+
+    纯函数：输入是 PowerShell 查到的真实分区表 + 计划，方便用假 payload 测每一条
+    失败分支。返回 ``(ok, message, details)``，``details`` 里带 ``problems`` /
+    ``warnings`` / ``efi_partition``（供收尾释放盘符复用）。
     """
     actual = payload.get("partitions") or []
     if isinstance(actual, Mapping):
         actual = [actual]
     actual = [part for part in actual if isinstance(part, Mapping)]
     style = str(payload.get("partition_style") or "?").strip().upper()
+    disk_size = _to_int(payload.get("disk_size_bytes")) or 0
     largest_free = _to_int(payload.get("largest_free")) or 0
 
     problems: list[str] = []
+    warnings: list[str] = []
+
     if style != "GPT":
         problems.append(f"分区表不是 GPT（{style}）")
 
@@ -288,37 +333,78 @@ def _layout_verdict(
     if reserved:
         problems.append("盘上还有保留分区（MSR），预期布局是 EFI + C + D(+E)")
 
-    # EFI 必须是盘首那个分区且大小与计划一致：MSR 没删掉时 EFI 会被挤到 16 MB，
-    # 这里能直接看出来（而不是等到装完才知道引导写错位置）。
+    # 按物理顺序（offset）对照计划：第 i 个分区应当就是计划里的第 i 个
     ordered = sorted(actual, key=lambda part: _to_int(part.get("offset_bytes")) or 0)
-    efi_plan = next((part for part in parts if part.role == "efi"), None)
-    if ordered and efi_plan is not None and efi_plan.size_mb:
-        first = ordered[0]
-        first_size = (_to_int(first.get("size_bytes")) or 0) / BYTES_PER_MB
-        if abs(first_size - efi_plan.size_mb) > 1:
+    for index, (got, want) in enumerate(zip(ordered, parts, strict=False), start=1):
+        where = f"第 {index} 个分区（{want.label}）"
+        expect_gpt = ESP_GPT if want.role == "efi" else BASIC_GPT
+        got_gpt = str(got.get("gpt_type") or "").strip("{}").lower()
+        if got_gpt and got_gpt != expect_gpt:
+            problems.append(f"{where}的 GPT 类型不对（{got_gpt or '空'}）")
+
+        got_mb = (_to_int(got.get("size_bytes")) or 0) / BYTES_PER_MB
+        if want.size_mb is not None and abs(got_mb - want.size_mb) > 1:
             problems.append(
-                f"盘首分区不是计划的 EFI（实际 {first_size:.0f} MB，预期 {efi_plan.size_mb} MB）"
-            )
-        first_offset = (_to_int(first.get("offset_bytes")) or 0) / BYTES_PER_MB
-        if first_offset > 2:
-            problems.append(
-                f"EFI 没有从盘首开始（offset {first_offset:.0f} MB，可能 MSR 未删掉）"
+                f"{where}大小不符：计划 {want.size_mb} MB，实际 {got_mb:.0f} MB"
             )
 
-    # 最后一个数据分区不带 size=，建完应该没有剩余可用空间（最多 GPT 尾部 1 MB）。
+        # 盘符：ESP 的临时字母在 Get-Partition 里看不到（隐藏卷），
+        # WMI 关联能查到；两者都查不到才算问题（ESP 只告警，因为它收尾就释放）。
+        got_letter = _to_text(got.get("drive_letter")) or _to_text(got.get("mounted_letter"))
+        want_letter = _to_text(want.letter)
+        if want_letter:
+            if not got_letter:
+                message = f"{where}没有挂上计划盘符 {want_letter}"
+                (warnings if want.role == "efi" else problems).append(message)
+            elif got_letter.strip().upper()[:1] != want_letter.strip().upper()[:1]:
+                problems.append(
+                    f"{where}盘符不符：计划 {want_letter}:，实际 {got_letter.upper()}:"
+                )
+
+        got_label = _to_text(got.get("label"))
+        if got_label is not None and got_label.casefold() != want.label.casefold():
+            problems.append(f"{where}卷标不符：计划 {want.label}，实际 {got_label}")
+
+        got_fs = _to_text(got.get("file_system"))
+        if got_fs is not None and got_fs.casefold() != want.file_system.casefold():
+            problems.append(
+                f"{where}文件系统不符：计划 {want.file_system}，实际 {got_fs}"
+            )
+
+    # 最后一个分区是 auto（不带 size=）：核对它吃到了下限以上，且没有留下大块空闲
+    explicit_mb = sum(int(part.size_mb) for part in parts if part.size_mb is not None)
+    if disk_size > 0:
+        used_mb = sum((_to_int(part.get("size_bytes")) or 0) for part in actual) / BYTES_PER_MB
+        slack_mb = disk_size / BYTES_PER_MB - used_mb
+        # GPT 首尾各 1 MB 是正常开销；超出 2 MB 说明中间留了未分配
+        if slack_mb > 2:
+            problems.append(f"盘上有 {slack_mb:.0f} MB 未分配（最后分区应当吃满）")
+        if abs(slack_mb) > 2 and used_mb > 0:
+            problems.append(
+                f"容量对不上：分区合计 {used_mb:.0f} MB，盘容量 {disk_size / BYTES_PER_MB:.0f} MB"
+            )
+        auto = [part for part in parts if part.size_mb is None]
+        if auto and used_mb > 0:
+            auto_mb = used_mb - explicit_mb
+            minimum_gb = MIN_DATA_GB if auto[-1].role == "data" else MIN_EXTRA_DATA_GB
+            if auto_mb < minimum_gb * 1024:
+                problems.append(
+                    f"{auto[-1].label} 只剩 {auto_mb / 1024:.1f} GB，低于下限 {minimum_gb} GB"
+                )
     if largest_free > 2 * BYTES_PER_MB:
         problems.append(f"盘上还有 {format_size(largest_free)} 未分配（最后分区应当吃满）")
 
     summary = "、".join(
         f"#{part.get('number')}"
-        f"{('(' + str(part.get('drive_letter')) + ':)' if part.get('drive_letter') else '')}"
+        f"{('(' + str(part.get('drive_letter') or part.get('mounted_letter')) + ':)' if (part.get('drive_letter') or part.get('mounted_letter')) else '')}"
         f"={format_size(part.get('size_bytes'))}"
-        for part in actual
+        f"{('/' + str(part.get('label'))) if part.get('label') else ''}"
+        for part in ordered
     )
     esp = next(
         (
             _to_int(part.get("number"))
-            for part in actual
+            for part in ordered
             if str(part.get("gpt_type") or "").strip("{}").lower() == ESP_GPT
         ),
         None,
@@ -326,13 +412,19 @@ def _layout_verdict(
     details: dict[str, Any] = {
         "partition_style": style,
         "partitions": actual,
+        "disk_size_bytes": disk_size,
         "largest_free": largest_free,
         "efi_partition": esp,
         "problems": problems,
+        "warnings": warnings,
+        "check": "partition_phase",
     }
     if problems:
         return False, "；".join(problems) + f"（实际：{summary or '无分区'}）", details
-    return True, f"GPT、{len(actual)} 个分区：{summary}", details
+    message = f"GPT、{len(actual)} 个分区与计划一致：{summary}"
+    if warnings:
+        message += "；" + "；".join(warnings)
+    return True, message, details
 
 
 def _verify_verdict(
@@ -599,11 +691,17 @@ class WindowsDiskRunner:
         cancel_event: threading.Event,
         log: _CommandLog,
         steps: list[StepResult],
-        tracker: dict[str, bool] | None = None,
+        tracker: dict[str, Any] | None = None,
         options: Mapping[str, Any] | None = None,
         env: Mapping[str, str] | None = None,
         on_step: Any = None,
     ) -> tuple[list[StepResult], str | None]:
+        """编排三个显式阶段：分区 → 写入系统 → 校验。
+
+        **分区与写入镜像彻底分开**：分区阶段做完所有 diskpart 动作，并对照计划
+        逐项验证（``_verify_partitions_after_create``）；验证不通过就直接结束，
+        磁盘不会被写入任何镜像数据。阶段之间还有取消检查点。
+        """
         options = dict(options or {})
         temp_dir = _existing_dir(options.get("temp_dir"))
 
@@ -628,37 +726,108 @@ class WindowsDiskRunner:
         if not Path(image_path).is_file():
             return steps, f"镜像文件不存在: {image_path}"
 
-        # 1-3：清盘 → 删 MSR → 建分区。每段独立执行、各自校验，
-        # 任一段不通过就停在这一步（绝不在没确认的情况下往下走）。
+        # ===== 阶段 1/3：分区（清盘 → 删 MSR → 建分区 → 对照计划验证）=====
+        log.write("========== 阶段 1/3：分区 ==========")
+        failure = self._partition_phase(
+            disk_number=disk_number,
+            parts=parts,
+            cancel_event=cancel_event,
+            log=log,
+            steps=steps,
+            tracker=tracker,
+            env=env,
+            temp_dir=temp_dir,
+            on_step=on_step,
+        )
+        if failure:
+            return steps, failure
+
+        # ===== 阶段 2/3：写入系统（镜像 + 引导）。分区已验证通过才走到这里 =====
+        log.write("========== 阶段 2/3：写入系统（镜像 + 引导）==========")
+        failure = self._image_phase(
+            payload=payload,
+            letters=letters,
+            image_path=image_path,
+            cancel_event=cancel_event,
+            log=log,
+            steps=steps,
+            options=options,
+            env=env,
+            on_step=on_step,
+        )
+        if failure:
+            return steps, failure
+
+        failure = self._boot_phase(
+            letters=letters,
+            cancel_event=cancel_event,
+            log=log,
+            steps=steps,
+            options=options,
+            env=env,
+            on_step=on_step,
+        )
+        if failure:
+            return steps, failure
+
+        # ===== 阶段 3/3：校验“装完能不能开机” =====
+        log.write("========== 阶段 3/3：校验 ==========")
+        self._notify(on_step, "verify", "running", "校验分区与引导")
+        steps.append(self._verify(disk_number, log, letters, min_partitions=len(parts)))
+        if steps[-1].failed:
+            return steps, "分区校验失败"
+        return steps, None
+
+    def _partition_phase(
+        self,
+        *,
+        disk_number: int,
+        parts: Sequence[PlannedPartition],
+        cancel_event: threading.Event,
+        log: _CommandLog,
+        steps: list[StepResult],
+        tracker: dict[str, Any] | None,
+        env: Mapping[str, str] | None,
+        temp_dir: str | None,
+        on_step: Any,
+    ) -> str | None:
+        """分区阶段的全部动作；返回失败原因（``None`` 表示成功）。
+
+        1. ``clean`` + ``convert gpt``（MSR 在这一步自动出现）
+        2. 按 GPT 类型查到 MSR，单独一段 diskpart 删掉，**删完立刻复查**
+        3. 建 EFI / C / D(+E)（最后一项不带 ``size=``）
+        4. 对照计划验证：分区数、顺序、类型、大小、盘符、卷标、文件系统、
+           容量闭合、盘已吃满
+        """
         wipe = self._wipe_script(disk_number=disk_number, log=log)
         if cancel_event.is_set():
-            return steps, "任务已取消（未开始写盘）"
+            return "任务已取消（未开始写盘）"
 
         try:
             if tracker is not None:
                 tracker["diskpart_ran"] = True
             code, output = self._run_diskpart(wipe, log, env=env, temp_dir=temp_dir)
         except Exception as exc:  # noqa: BLE001 - 统一翻成步骤失败
-            return self._fail_diskpart(steps, "efi", f"无法执行 diskpart：{exc}")
+            return self._fail_diskpart(steps, "efi", f"无法执行 diskpart：{exc}")[1]
 
         if code != 0:
             return self._fail_diskpart(
                 steps, "efi", f"diskpart 失败（退出码 {code}）", code=code, output=output
-            )
+            )[1]
 
         # 盘已经空了，从这里开始用户再点取消就没法“什么都没发生”，
         # 所以要明确告诉他现在的状态，而不是当成“未开始写盘”。
         if cancel_event.is_set():
-            return steps, "任务已取消（盘已清空，未建分区）"
+            return "任务已取消（盘已清空，未建分区）"
 
         # 步 2：找到 ``convert gpt`` 自动建出来的 MSR。查询本身失败 → 中止，
-        # 绕不盲删（``select partition`` 猜错会删掉真分区）。
+        # 绝不盲删（``select partition`` 猜错会删掉真分区）。
         try:
             msr_partition = self._find_msr_partition(disk_number, log)
         except Exception as exc:  # noqa: BLE001 - 查不了就别动盘
             return self._fail_diskpart(
                 steps, "efi", f"无法确认 MSR 分区，已中止（避免误删）：{exc}"
-            )
+            )[1]
 
         # 步 3：删 MSR（独立的一段），**删完立刻复查**，确认真的没了再建分区。
         if msr_partition is not None:
@@ -668,7 +837,9 @@ class WindowsDiskRunner:
             try:
                 code, output = self._run_diskpart(delete_script, log, env=env, temp_dir=temp_dir)
             except Exception as exc:  # noqa: BLE001
-                return self._fail_diskpart(steps, "efi", f"删除 MSR 分区时无法执行 diskpart：{exc}")
+                return self._fail_diskpart(
+                    steps, "efi", f"删除 MSR 分区时无法执行 diskpart：{exc}"
+                )[1]
             if code != 0:
                 return self._fail_diskpart(
                     steps,
@@ -676,17 +847,17 @@ class WindowsDiskRunner:
                     f"删除 MSR 分区失败（退出码 {code}）：{_tail(output, 500)}",
                     code=code,
                     output=output,
-                )
+                )[1]
             try:
                 leftover = self._find_msr_partition(disk_number, log, label="复查 MSR")
             except Exception as exc:  # noqa: BLE001
-                return self._fail_diskpart(steps, "efi", f"删除 MSR 后无法复查：{exc}")
+                return self._fail_diskpart(steps, "efi", f"删除 MSR 后无法复查：{exc}")[1]
             if leftover is not None:
                 return self._fail_diskpart(
                     steps,
                     "efi",
                     f"MSR 分区删除失败：删除后仍然存在（分区 #{leftover}），已中止，未建任何分区",
-                )
+                )[1]
             log.write("MSR 分区已删除，复查确认不存在")
 
         # 步 4：建 EFI / C / D(+E)。最后一项不带 size=，由 diskpart 吃剩余空间。
@@ -694,60 +865,43 @@ class WindowsDiskRunner:
         try:
             code, output = self._run_diskpart(script, log, env=env, temp_dir=temp_dir)
         except Exception as exc:  # noqa: BLE001 - 统一翻成步骤失败
-            return self._fail_diskpart(steps, "efi", f"无法执行 diskpart：{exc}")
+            return self._fail_diskpart(steps, "efi", f"无法执行 diskpart：{exc}")[1]
 
         if code != 0:
             return self._fail_diskpart(
                 steps, "efi", f"diskpart 失败（退出码 {code}）", code=code, output=output
-            )
+            )[1]
 
-        # 步 5：建完立刻复核布局（分区数、无 MSR、EFI 在盘首、盘已吃满）。
-        # 不靠 diskpart 退出码：不同 build 对“某一条命令失败”的退出码行为并不一致。
+        # 步 5：**分区阶段自己的验收**——对照计划逐项验证。
         try:
-            layout_ok, layout_message, layout_details = self._check_layout_after_create(
-                disk_number, parts, log
-            )
+            ok, message, details = self._verify_partitions_after_create(disk_number, parts, log)
         except Exception as exc:  # noqa: BLE001
-            return self._fail_diskpart(steps, "efi", f"无法复核分区结果：{exc}")
-        if not layout_ok:
+            return self._fail_diskpart(steps, "efi", f"无法验证分区结果：{exc}")[1]
+        if not ok:
             return self._fail_diskpart(
-                steps, "efi", f"分区结果不符合预期：{layout_message}", details=layout_details
-            )
-        # 复核时已经知道 ESP 是第几个分区，收尾释放盘符直接用它（不用再查一次）
+                steps, "efi", f"分区验证不通过：{message}", details=details
+            )[1]
+        # 验证时已经知道 ESP 是第几个分区，收尾释放盘符直接用它（不用再查一次）
         if tracker is not None:
-            tracker["efi_partition"] = layout_details.get("efi_partition")
+            tracker["efi_partition"] = details.get("efi_partition")
 
         by_role = {part.role: part for part in parts}
-        efi_part = by_role["efi"]
-        windows_part = by_role["windows"]
         data_parts = [part for part in parts if part.is_data]
-
-        steps.append(
-            StepResult(
-                key="efi",
-                title=STEP_TITLES["efi"],
-                status=STEP_OK,
-                message=f"已创建并格式化（{efi_part.size_text}，盘符 {efi_part.letter}）",
-                details={
-                    "letter": efi_part.letter,
-                    "size": efi_part.size_text,
-                    "file_system": efi_part.file_system,
-                },
+        for key, part in (("efi", by_role["efi"]), ("windows", by_role["windows"])):
+            steps.append(
+                StepResult(
+                    key=key,
+                    title=STEP_TITLES[key],
+                    status=STEP_OK,
+                    message=f"已创建、格式化并通过验证（{part.size_text}，盘符 {part.letter}）",
+                    details={
+                        "letter": part.letter,
+                        "size": part.size_text,
+                        "file_system": part.file_system,
+                        "label": part.label,
+                    },
+                )
             )
-        )
-        steps.append(
-            StepResult(
-                key="windows",
-                title=STEP_TITLES["windows"],
-                status=STEP_OK,
-                message=f"已创建并格式化（{windows_part.size_text}，盘符 {windows_part.letter}）",
-                details={
-                    "letter": windows_part.letter,
-                    "size": windows_part.size_text,
-                    "file_system": windows_part.file_system,
-                },
-            )
-        )
         data_summary = " + ".join(f"{part.label} {part.size_text}" for part in data_parts)
         data_letters = "/".join(str(part.letter or "") for part in data_parts)
         steps.append(
@@ -759,23 +913,52 @@ class WindowsDiskRunner:
                     else STEP_TITLES["data"]
                 ),
                 status=STEP_OK,
-                message=f"已创建并格式化（{data_summary}，盘符 {data_letters}）",
+                message=f"已创建、格式化并通过验证（{data_summary}，盘符 {data_letters}）",
                 details={
                     "letters": [part.letter for part in data_parts],
                     "partitions": [part.to_dict() for part in data_parts],
+                    "verification": {
+                        "message": message,
+                        "problems": details.get("problems") or [],
+                        "warnings": details.get("warnings") or [],
+                        "actual": details.get("partitions") or [],
+                    },
                 },
             )
         )
+        return None
 
-        # 4：应用镜像
+    def _image_phase(
+        self,
+        *,
+        payload: Mapping[str, Any],
+        letters: Mapping[str, str],
+        image_path: str,
+        cancel_event: threading.Event,
+        log: _CommandLog,
+        steps: list[StepResult],
+        options: Mapping[str, Any],
+        env: Mapping[str, str] | None,
+        on_step: Any,
+    ) -> str | None:
+        """应用镜像（dism）；分区阶段已经验证过，这里只负责写入。"""
         if cancel_event.is_set():
-            steps.append(StepResult(key="image", title=STEP_TITLES["image"], status=STEP_SKIPPED, message="任务已取消"))
-            return steps, "任务已取消（分区已建好，镜像未应用）"
+            steps.append(
+                StepResult(
+                    key="image",
+                    title=STEP_TITLES["image"],
+                    status=STEP_SKIPPED,
+                    message="任务已取消",
+                )
+            )
+            return "任务已取消（分区已建好，镜像未应用）"
 
         self._notify(on_step, "image", "running", "应用镜像（dism）")
         image_index = _to_int((payload.get("image_info") or {}).get("image_index")) or 1
         target = f"{letters['windows']}:\\"
-        code, output, elapsed = self._apply_image(image_path, image_index, target, log, options=options, env=env)
+        code, output, elapsed = self._apply_image(
+            image_path, image_index, target, log, options=options, env=env
+        )
         if code != 0:
             steps.append(
                 StepResult(
@@ -783,11 +966,23 @@ class WindowsDiskRunner:
                     title=STEP_TITLES["image"],
                     status=STEP_FAILED,
                     message=f"dism 失败（退出码 {code}）：{_tail(output, 800)}",
-                    details={"exit": code, "image": image_path, "index": image_index, "seconds": round(elapsed, 1)},
+                    details={
+                        "exit": code,
+                        "image": image_path,
+                        "index": image_index,
+                        "seconds": round(elapsed, 1),
+                    },
                 )
             )
-            steps.append(StepResult(key="boot", title=STEP_TITLES["boot"], status=STEP_SKIPPED, message="镜像未应用成功，跳过引导"))
-            return steps, f"应用镜像失败（dism 退出码 {code}）"
+            steps.append(
+                StepResult(
+                    key="boot",
+                    title=STEP_TITLES["boot"],
+                    status=STEP_SKIPPED,
+                    message="镜像未应用成功，跳过引导",
+                )
+            )
+            return f"应用镜像失败（dism 退出码 {code}）"
 
         steps.append(
             StepResult(
@@ -795,14 +990,38 @@ class WindowsDiskRunner:
                 title=STEP_TITLES["image"],
                 status=STEP_OK,
                 message=f"已应用 {Path(image_path).name}（索引 {image_index}）到 {target}",
-                details={"image": image_path, "index": image_index, "seconds": round(elapsed, 1), "tail": _tail(output, 1200)},
+                details={
+                    "image": image_path,
+                    "index": image_index,
+                    "seconds": round(elapsed, 1),
+                    "tail": _tail(output, 1200),
+                },
             )
         )
+        return None
 
-        # 5：写引导
+    def _boot_phase(
+        self,
+        *,
+        letters: Mapping[str, str],
+        cancel_event: threading.Event,
+        log: _CommandLog,
+        steps: list[StepResult],
+        options: Mapping[str, Any],
+        env: Mapping[str, str] | None,
+        on_step: Any,
+    ) -> str | None:
+        """写 UEFI 引导（bcdboot）。"""
         if cancel_event.is_set():
-            steps.append(StepResult(key="boot", title=STEP_TITLES["boot"], status=STEP_SKIPPED, message="任务已取消"))
-            return steps, "任务已取消（镜像已写入，引导未写）"
+            steps.append(
+                StepResult(
+                    key="boot",
+                    title=STEP_TITLES["boot"],
+                    status=STEP_SKIPPED,
+                    message="任务已取消",
+                )
+            )
+            return "任务已取消（镜像已写入，引导未写）"
 
         self._notify(on_step, "boot", "running", "写入 UEFI 引导（bcdboot）")
         code, output, elapsed = self._write_boot(letters, log, options=options, env=env)
@@ -816,7 +1035,7 @@ class WindowsDiskRunner:
                     details={"exit": code, "seconds": round(elapsed, 1)},
                 )
             )
-            return steps, f"写引导失败（bcdboot 退出码 {code}）"
+            return f"写引导失败（bcdboot 退出码 {code}）"
 
         steps.append(
             StepResult(
@@ -827,13 +1046,7 @@ class WindowsDiskRunner:
                 details={"exit": code, "seconds": round(elapsed, 1), "tail": _tail(output, 800)},
             )
         )
-
-        # 6：校验
-        self._notify(on_step, "verify", "running", "校验分区与引导")
-        steps.append(self._verify(disk_number, log, letters, min_partitions=len(parts)))
-        if steps[-1].failed:
-            return steps, "分区校验失败"
-        return steps, None
+        return None
 
     # ------------------------------------------------------------------ 具体命令
     def _diskpart_script(
@@ -957,20 +1170,26 @@ class WindowsDiskRunner:
                 return _to_int(part.get("number"))
         return None
 
-    def _check_layout_after_create(
+    def _verify_partitions_after_create(
         self,
         disk_number: int,
         parts: Sequence[PlannedPartition],
         log: _CommandLog,
     ) -> tuple[bool, str, dict[str, Any]]:
-        """建完分区立刻复核：分区数、无 MSR、EFI 在盘首、盘已吃满。
+        """分区阶段的最后一道关：对照计划逐项验证盘上的实际结果。
+
+        查一次真实分区表 + 卷信息（盘符/卷标/文件系统），交给纯函数
+        ``_partition_verdict`` 对照计划检查：分区数、顺序、类型、大小、盘符、
+        卷标、文件系统、容量闭合、盘已吃满。
 
         不依赖 diskpart 退出码：有的 build 在单条命令失败时仍然返回 0。这一步把
-        “布局不对”提前到应用镜像之前（dism 最长 3 小时），而不是等到最后 verify。
+        “分区没按计划做到位”提前到应用镜像之前（dism 最长 3 小时）。
         """
         payload = self._query_partitions(disk_number, log)
-        ok, message, details = _layout_verdict(payload, parts)
-        details["check"] = "post_layout"
+        ok, message, details = _partition_verdict(payload, parts)
+        log.write(f"分区验证：{'通过' if ok else '不通过'} —— {message}")
+        for warning in details.get("warnings") or ():
+            log.write(f"分区验证（警告）：{warning}")
         return ok, message, details
 
     def _fail_diskpart(

@@ -35,7 +35,7 @@ from app.application.partitions import (
 from app.application.real_runner import (
     WindowsDiskRunner,
     _CommandLog,
-    _layout_verdict,
+    _partition_verdict,
     _verify_verdict,
 )
 from app.application.service import SispService
@@ -113,20 +113,100 @@ def test_dry_run_preview_shows_three_phases() -> None:
     assert "create partition primary" in lines
 
 
-# ---------------------------------------------------------- 建完分区后的复核
+# ------------------------------------------- 分区阶段的验收（对照计划逐项验证）
 
 
-def _layout_payload(*, msr=False, extra=False, efi_offset_mb=1, largest_free=0):
+def _part_payload(
+    *,
+    msr=False,
+    extra=False,
+    efi_offset_mb=1,
+    efi_size_mb=100,
+    largest_free=0,
+    c_size_gb=120,
+    efi_letter="E",
+    c_letter="F",
+    data_letter="G",
+    extra_letter="H",
+    efi_fs="FAT32",
+    c_fs="NTFS",
+    data_fs="NTFS",
+    extra_fs="NTFS",
+    data_label="Data",
+    extra_label="Data2",
+    drop_efi_letter=False,
+):
+    """构造一份“完全符合计划”的真实分区表，再按测试需要逐项破坏。"""
+    disk_mb = 477 * 1024
+    efi_mb = efi_size_mb
+    c_mb = int(c_size_gb * 1024)
+    tail_mb = disk_mb - efi_mb - c_mb - (30 * 1024 if extra else 0) - 2
     items = [
         {
             "number": 1,
             "offset_bytes": efi_offset_mb * MB,
-            "size_bytes": 100 * MB,
+            "size_bytes": efi_mb * MB,
             "type": "System",
             "gpt_type": "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}",
             "drive_letter": None,
-        }
+            # ESP 的盘符在 Get-Partition 里看不到，WMI 关联能看到
+            "mounted_letter": None if drop_efi_letter else efi_letter,
+            "file_system": efi_fs,
+            "label": "EFI",
+        },
+        {
+            "number": 2,
+            "offset_bytes": (efi_offset_mb + efi_mb) * MB,
+            "size_bytes": c_mb * MB,
+            "type": "Basic",
+            "gpt_type": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}",
+            "drive_letter": c_letter,
+            "mounted_letter": c_letter,
+            "file_system": c_fs,
+            "label": "Windows",
+        },
     ]
+    if extra:
+        items.append(
+            {
+                "number": 3,
+                "offset_bytes": (efi_offset_mb + efi_mb + c_mb) * MB,
+                "size_bytes": 30 * 1024 * MB,
+                "type": "Basic",
+                "gpt_type": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}",
+                "drive_letter": data_letter,
+                "mounted_letter": data_letter,
+                "file_system": data_fs,
+                "label": "Data",
+            }
+        )
+        items.append(
+            {
+                "number": 4,
+                "offset_bytes": (efi_offset_mb + efi_mb + c_mb + 30 * 1024) * MB,
+                "size_bytes": tail_mb * MB,
+                "type": "Basic",
+                "gpt_type": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}",
+                "drive_letter": extra_letter,
+                "mounted_letter": extra_letter,
+                "file_system": extra_fs,
+                "label": extra_label,
+            }
+        )
+    else:
+        items.append(
+            {
+                "number": 3,
+                "offset_bytes": (efi_offset_mb + efi_mb + c_mb) * MB,
+                "size_bytes": tail_mb * MB,
+                "type": "Basic",
+                "gpt_type": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}",
+                "drive_letter": data_letter,
+                "mounted_letter": data_letter,
+                "file_system": data_fs,
+                "label": data_label,
+            }
+        )
     if msr:
         items.insert(
             0,
@@ -139,94 +219,115 @@ def _layout_payload(*, msr=False, extra=False, efi_offset_mb=1, largest_free=0):
                 "drive_letter": None,
             },
         )
-    items.append(
-        {
-            "number": 2,
-            "offset_bytes": (efi_offset_mb + 100) * MB,
-            "size_bytes": 120 * GIB,
-            "type": "Basic",
-            "gpt_type": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}",
-            "drive_letter": "F",
-        }
-    )
-    items.append(
-        {
-            "number": 3,
-            "offset_bytes": (efi_offset_mb + 100) * MB + 120 * GIB,
-            "size_bytes": 300 * GIB,
-            "type": "Basic",
-            "gpt_type": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}",
-            "drive_letter": "G",
-        }
-    )
-    if extra:
-        items.append(
-            {
-                "number": 4,
-                "offset_bytes": (efi_offset_mb + 100) * MB + 420 * GIB,
-                "size_bytes": 200 * GIB,
-                "type": "Basic",
-                "gpt_type": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}",
-                "drive_letter": "H",
-            }
-        )
     return {
         "disk_number": 1,
         "partition_style": "GPT",
+        "disk_size_bytes": 477 * GIB,
         "largest_free": largest_free,
         "partitions": items,
     }
 
 
-def _layout_parts(extra: bool = False):
-    payload = {"partition_info": {"efi_size_mb": 100, "c_size_gb": 120}}
+def _part_parts(extra: bool = False, c_size_gb: int = 120):
+    payload = {"partition_info": {"efi_size_mb": 100, "c_size_gb": c_size_gb}}
     if extra:
         payload["partition_info"]["data_partitions"] = [
-            {"size_gb": 300, "file_system": "NTFS"},
+            {"size_gb": 30, "file_system": "NTFS"},
             {"size_gb": "auto", "file_system": "NTFS"},
         ]
-    return plan_partitions(payload)
+    return plan_partitions(
+        payload, letters={"efi": "E", "windows": "F", "data": "G", "data2": "H"}
+    )
 
 
-def test_layout_verdict_accepts_clean_layout() -> None:
-    ok, message, details = _layout_verdict(_layout_payload(), _layout_parts())
-    assert ok is True
-    assert "3 个分区" in message
+def test_partition_verdict_accepts_plan_exact_match() -> None:
+    ok, message, details = _partition_verdict(_part_payload(), _part_parts())
+    assert ok is True, message
+    assert "与计划一致" in message
     assert details["problems"] == []
+    assert details["efi_partition"] == 1
 
 
-def test_layout_verdict_rejects_leftover_msr() -> None:
-    """删 MSR 没生效 → 建完立刻要拦住（不能等到 dism 跑完）。"""
-    ok, message, _ = _layout_verdict(_layout_payload(msr=True), _layout_parts())
+def test_partition_verdict_accepts_four_partitions() -> None:
+    ok, message, _ = _partition_verdict(_part_payload(extra=True), _part_parts(extra=True))
+    assert ok is True, message
+
+
+def test_partition_verdict_rejects_leftover_msr() -> None:
+    ok, message, _ = _partition_verdict(_part_payload(msr=True), _part_parts())
     assert ok is False
     assert "保留分区" in message
 
 
-def test_layout_verdict_rejects_efi_not_at_disk_start() -> None:
-    """MSR 还在时 EFI 会被挤到 16 MB，这里必须认出来。"""
-    ok, message, _ = _layout_verdict(_layout_payload(efi_offset_mb=16), _layout_parts())
+def test_partition_verdict_rejects_wrong_efi_size() -> None:
+    """EFI 建成 300 MB（计划 100 MB）→ 报大小不符，并定位到 EFI 那一行。"""
+    payload = _part_payload(efi_size_mb=300)
+    ok, message, _ = _partition_verdict(payload, _part_parts())
     assert ok is False
-    assert "EFI 没有从盘首开始" in message
+    assert "第 1 个分区（EFI）大小不符" in message
+    assert "计划 100 MB" in message
 
 
-def test_layout_verdict_rejects_wrong_partition_count() -> None:
-    ok, message, _ = _layout_verdict(_layout_payload(extra=True), _layout_parts())
+def test_partition_verdict_rejects_wrong_partition_count() -> None:
+    ok, message, _ = _partition_verdict(_part_payload(extra=True), _part_parts())
     assert ok is False
     assert "分区数与计划不符" in message
 
 
-def test_layout_verdict_wants_last_partition_to_eat_rest() -> None:
-    """最后一个分区不带 size= 时应该没有剩余；留下大块空闲说明没吃到。"""
-    ok, message, _ = _layout_verdict(
-        _layout_payload(largest_free=50 * GIB), _layout_parts()
-    )
+def test_partition_verdict_rejects_wrong_size() -> None:
+    """C 实际只建了 100 GB（计划 120 GB）→ 必须报大小不符。"""
+    payload = _part_payload(c_size_gb=100)
+    ok, message, _ = _partition_verdict(payload, _part_parts(c_size_gb=120))
+    assert ok is False
+    assert "大小不符" in message
+    assert "计划 122880 MB" in message
+
+
+def test_partition_verdict_rejects_wrong_drive_letter() -> None:
+    """盘符被别的卷抢走 / assign 到错的分区 → 必须报盘符不符。"""
+    payload = _part_payload(c_letter="G")
+    ok, message, _ = _partition_verdict(payload, _part_parts())
+    assert ok is False
+    assert "盘符不符" in message
+
+
+def test_partition_verdict_rejects_wrong_label() -> None:
+    payload = _part_payload(data_label="Data9")
+    ok, message, _ = _partition_verdict(payload, _part_parts())
+    assert ok is False
+    assert "卷标不符" in message
+
+
+def test_partition_verdict_rejects_wrong_file_system() -> None:
+    payload = _part_payload(data_fs="exFAT")
+    ok, message, _ = _partition_verdict(payload, _part_parts())
+    assert ok is False
+    assert "文件系统不符" in message
+
+
+def test_partition_verdict_rejects_leftover_free_space() -> None:
+    """最后一个分区没吃满（还剩 50 GB）→ 报未分配 + 容量不闭合。"""
+    payload = _part_payload(largest_free=50 * GIB)
+    ok, message, _ = _partition_verdict(payload, _part_parts())
     assert ok is False
     assert "未分配" in message
 
 
-def test_layout_verdict_accepts_four_partitions() -> None:
-    ok, _, _ = _layout_verdict(_layout_payload(extra=True), _layout_parts(extra=True))
-    assert ok is True
+def test_partition_verdict_warns_when_efi_letter_missing() -> None:
+    """ESP 的临时字母查不到只告警：它是隐藏卷，任务收尾就释放。"""
+    payload = _part_payload(drop_efi_letter=True)
+    ok, message, details = _partition_verdict(payload, _part_parts())
+    assert ok is True, message
+    assert details["warnings"], "应当有 ESP 盘符查不到的告警"
+    assert "告警" not in "".join(details["problems"])
+
+
+def test_partition_verdict_rejects_too_small_auto_partition() -> None:
+    """auto 分区只剩 16 GB（下限 20 GB）→ 报低于下限。"""
+    payload = _part_payload(c_size_gb=460)
+    ok, message, _ = _partition_verdict(payload, _part_parts(c_size_gb=460))
+    assert ok is False
+    assert "低于下限" in message
 
 
 # --------------------------------------------------------------------- 默认布局

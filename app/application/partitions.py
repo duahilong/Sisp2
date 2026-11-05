@@ -72,6 +72,9 @@ MSR_GPT = "e3c9e316-0b5c-4db8-817d-f92df00215ae"
 # 对 ESP 天然失效；改成“磁盘号 + 分区号”定位才可靠。
 ESP_GPT = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 
+# 普通数据/系统分区的 GPT 类型（Microsoft Basic Data）；校验分区顺序与类型时用。
+BASIC_GPT = "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7"
+
 # 盘符/对齐之外，GPT 盘真正不能用的空间：盘首 1 MB（主头 + 分区表数组 +
 # diskpart 的 1 MB 对齐起点）、盘尾 1 MB（备份头 + 备份表）。
 # 实测 40 GB 盘：显式合计 = 容量 − 2 MB 时成功且 LargestFree=0；= 容量 − 1 MB

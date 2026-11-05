@@ -34,7 +34,7 @@
 | ② 删 MSR | PowerShell 按 GPT 类型查分区号 → `select disk N` / `select partition k` / `delete partition override` / `exit`，**单独一段脚本** | 退出码非 0 → 立即失败 |
 | ②' 复查 | 再查一次：还查得到 MSR → 中止，**绝不继续建分区** | 报“MSR 分区删除失败：删除后仍然存在（分区 #k）” |
 | ③ 建分区 | `select disk N` + `diskpart_lines(parts)`：EFI → C → D(+E)，最后一项不带 `size=` | 退出码非 0 → 立即失败 |
-| ③' 复核 | 查分区表：分区数 == 计划、没有 Reserved、EFI 在盘首且大小对、盘上没有大块空闲 | 在跑 `dism`（最长 3 小时）**之前**就报错 |
+| ③' 验收 | 对照计划逐项验证（见下一节），任何一项不符 → 分区阶段失败 | 在跑 `dism`（最长 3 小时）**之前**就报错 |
 
 为什么不在清盘脚本里直接写 `select partition 1` + `delete partition override`：万一某台机器没自动建 MSR，`select partition 1` 会报错，**整条 diskpart 脚本会中止**，装机直接失败。所以只对“查到的 MSR”动手：
 
@@ -46,6 +46,52 @@
 为什么不靠 diskpart 的退出码判定成功：不同 build 对“某条命令失败”的退出码行为并不一致（19041 实测返回非 0，但别的版本有返回 0 的记录），所以第二段、第三段之后都各自查一次真实分区表。
 
 代价：盘上没有 MSR 后，动态磁盘转换、部分内核内存转储、某些 BitLocker 配置会受限——这是产品明确接受的取舍。演练预览（`build_diskpart_preview()`）把三段都展示出来，MSR 那两行以 `REM` 形式出现（预览时不知道真实分区号）；第 4 步确认页也会多一行“MSR 分区 · 约 16 MB · 由 `convert gpt` 自动生成，执行时删除”。
+
+## 分区阶段与写入镜像阶段是分开的
+
+`_run_steps()` 只做编排，四个阶段各有独立入口，分区验证不过就不会进入写入：
+
+```
+阶段 1/3  _partition_phase()   清盘 → 删 MSR（删完复查）→ 建分区 → 对照计划验收
+阶段 2/3  _image_phase()       dism 应用镜像
+          _boot_phase()        bcdboot 写引导
+阶段 3/3  verify               “装完能不能开机”（引导文件 + 系统文件）
+```
+
+阶段之间都有取消检查点，日志里也有明确的分隔（`========== 阶段 1/3：分区 ==========`）。
+这样“分区没做对”和“镜像有问题”是两类失败，排查时不会混在一起；分区阶段失败时
+盘上只留有分区、没有写入任何系统数据。
+
+## 分区阶段的验收（对照计划逐项验证）
+
+建完分区后立刻查一次真实分区表 + 卷信息，交给纯函数 `_partition_verdict()` 对照计划检查。
+**这一步只看“分区做对没有”**，不要求镜像/引导已写入，所以能在 `dism` 之前拦住问题。
+
+| 检查项 | 判据 | 实测依据 |
+| --- | --- | --- |
+| 分区表 | 必须是 GPT | |
+| 分区数 | == 计划分区数（3 或 4） | `convert gpt` 的 MSR 必须已删 |
+| 无保留分区 | 盘上不能有 Reserved/MSR | |
+| 顺序与类型 | 按 offset 排序后第 i 个分区：EFI → ESP GUID（`c12a7328-…`），C/D/E → Basic Data（`ebd0a0a2-…`） | 建分区总从盘首第一个空闲区分配 |
+| 大小 | 显式项（EFI、C、有 E 时的 D）\|实际 − 计划\| ≤ 1 MB；最后那个 auto 分区用“剩余”核对 | `Get-Partition.Size` 是 1 MB 对齐的 |
+| 盘符 | 计划盘符必须真的挂在这个分区上：C/D/E 用 `Get-Partition.DriveLetter` 硬校验；ESP 的临时字母在隐藏卷上查不到，用 WMI `Win32_LogicalDiskToPartition` 关联查，查不到只告警 | 实测 ESP 的 `Get-Partition` 盘符为空、WMI 能给出 |
+| 卷标 | `EFI` / `Windows` / `Data` / `Data2` 与计划一致（忽略大小写） | `Get-Partition \| Get-Volume` 对 ESP 也能读到卷标 |
+| 文件系统 | `FAT32` / `NTFS` / `exFAT` 与计划一致 | 同上 |
+| 容量闭合 | `sum(实际分区) + 2 MB == 盘容量`（±2 MB） | GPT 首尾各 1 MB |
+| 盘已吃满 | `LargestFreeExtent ≤ 2 MB` | 最后一个分区不带 `size=` |
+
+失败信息带定位与数值，例如：
+
+```
+第 2 个分区（Windows）大小不符：计划 122880 MB，实际 102400 MB
+第 2 个分区（Windows）盘符不符：计划 K:，实际 I:
+第 3 个分区（Data）卷标不符：计划 Data，实际 Data9
+第 1 个分区（EFI）没有挂上计划盘符 H     ← 只告警（ESP 临时字母收尾就释放）
+盘上有 50 GB 未分配（最后分区应当吃满）
+```
+
+验收结论同时写进 `data` 步骤的 `details.verification`（`message` / `problems` /
+`warnings` / `actual`），界面和日志都能直接看到“计划 vs 实际”。
 
 ## 最后一个数据分区永远吃满
 

@@ -811,7 +811,7 @@ def test_runner_releases_efi_letter_even_when_image_fails(tmp_path):
 
     runner._run_diskpart = fake_diskpart  # type: ignore[method-assign]
     runner._find_msr_partition = lambda disk_number, log, **_: None  # type: ignore[method-assign]
-    runner._check_layout_after_create = (  # type: ignore[method-assign]
+    runner._verify_partitions_after_create = (  # type: ignore[method-assign]
         lambda disk, parts, log: (True, "ok", {"efi_partition": 1})
     )
     runner._apply_image = lambda image_path, index, target, log, **kwargs: (87, "bad image", 0.1)
@@ -964,7 +964,7 @@ def test_run_steps_deletes_msr_then_verifies_before_creating_partitions(tmp_path
     runner = _msr_runner(
         _run_diskpart=fake_diskpart,
         _query_partitions=fake_query,
-        _check_layout_after_create=lambda disk, parts, log: (
+        _verify_partitions_after_create=lambda disk, parts, log: (
             True,
             "ok",
             {"efi_partition": 1},
@@ -984,6 +984,60 @@ def test_run_steps_deletes_msr_then_verifies_before_creating_partitions(tmp_path
     # 找了 1 次（命中），删完复查用满 3 次重试才确认“没有 MSR 了”；
     # 收尾释放盘符复用复核结果里的 ESP 分区号，不会再多查一次
     assert len(queries) == 1 + 3
+
+
+def test_partition_verification_failure_never_reaches_image(tmp_path):
+    """分区阶段的验收不通过 → 立刻结束，绝不写入镜像（两个阶段是分开的）。"""
+    image = _tiny_image(tmp_path)
+    called: list[str] = []
+
+    runner = _msr_runner(
+        _run_diskpart=lambda lines, log, timeout=600.0, **kwargs: (0, "ok"),
+        _query_partitions=lambda disk, log: _empty_disk(),
+        _verify_partitions_after_create=lambda disk, parts, log: (
+            False,
+            "第 2 个分区（Windows）大小不符：计划 122880 MB，实际 102400 MB",
+            {"problems": ["大小不符"]},
+        ),
+        _apply_image=lambda *a, **k: (called.append("image") or (0, "ok", 0.1)),
+        _write_boot=lambda *a, **k: (called.append("boot") or (0, "ok", 0.1)),
+    )
+
+    result = runner.run(_tiny_spec(image), threading.Event())
+
+    assert result.success is False
+    assert "分区验证不通过" in (result.error or "")
+    assert "大小不符" in (result.error or "")
+    assert called == [], f"分区没验过就不该动镜像/引导，实际调用了 {called}"
+
+
+def test_partition_step_details_carry_verification(tmp_path):
+    """分区步骤要把验证结果（对照计划的结论）挂在 details 里，便于事后排查。"""
+    image = _tiny_image(tmp_path)
+    runner = _msr_runner(
+        _run_diskpart=lambda lines, log, timeout=600.0, **kwargs: (0, "ok"),
+        _query_partitions=lambda disk, log: _empty_disk(),
+        _verify_partitions_after_create=lambda disk, parts, log: (
+            True,
+            "GPT、3 个分区与计划一致：#1(E:)=100.00 MB/EFI、#2(F:)=120.00 GB/Windows",
+            {
+                "efi_partition": 1,
+                "problems": [],
+                "warnings": ["第 1 个分区（EFI）没有挂上计划盘符 E"],
+                "partitions": [],
+            },
+        ),
+        **_ok_pipeline(),
+    )
+
+    result = runner.run(_tiny_spec(image), threading.Event())
+
+    assert result.success is True, result.error
+    data_step = next(step for step in result.steps if step.key == "data")
+    verification = data_step.details["verification"]
+    assert "与计划一致" in verification["message"]
+    assert verification["warnings"]
+    assert verification["problems"] == []
 
 
 def test_run_steps_aborts_when_msr_survives_delete(tmp_path):
@@ -1024,7 +1078,7 @@ def test_run_steps_aborts_when_layout_check_fails(tmp_path):
     runner = _msr_runner(
         _run_diskpart=lambda lines, log, timeout=600.0, **kwargs: (0, "ok"),
         _query_partitions=lambda disk, log: _empty_disk(),
-        _check_layout_after_create=lambda disk, parts, log: (False, "分区数与计划不符（期望 3 个，实际 4 个）", {}),
+        _verify_partitions_after_create=lambda disk, parts, log: (False, "分区数与计划不符（期望 3 个，实际 4 个）", {}),
         **_ok_pipeline(
             _apply_image=lambda image_path, index, target, log, **kwargs: (
                 applied.append("image") or 0,
@@ -1181,7 +1235,7 @@ def _stub_runner(monkeypatch, runner, *, spawn=None, diskpart=None, partitions=N
     monkeypatch.setattr(runner, "_query_partitions", partitions or _empty_disk)
     monkeypatch.setattr(
         runner,
-        "_check_layout_after_create",
+        "_verify_partitions_after_create",
         lambda disk, parts, log: (layout_ok, "ok" if layout_ok else "分区数与计划不符", {}),
     )
     if spawn is not None:

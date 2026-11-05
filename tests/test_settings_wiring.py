@@ -242,7 +242,9 @@ def test_runner_accepts_runner_options_on_spec(tmp_path, monkeypatch) -> None:
         "partitions": [],
         "largest_free": 0,
     }
-    runner._check_layout_after_create = lambda disk, parts, log: (True, "ok", {})  # type: ignore[method-assign]
+    runner._verify_partitions_after_create = (  # type: ignore[method-assign]
+        lambda disk, parts, log: (True, "ok", {"efi_partition": 1})
+    )
 
     spec = SimpleNamespace(
         disk_number=1,
