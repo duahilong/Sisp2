@@ -47,6 +47,7 @@ python -m app.gui_web.main --serve --port 8765
 | `POST /api/events/poll` | `{cursor, limit}`，游标轮询补发 |
 | `GET /api/events?cursor=N` | SSE 事件流；可读 `Last-Event-ID` |
 | `GET /api/settings`、`PUT /api/settings`、`DELETE /api/settings` | 读取、patch 更新、重置设置；patch 任一项非法整体拒绝 |
+| `POST /api/settings/export`、`POST /api/settings/import` | 导出/导入设置（封套 `{"version":1,"settings":{…}}`；导入任一字段非法则整体拒绝） |
 | `POST /api/settings/probe` | `{key}` 路径探测 |
 | `POST /api/settings/probe_all` | 探测路径设置 |
 | `POST /api/settings/open_folder` | 打开设置文件夹（Windows） |
@@ -71,14 +72,14 @@ python -m app.gui_web.main --serve --port 8765
     {"role":"data2","label":"Data2","file_system":"exFAT","size_mb":204800,
      "size_display":"200.00 GB","letter":"H"}
   ],
-  "unallocated_bytes": 334379048960
+  "unallocated_bytes": 0
 }
 ```
 
 - `role` 与 `drive_letters` 的键一一对应；`data2` 只有加了额外数据分区（E）才出现。
 - `partition_plan` 是界面第 4 步的直接数据源（真实大小、文件系统、盘符），不要自己再算。
-- `unallocated_bytes` 是按计划建完分区后剩下的未分配空间（`data_size_gb` 吃剩余空间时为 0）。
-- 同一份布局也决定了容量预检（`+1 MB` 对齐余量）与 `verify` 的期望分区数（`≥ len(partition_plan)`）。
+- `unallocated_bytes` 是按计划建完分区后剩下的未分配空间：最后一个数据分区永远 `auto`（不带 `size=`），所以正常情况下是 0，只可能剩下 GPT 首尾那点对齐余量。
+- 同一份布局也决定了容量预检（`LAYOUT_SLACK_MB = 3`：GPT 盘首/盘尾各 1 MB + 1 MB 冗余）与 `verify` 的期望分区数（**等于** `len(partition_plan)`：MSR 已删，多一个或少一个都算失败）。
 
 
 ## Host 校验与安全
