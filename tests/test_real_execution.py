@@ -682,9 +682,84 @@ def test_release_efi_letter_builds_diskpart_script():
         return 0, "ok"
 
     runner._run_diskpart = fake_diskpart  # type: ignore[method-assign]
+    # 归属查询说“E 就在目标盘 2 上” → 可以释放
+    runner._letter_owner_disk = lambda letter, log: 2  # type: ignore[method-assign]
     runner._release_efi_letter(2, "E", _CommandLog(None))
 
     assert seen == [["select volume E", "remove letter=E", "exit"]]
+
+
+def test_release_efi_letter_skips_when_letter_belongs_to_another_volume():
+    """字母挂在别的盘上就不许 remove：``select volume E`` 是按字母选卷的。
+
+    计划阶段的字母只保证“当时空闲”；执行期间可能被 U 盘或重挂载的卷占用，
+    不确认就直接 ``remove letter`` 会把别人的盘符摘掉。
+    """
+    runner = WindowsDiskRunner()
+    seen: list[list[str]] = []
+    log = _CommandLog(None)
+    runner._run_diskpart = lambda lines, log_, timeout=600.0, **kwargs: (
+        seen.append(list(lines)) or (0, "ok")
+    )
+    runner._letter_owner_disk = lambda letter, log_: 3  # type: ignore[method-assign]
+
+    runner._release_efi_letter(2, "E", log)
+
+    assert seen == []
+    assert "跳过释放" in log.summary()
+
+
+def test_release_efi_letter_skips_when_letter_is_unowned():
+    """字母现在不属于任何卷（例如 EFI 根本没建出来/已掉线）→ 也不动手。"""
+    runner = WindowsDiskRunner()
+    seen: list[list[str]] = []
+    log = _CommandLog(None)
+    runner._run_diskpart = lambda lines, log_, timeout=600.0, **kwargs: (
+        seen.append(list(lines)) or (0, "ok")
+    )
+    runner._letter_owner_disk = lambda letter, log_: None  # type: ignore[method-assign]
+
+    runner._release_efi_letter(2, "E", log)
+
+    assert seen == []
+    assert "不属于任何卷" in log.summary()
+
+
+def test_release_efi_letter_skips_when_query_fails():
+    """查不到归属也不动手：宁可留幽灵盘符，也不能误摘别人的盘符。"""
+    from app.application.real_runner import RunnerError
+
+    runner = WindowsDiskRunner()
+    seen: list[list[str]] = []
+    log = _CommandLog(None)
+    runner._run_diskpart = lambda lines, log_, timeout=600.0, **kwargs: (
+        seen.append(list(lines)) or (0, "ok")
+    )
+
+    def boom(letter, log_):
+        raise RunnerError("powershell 不可用")
+
+    runner._letter_owner_disk = boom  # type: ignore[method-assign]
+
+    runner._release_efi_letter(2, "E", log)
+
+    assert seen == []
+    assert "无法确认归属" in log.summary()
+
+
+def test_letter_owner_disk_parses_powershell_output(monkeypatch):
+    """归属查询的解析：JSON 里有 disk_number 就取，没有就当“不属于任何卷”。"""
+    runner = WindowsDiskRunner(powershell="powershell.exe")
+
+    monkeypatch.setattr(
+        runner, "_spawn", lambda command, timeout, log, env=None: (0, '{"letter":"E","disk_number":3}', 0.1)
+    )
+    assert runner._letter_owner_disk("e", _CommandLog(None)) == 3
+
+    monkeypatch.setattr(
+        runner, "_spawn", lambda command, timeout, log, env=None: (0, '{"letter":"E"}', 0.1)
+    )
+    assert runner._letter_owner_disk("E", _CommandLog(None)) is None
 
 
 def test_release_efi_letter_skips_without_letter():
@@ -716,6 +791,7 @@ def test_runner_releases_efi_letter_even_when_image_fails(tmp_path):
     runner._find_msr_partition = lambda disk_number, log, **_: None  # type: ignore[method-assign]
     runner._check_layout_after_create = lambda disk, parts, log: (True, "ok", {})  # type: ignore[method-assign]
     runner._apply_image = lambda image_path, index, target, log, **kwargs: (87, "bad image", 0.1)
+    runner._letter_owner_disk = lambda letter, log: 2  # type: ignore[method-assign]
 
     spec = SimpleNamespace(
         disk_number=2,
@@ -878,6 +954,7 @@ def test_run_steps_deletes_msr_then_verifies_before_creating_partitions(tmp_path
     assert "delete partition override" not in layout
     assert layout.index("create partition efi size=100") == 1
     # 找了 1 次（命中），删完复查用满 3 次重试才确认“没有 MSR 了”
+    # （盘符归属走的是独立的 ``_letter_owner_disk``，不计入这里的查询次数）
     assert len(queries) == 1 + 3
 
 

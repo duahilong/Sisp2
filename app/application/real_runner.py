@@ -101,10 +101,28 @@ DISM_TIMEOUT = 3 * 3600.0
 BCDBOOT_TIMEOUT = 120.0
 VERIFY_TIMEOUT = 120.0
 MSR_QUERY_TIMEOUT = 60.0
+# 释放 EFI 临时盘符前，按字母查一次它当前属于哪块盘
+LETTER_OWNER_TIMEOUT = 60.0
 # ``convert gpt`` 刚结束时分区枚举可能还没跟上：查 MSR 时重试 3 次、间隔 300ms。
 # 只是“再查一次”，绝不会猜分区号。
 MSR_QUERY_ATTEMPTS = 3
 MSR_QUERY_INTERVAL = 0.3
+
+# 按盘符问“你现在属于哪块盘”。释放 EFI 临时盘符前先跑这个：计划阶段分配的
+# 字母只保证“当时空闲”，而 diskpart 的 ``select volume <字母>`` 是按字母选卷的，
+# 不确认就 ``remove letter`` 会把别的卷（U 盘、重挂载）的盘符摘掉。
+# 不用 ``Get-Partition -DiskNumber N`` 反查：ESP 是隐藏卷，目标盘的分区列表里
+# 不一定带这个临时盘符；按字母直接问归属没有这个盲区。
+_LETTER_OWNER_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$letter = [string]$env:VIX_LETTER
+$part = Get-Partition -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($part) {
+    [pscustomobject]@{ letter = $letter; disk_number = [int]$part.DiskNumber } | ConvertTo-Json -Compress
+} else {
+    '{"letter":"' + $letter + '"}'
+}
+"""
 
 # 与 service.py 的分区顺序保持一致：EFI → Windows → Data。
 _STEP_ORDER = ("efi", "windows", "data")
@@ -928,6 +946,35 @@ class WindowsDiskRunner:
             raise RunnerError(f"查询分区的输出格式不对：{_tail(raw, 300)}")
         return dict(payload)
 
+    def _letter_owner_disk(self, letter: str, log: _CommandLog) -> int | None:
+        """按字母查它当前属于哪块盘（查不到返回 ``None``）。
+
+        释放 EFI 临时盘符前用它确认归属；不依赖“目标盘的分区列表里带不带这个盘符”
+        （ESP 是隐藏卷，某些 build 上那个列表里看不到临时分配的字母）。
+        """
+        if not self.powershell:
+            raise RunnerError("找不到 powershell.exe，无法确认盘符归属")
+        env = dict(os.environ)
+        env["VIX_LETTER"] = str(letter).strip().upper()
+        code, output, _elapsed = self._spawn(
+            [self.powershell, "-NoProfile", "-NonInteractive", "-Command", _LETTER_OWNER_SCRIPT],
+            LETTER_OWNER_TIMEOUT,
+            log,
+            env=env,
+        )
+        if code != 0:
+            raise RunnerError(f"查询盘符归属失败（退出码 {code}）：{_tail(output, 400)}")
+        raw = (output or "").strip()
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RunnerError(f"查询盘符归属的输出不是合法 JSON：{_tail(raw, 300)}") from exc
+        if not isinstance(payload, Mapping):
+            return None
+        return _to_int(payload.get("disk_number"))
+
     def _check_layout_after_create(
         self,
         disk_number: int,
@@ -1014,11 +1061,30 @@ class WindowsDiskRunner:
 
         EFI 是隐藏卷，`clean` 后它的盘符可能残留成幽灵盘符（DriveInfo 里
         IsReady=False），下次 assign 会失败；这里主动 remove letter。
+
+        **释放前先按字母问一次归属**：计划阶段的字母只保证“当时空闲”，执行期间
+        可能被其它卷（U 盘、重挂载的卷）占用；而 diskpart 的
+        `select volume <字母>` 是**按盘符选卷**的，不确认就直接 remove 会把别人的
+        盘符摘掉。归属不是这块盘、或查不到，就跳过（宁可留个幽灵盘符）。
         清理失败只记日志，不影响已经成功的写盘结果。
         """
         if not letter:
             return
-        lines = [f"select volume {letter}", f"remove letter={letter}", "exit"]
+        wanted = str(letter).strip().upper()
+        try:
+            owner = self._letter_owner_disk(wanted, log)
+        except Exception as exc:  # noqa: BLE001 - 查不了就不动
+            log.write(f"释放 EFI 盘符 {wanted} 前无法确认归属，已跳过：{exc}")
+            return
+        if owner is None:
+            log.write(f"EFI 盘符 {wanted} 当前不属于任何卷，跳过释放")
+            return
+        if int(owner) != int(disk_number):
+            log.write(
+                f"EFI 盘符 {wanted} 现在挂在磁盘 {owner} 上（目标盘是 {disk_number}），跳过释放"
+            )
+            return
+        lines = [f"select volume {wanted}", f"remove letter={wanted}", "exit"]
         log.block("释放 EFI 盘符", "\n".join(lines))
         try:
             code, _output = self._run_diskpart(

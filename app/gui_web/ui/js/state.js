@@ -244,7 +244,12 @@ export function removeTarget(diskNumber) {
 export function targetError(target) {
   const disk = diskOf(target.diskNumber);
   if (!disk) return '硬盘已不在列表里';
-  return checkLayout(disk.size_bytes, target.sysGb, target.dataGb, target.extras || []);
+  // EFI 大小要跟“分配时用的预留”同源：reserveEfiMb() 读计划/设置里的真实值
+  // （可能 300 MB），而 checkLayout 的默认参数是 100 MB；不传就会差出 0.2 GB，
+  // 让“界面判 OK、后端 check_minimums 拒绝”的窗口出现。
+  return checkLayout(
+    disk.size_bytes, target.sysGb, target.dataGb, target.extras || [], reserveEfiMb(),
+  );
 }
 
 /** 数据分区（D 与 E）统一使用的文件系统。

@@ -354,11 +354,11 @@ _IDENTITY = {"unique_id": "unique-1", "serial_number": "SN-1", "model": "test di
 
 
 def test_gate_rejects_disk_matching_config_excluded_names(tmp_path: Path) -> None:
-    """分区/修复引导走的闸门必须吃配置里的 excluded_disk_names。
+    """写盘闸门必须吃配置里的 excluded_disk_names。
 
     这条旁路曾经完全不生效：网页里的 gate 只传两个参数，
-    ``excluded_names`` 默认成空列表，于是排除名单在“硬盘分区”“修复引导”
-    两条路径上形同虚设（整盘安装走 spec.config_payload，一直是生效的）。
+    ``excluded_names`` 默认成空列表，于是排除名单在“修复引导”这条路上
+    形同虚设（整盘安装走 spec.config_payload，一直是生效的）。
     """
     api = _gate_api(
         [_summary(model="Samsung SSD 980 PRO 1TB")],

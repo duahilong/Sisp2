@@ -341,6 +341,53 @@ def test_manual_sys_size_moves_the_auto_partition(tmp_path: Path) -> None:
     assert got["payload"]["data_size"] == "auto"
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="没有 node")
+def test_size_error_uses_configured_efi_size(tmp_path: Path) -> None:
+    """前端容量判定必须用“真实 EFI 大小”，不能永远按标的 100 MB 估。
+
+    回归：`targetError()` 调 `checkLayout()` 时漏传 `efiMb`，于是用默认 100 MB，
+    而分配 / 预留给 auto 分区的是设置里的真实值（例：300 MB）。100 GB 盘、
+    C=79.8 GB 时前端判 OK、后端 `check_minimums` 拒绝——用户看到的是“下一步能点，
+    生成计划却报错”。
+    """
+    for name in ("derive.js", "state.js"):
+        (tmp_path / name.replace(".js", "_copy.mjs")).write_text(
+            (JS / name).read_text(encoding="utf-8").replace("'./derive.js'", "'./derive_copy.mjs'"),
+            encoding="utf-8",
+        )
+    script = tmp_path / "size_error.mjs"
+    script.write_text(
+        chr(10).join([
+            "import { state, resetWizard, addTarget, targetOf, targetError } from './state_copy.mjs';",
+            "const GB = 1024 ** 3;",
+            "state.disks = [{ disk_number: 1, size_bytes: 100 * GB, model: 'X',",
+            "  partition_style: 'GPT', partitions: [] }];",
+            "state.settings = { sysDefaultGb: 60, dataDefaultGb: 'auto',",
+            "  defaultFs: 'NTFS', efiDefaultMb: 300 };",
+            "resetWizard();",
+            "addTarget(1);",
+            "const target = targetOf(1);",
+            "const out = {};",
+            "for (const c of [79.6, 79.8]) { target.sysGb = c; out[c] = targetError(target); }",
+            "console.log(JSON.stringify(out));",
+        ]) + chr(10),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [shutil.which("node"), str(script)],
+        cwd=str(tmp_path), capture_output=True, text=True, check=False,
+        # 输出里带中文（容量不足的提示），Windows 默认按 gbk 解码会直接抛
+        encoding="utf-8", errors="replace",
+    )
+    assert proc.returncode == 0, f"{proc.stdout}{proc.stderr}"
+    got = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    # 79.6 GB：剩 20.1 GB，够 auto 分区的下限（后端同口径也放行）
+    assert got["79.6"] == "", got
+    # 79.8 GB：剩 19.9 GB，不够 20 GB（旧实现漏算 EFI 会误判成 OK）
+    assert "至少要 20 GB" in got["79.8"], got
+
+
 def test_last_data_partition_is_always_sent_as_auto(tmp_path: Path) -> None:
     """最后一个数据分区**永远**发 ``"auto"``，由 diskpart 自己吃剩余空间。
 

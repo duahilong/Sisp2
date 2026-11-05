@@ -13,13 +13,13 @@ ui/
    ├─ main.js        # 入口：装配、渲染调度、事件流、轮询
    ├─ api.js         # REST 封装（统一解 {ok,data} / {ok,error}）、EventSource
    ├─ dom.js         # $ / $$ / esc / 事件委托 / 时间戳
-   ├─ derive.js      # 纯函数：容量格式化、分区地图切片、盘符建议、大小校验
+   ├─ derive.js      # 纯函数：容量格式化、分区地图切片、大小校验
    ├─ state.js       # 唯一可变状态 + 订阅通知 + 向导数据操作
    ├─ shell.js       # 外壳：菜单、工具栏、日志坞、状态栏、toast、弹窗、主题
    ├─ view-main.js   # 主页面：磁盘概览条、盘头、分区地图、分区明细表
    ├─ view-install.js# 系统安装：4 步向导 + 进度页
    ├─ view-settings.js # 设置页
-   └─ dialogs.js     # 硬盘分区 / 修复引导 / 磁盘检查 / 关于 / 快捷键
+   └─ dialogs.js     # 修复引导 / 磁盘检查 / 关于 / 快捷键
 ```
 
 ## 开发约定
