@@ -66,6 +66,12 @@ MAX_DATA_PARTITIONS = 2
 # 我们的最终布局只要 EFI + C + D(+E)，所以建分区前把它按类型删掉（见 strip_msr_lines）。
 MSR_GPT = "e3c9e316-0b5c-4db8-817d-f92df00215ae"
 
+# EFI 系统分区（ESP）的 GPT 类型。释放临时盘符时按它找分区号：
+# ESP 是隐藏卷，``Get-Partition -DriveLetter`` / ``Get-Volume`` / ``Win32_Volume``
+# 都看不到它的临时字母（只有 ``Win32_LogicalDisk`` 看得到），所以“按字母查归属”
+# 对 ESP 天然失效；改成“磁盘号 + 分区号”定位才可靠。
+ESP_GPT = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+
 # 盘符/对齐之外，GPT 盘真正不能用的空间：盘首 1 MB（主头 + 分区表数组 +
 # diskpart 的 1 MB 对齐起点）、盘尾 1 MB（备份头 + 备份表）。
 # 实测 40 GB 盘：显式合计 = 容量 − 2 MB 时成功且 LargestFree=0；= 容量 − 1 MB

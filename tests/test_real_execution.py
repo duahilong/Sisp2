@@ -673,7 +673,31 @@ def test_prepare_does_not_accumulate_implicit_allowlist():
 
 
 # ---------------------------------------------------------------- EFI 盘符释放
-def test_release_efi_letter_builds_diskpart_script():
+def _esp_payload(number=1):
+    return {
+        "partition_style": "GPT",
+        "largest_free": 0,
+        "partitions": [
+            {
+                "number": number,
+                "offset_bytes": 1024 * 1024,
+                "size_bytes": 100 * 1024 * 1024,
+                "type": "System",
+                "gpt_type": "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}",
+                "drive_letter": None,
+            }
+        ],
+    }
+
+
+def test_release_efi_letter_uses_disk_and_partition_not_letter():
+    """按“磁盘号 + 分区号”释放，不再 ``select volume <字母>``。
+
+    实测（Win10 19045）ESP 的临时字母在 ``Get-Partition -DriveLetter`` /
+    ``Get-Volume`` / ``Win32_Volume`` 里都查不到（只有 ``Win32_LogicalDisk`` 看得到），
+    所以“先按字母查归属”必然查空 → 跳过释放 → 幽灵盘符残留。改成定位 ESP 分区后，
+    字母被谁占用都不影响：操作对象是确定的分区。
+    """
     runner = WindowsDiskRunner()
     seen: list[list[str]] = []
 
@@ -682,51 +706,49 @@ def test_release_efi_letter_builds_diskpart_script():
         return 0, "ok"
 
     runner._run_diskpart = fake_diskpart  # type: ignore[method-assign]
-    # 归属查询说“E 就在目标盘 2 上” → 可以释放
-    runner._letter_owner_disk = lambda letter, log: 2  # type: ignore[method-assign]
+    runner._esp_partition_number = lambda disk, log: 1  # type: ignore[method-assign]
     runner._release_efi_letter(2, "E", _CommandLog(None))
 
-    assert seen == [["select volume E", "remove letter=E", "exit"]]
+    assert seen == [
+        ["select disk 2", "select partition 1", "remove letter=E", "exit"]
+    ]
 
 
-def test_release_efi_letter_skips_when_letter_belongs_to_another_volume():
-    """字母挂在别的盘上就不许 remove：``select volume E`` 是按字母选卷的。
+def test_release_efi_letter_reuses_partition_number_from_layout_check():
+    """布局复核时已经知道 ESP 是第几个分区，收尾直接用，不再查一次。"""
+    runner = WindowsDiskRunner()
+    seen: list[list[str]] = []
+    runner._run_diskpart = lambda lines, log, timeout=600.0, **kwargs: (
+        seen.append(list(lines)) or (0, "ok")
+    )
 
-    计划阶段的字母只保证“当时空闲”；执行期间可能被 U 盘或重挂载的卷占用，
-    不确认就直接 ``remove letter`` 会把别人的盘符摘掉。
-    """
+    def boom(disk, log):
+        raise AssertionError("不该再查分区表")
+
+    runner._esp_partition_number = boom  # type: ignore[method-assign]
+    runner._release_efi_letter(3, "F", _CommandLog(None), efi_partition=4)
+
+    assert seen == [["select disk 3", "select partition 4", "remove letter=F", "exit"]]
+
+
+def test_release_efi_letter_skips_when_no_esp_found():
+    """盘上没有 ESP（还没分区 / 分区表被改过）→ 不动手。"""
     runner = WindowsDiskRunner()
     seen: list[list[str]] = []
     log = _CommandLog(None)
     runner._run_diskpart = lambda lines, log_, timeout=600.0, **kwargs: (
         seen.append(list(lines)) or (0, "ok")
     )
-    runner._letter_owner_disk = lambda letter, log_: 3  # type: ignore[method-assign]
+    runner._esp_partition_number = lambda disk, log_: None  # type: ignore[method-assign]
 
     runner._release_efi_letter(2, "E", log)
 
     assert seen == []
-    assert "跳过释放" in log.summary()
-
-
-def test_release_efi_letter_skips_when_letter_is_unowned():
-    """字母现在不属于任何卷（例如 EFI 根本没建出来/已掉线）→ 也不动手。"""
-    runner = WindowsDiskRunner()
-    seen: list[list[str]] = []
-    log = _CommandLog(None)
-    runner._run_diskpart = lambda lines, log_, timeout=600.0, **kwargs: (
-        seen.append(list(lines)) or (0, "ok")
-    )
-    runner._letter_owner_disk = lambda letter, log_: None  # type: ignore[method-assign]
-
-    runner._release_efi_letter(2, "E", log)
-
-    assert seen == []
-    assert "不属于任何卷" in log.summary()
+    assert "找不到 ESP 分区" in log.summary()
 
 
 def test_release_efi_letter_skips_when_query_fails():
-    """查不到归属也不动手：宁可留幽灵盘符，也不能误摘别人的盘符。"""
+    """查不到 ESP 也不动手：宁可留幽灵盘符，也不误操作。"""
     from app.application.real_runner import RunnerError
 
     runner = WindowsDiskRunner()
@@ -736,30 +758,30 @@ def test_release_efi_letter_skips_when_query_fails():
         seen.append(list(lines)) or (0, "ok")
     )
 
-    def boom(letter, log_):
+    def boom(disk, log_):
         raise RunnerError("powershell 不可用")
 
-    runner._letter_owner_disk = boom  # type: ignore[method-assign]
+    runner._esp_partition_number = boom  # type: ignore[method-assign]
 
     runner._release_efi_letter(2, "E", log)
 
     assert seen == []
-    assert "无法确认归属" in log.summary()
+    assert "已跳过" in log.summary()
 
 
-def test_letter_owner_disk_parses_powershell_output(monkeypatch):
-    """归属查询的解析：JSON 里有 disk_number 就取，没有就当“不属于任何卷”。"""
+def test_esp_partition_number_matches_gpt_type():
+    """按 GPT 类型找 ESP，不依赖盘符（ESP 是隐藏卷，可能没有可读字母）。"""
     runner = WindowsDiskRunner(powershell="powershell.exe")
+    runner._query_partitions = lambda disk, log: _esp_payload(4)  # type: ignore[method-assign]
+    assert runner._esp_partition_number(2, _CommandLog(None)) == 4
 
-    monkeypatch.setattr(
-        runner, "_spawn", lambda command, timeout, log, env=None: (0, '{"letter":"E","disk_number":3}', 0.1)
-    )
-    assert runner._letter_owner_disk("e", _CommandLog(None)) == 3
-
-    monkeypatch.setattr(
-        runner, "_spawn", lambda command, timeout, log, env=None: (0, '{"letter":"E"}', 0.1)
-    )
-    assert runner._letter_owner_disk("E", _CommandLog(None)) is None
+    runner._query_partitions = lambda disk, log: {  # type: ignore[method-assign]
+        "partition_style": "GPT",
+        "partitions": [
+            {"number": 1, "type": "Basic", "gpt_type": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}"}
+        ],
+    }
+    assert runner._esp_partition_number(2, _CommandLog(None)) is None
 
 
 def test_release_efi_letter_skips_without_letter():
@@ -789,9 +811,10 @@ def test_runner_releases_efi_letter_even_when_image_fails(tmp_path):
 
     runner._run_diskpart = fake_diskpart  # type: ignore[method-assign]
     runner._find_msr_partition = lambda disk_number, log, **_: None  # type: ignore[method-assign]
-    runner._check_layout_after_create = lambda disk, parts, log: (True, "ok", {})  # type: ignore[method-assign]
+    runner._check_layout_after_create = (  # type: ignore[method-assign]
+        lambda disk, parts, log: (True, "ok", {"efi_partition": 1})
+    )
     runner._apply_image = lambda image_path, index, target, log, **kwargs: (87, "bad image", 0.1)
-    runner._letter_owner_disk = lambda letter, log: 2  # type: ignore[method-assign]
 
     spec = SimpleNamespace(
         disk_number=2,
@@ -813,7 +836,8 @@ def test_runner_releases_efi_letter_even_when_image_fails(tmp_path):
     assert result.success is False
     assert "应用镜像失败" in (result.error or "")
     assert scripts[0][:2] == ["select disk 2", "clean"]
-    assert ["select volume E", "remove letter=E", "exit"] in scripts
+    # 收尾按“磁盘 + 分区号”释放，不按字母选卷
+    assert ["select disk 2", "select partition 1", "remove letter=E", "exit"] in scripts
 
 
 # ----------------------------------------------------------- MSR 删除（两段式）
@@ -940,7 +964,11 @@ def test_run_steps_deletes_msr_then_verifies_before_creating_partitions(tmp_path
     runner = _msr_runner(
         _run_diskpart=fake_diskpart,
         _query_partitions=fake_query,
-        _check_layout_after_create=lambda disk, parts, log: (True, "ok", {}),
+        _check_layout_after_create=lambda disk, parts, log: (
+            True,
+            "ok",
+            {"efi_partition": 1},
+        ),
         **_ok_pipeline(),
     )
 
@@ -953,8 +981,8 @@ def test_run_steps_deletes_msr_then_verifies_before_creating_partitions(tmp_path
     layout = scripts[2]
     assert "delete partition override" not in layout
     assert layout.index("create partition efi size=100") == 1
-    # 找了 1 次（命中），删完复查用满 3 次重试才确认“没有 MSR 了”
-    # （盘符归属走的是独立的 ``_letter_owner_disk``，不计入这里的查询次数）
+    # 找了 1 次（命中），删完复查用满 3 次重试才确认“没有 MSR 了”；
+    # 收尾释放盘符复用复核结果里的 ESP 分区号，不会再多查一次
     assert len(queries) == 1 + 3
 
 

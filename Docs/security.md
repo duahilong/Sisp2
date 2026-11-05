@@ -10,7 +10,9 @@ Sisp2 的真实写盘会清空目标盘。以下描述的是当前代码行为�
 
 计划阶段还有一道**镜像可应用性**门禁：ISO（dism 不能直接 `/Apply-Image` 到分区）、非 WIM/ESD/SWM 文件、dism 读不到索引、索引不存在，都会变成计划阻断项并让“开始”置灰。理由很实际：这些情况如果拖到写入阶段才发现，盘已经被 `clean` 了。装机结果也不以“命令退出码 0”为准：`verify` 会检查 EFI 分区里真的有 `bootmgfw.efi`、系统分区里真的有 `Windows\System32\config\SYSTEM`，缺失即判任务失败。
 
-**EFI 临时盘符的释放不按字母盲摘**：计划阶段分配的字母只保证“当时空闲”，执行期间可能被其它卷（U 盘、重挂载）占用；而 diskpart 的 `select volume <字母>` 是**按字母选卷**的。所以任务结束时先按字母问一次“这个盘符现在属于哪块盘”（`Get-Partition -DriveLetter`），确认归属就是目标盘才 `remove letter`；挂在别的盘、不属于任何卷、或查询失败一律跳过（宁可留一个幽灵盘符，也不能摘掉别人的盘符）。
+**EFI 临时盘符按“磁盘号 + 分区号”释放，不按字母选卷**：计划阶段分配的字母只保证“当时空闲”，执行期间可能被其它卷（U 盘、重挂载）占用；而 diskpart 的 `select volume <字母>` 是**按字母选卷**的，不确认就 `remove letter` 会摘掉别人的盘符。现在的做法是先定位目标盘上的 ESP（按 GPT 类型 `c12a7328-…` 找分区号，优先复用布局复核时已经拿到的编号），再 `select disk N` + `select partition k` + `remove letter=X`——操作对象是确定的分区，字母被谁占用都不影响。找不到 ESP（盘还没分区/分区表被改过）或查询失败就跳过并写日志。
+
+**为什么不“先按字母查归属”**：ESP 是隐藏卷，实测（Win10 19045）`Get-Partition -DriveLetter E`、`Get-Volume -DriveLetter E`、`Win32_Volume -Filter "DriveLetter='E:'"` 全都查不到它临时分配的字母（只有 `Win32_LogicalDisk` 能看到）。按字母查归属会稳定地“查空 → 跳过释放”，幽灵盘符反而留下来，下一次 `assign letter` 就可能失败。
 
 GUI 的有效模式由命令行 `--dry-run` 与 `dryRunByDefault` 取逻辑或决定，并且构造时的 dry-run 是硬上限：后续界面或 API 的 `start_session(dry_run=false)`、`prepare(dry_run=false)` 不能关闭它。真实模式的 `prepare()` / `authorize_disks()` / `confirm()` 只会把**本次勾选并确认过的盘**加入服务白名单（`confirm()` 在确认文本校验通过后按任务盘号重新补齐——刷新页面会重开会话并撤掉隐式授权，不补的话已排队任务会因为白名单为空而无法确认）；上一次 `prepare()` 隐式加入且本次未选中的盘会被撤出，新会话也会清空这些隐式授权。因此 GUI 选盘不是独立于该策略的额外白名单来源，使用者必须特别核对盘号与身份。
 
