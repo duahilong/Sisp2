@@ -55,7 +55,8 @@ from app.preflight import load_config, resolve_config_path
 _LOGGER = logging.getLogger(__name__)
 
 # 与 app.drive_letters 保持一致的三分区布局；本地兜底时复用同一套常量。
-AVAILABLE_DRIVE_LETTERS = list("EFGHIJKLMNOPQRSTUVWXYZ")
+# E–Z 优先，A/B 兜底（见 app/drive_letters.py 的说明）。
+AVAILABLE_DRIVE_LETTERS = [*list("EFGHIJKLMNOPQRSTUVWXYZ"), "A", "B"]
 LETTERS_PER_DISK = 3
 DRIVE_LETTER_ROLES = ("efi", "windows", "data")
 

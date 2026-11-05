@@ -16,6 +16,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+# E–Z 优先，A/B 放最后兜底：现代 Windows（Vista 之后）没有软驱时允许把 A:/B:
+# 分给固定磁盘，dism /ApplyDir=A:\、bcdboot /s A: 都实测可用；但少数老程序看到
+# A:/B: 会当成软驱，所以只在字母紧张时才用它。
+# 合计 24 个：正好够“6 块盘 × 4 分区（EFI+C+D+E）”，或“8 块盘 × 3 分区”。
 AVAILABLE_DRIVE_LETTERS = [
     "E",
     "F",
@@ -39,6 +43,8 @@ AVAILABLE_DRIVE_LETTERS = [
     "X",
     "Y",
     "Z",
+    "A",
+    "B",
 ]
 # 三分区（EFI / Windows / Data）
 LETTERS_PER_DISK = 3

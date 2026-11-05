@@ -587,6 +587,55 @@ def test_drive_letters_allocate_four_for_extra_partition() -> None:
     assert allocations[2] == {"efi": "I", "windows": "J", "data": "K"}
 
 
+def test_drive_letters_pool_uses_a_and_b_as_fallback() -> None:
+    """池是 E–Z（22 个）+ A/B 兜底（2 个）= 24。
+
+    A/B 放最后：现代 Windows 没软驱时允许把 A:/B: 分给固定磁盘（dism 到 A: 根目录、
+    bcdboot /s A: 实测可用），但老程序看到 A:/B: 会当软驱，所以只在字母紧张时用。
+    """
+    from app.drive_letters import AVAILABLE_DRIVE_LETTERS
+
+    assert len(AVAILABLE_DRIVE_LETTERS) == 24
+    assert AVAILABLE_DRIVE_LETTERS[:22] == list("EFGHIJKLMNOPQRSTUVWXYZ")
+    assert AVAILABLE_DRIVE_LETTERS[-2:] == ["A", "B"]
+
+
+def test_six_disks_with_extra_partition_fill_the_pool() -> None:
+    """6 块盘 × 4 分区（EFI+C+D+E）= 24 个字母，正好用满。"""
+    from app.drive_letters import AVAILABLE_DRIVE_LETTERS
+
+    allocations = build_drive_letter_allocations(
+        list(range(6)), ["C", "D"], {number: 1 for number in range(6)}
+    )
+    used = [letter for alloc in allocations.values() for letter in alloc.values()]
+    assert len(used) == 24
+    assert allocations[5] == {"efi": "Y", "windows": "Z", "data": "A", "data2": "B"}
+    assert set(used) == set(AVAILABLE_DRIVE_LETTERS)
+
+
+def test_seven_disks_with_extra_partition_do_not_fit() -> None:
+    with pytest.raises(RuntimeError) as excinfo:
+        build_drive_letter_allocations(
+            list(range(7)), ["C", "D"], {number: 1 for number in range(7)}
+        )
+    assert "可用盘符不足" in str(excinfo.value)
+    assert "4 个盘符" in str(excinfo.value)
+
+
+def test_eight_three_partition_disks_fill_the_pool() -> None:
+    """三分区盘 8 块 × 3 = 24，最后一块落到 A/B。"""
+    allocations = build_drive_letter_allocations(list(range(8)), ["C", "D"])
+    assert allocations[7] == {"efi": "Z", "windows": "A", "data": "B"}
+
+
+def test_service_fallback_pool_matches_drive_letters() -> None:
+    """service 里的本地兜底池必须和 app.drive_letters 完全一致，否则行为分叉。"""
+    from app.application import service
+    from app.drive_letters import AVAILABLE_DRIVE_LETTERS
+
+    assert service.AVAILABLE_DRIVE_LETTERS == AVAILABLE_DRIVE_LETTERS
+
+
 def test_drive_letters_report_short_pool() -> None:
     with pytest.raises(RuntimeError) as excinfo:
         build_drive_letter_allocations([1], [letter for letter in "EFGHIJKLMNOPQRSTUVWXY"], {1: 1})
