@@ -111,6 +111,25 @@ async function waitForHttp(url, timeoutMs = 15000) {
   throw new Error(`等不到 ${url}`);
 }
 
+/**
+ * 每块盘的容量（GB，1 位小数），直接问后端的 ``/api/disks``。
+ *
+ * 界面上的“总容量”是 ``fmtSize`` 的展示串（``1.82 TB`` / ``200.00 GB``），
+ * ``parseFloat('1.82 TB')`` 只会得到 1.82 —— 在 ≥1 TB 的盘上，所有容量断言
+ * 都会变成误报（VM 上那块 2 TB 测试盘就是这么把冒烟跑红的）。这里改用真实字节数。
+ */
+async function diskCapacityGb(baseUrl) {
+  const response = await fetch(new URL('api/disks', baseUrl));
+  if (!response.ok) throw new Error(`/api/disks 返回 ${response.status}`);
+  const payload = await response.json();
+  const map = new Map();
+  for (const disk of (payload && payload.data) || []) {
+    const bytes = Number(disk && disk.size_bytes) || 0;
+    if (bytes > 0) map.set(Number(disk.disk_number), Math.round((bytes / (1024 ** 3)) * 10) / 10);
+  }
+  return map;
+}
+
 async function main() {
   const chrome = spawn(
     CHROME,
@@ -128,6 +147,20 @@ async function main() {
   );
 
   const problems = [];
+  // 容量一律按后端给的真实字节数算，不解析界面上的“1.82 TB”（见 diskCapacityGb）
+  let capacities = new Map();
+  try {
+    capacities = await diskCapacityGb(URL_);
+  } catch (error) {
+    console.error(`读 /api/disks 失败：${error && error.message}`);
+  }
+  const capacityOf = (step) => {
+    const gb = capacities.get(Number(step && step.diskNumber)) || 0;
+    if (!(gb > 0)) {
+      problems.push(`读不到磁盘 ${step && step.diskNumber} 的容量（/api/disks 里没有这块盘）`);
+    }
+    return gb;
+  };
   // 浏览器起不来（路径不对/没装）时直接给一句人话，别甩一棵 spawn 堆栈。
   chrome.on('error', (error) => {
     console.error(JSON.stringify({
@@ -268,10 +301,9 @@ async function main() {
         sysInput.value = '116';
         sysInput.dispatchEvent(new Event('input', { bubbles: true }));
         const dataInput = document.querySelector('#wzBody .szrow input[data-size="data"]');
-        const totalText = String((document.querySelector('#wzBody .trest [data-total]') || {}).textContent || '');
         const freeSeg = document.querySelector('#wzBody .wseg.free');
         const result = {
-          capacityGb: parseFloat(totalText) || 0,
+          diskNumber: Number((document.querySelector('#wzBody .tgt') || { dataset: {} }).dataset.disk) || 0,
           sysGb: Number(sysInput.value) || 0,
           dataGb: dataInput ? Number(dataInput.value) || 0 : 0,
           dataReadonly: Boolean(dataInput && dataInput.readOnly),
@@ -343,7 +375,6 @@ async function main() {
         const beforeExtra = Number(extraInput.value) || 0;
         dataInput.value = '100';
         dataInput.dispatchEvent(new Event('input', { bubbles: true }));
-        const totalText = String((document.querySelector('#wzBody .trest [data-total]') || {}).textContent || '');
         const sysGb = Number((document.querySelector('#wzBody .szrow input[data-size="sys"]') || {}).value) || 0;
         const result = {
           beforeData,
@@ -351,7 +382,7 @@ async function main() {
           dataGb: Number(dataInput.value) || 0,
           extraGb: Number(extraInput.value) || 0,
           sysGb,
-          capacityGb: parseFloat(totalText) || 0,
+          diskNumber: Number((document.querySelector('#wzBody .tgt') || { dataset: {} }).dataset.disk) || 0,
           err: String((document.querySelector('#wzBody .errmsg') || {}).textContent || ''),
         };
         // 恢复，后面的断言按平分后的值走
@@ -373,7 +404,6 @@ async function main() {
           return out;
         };
         const sum = (v) => Math.round(((v.sys || 0) + (v.data || 0) + (v.extra || 0)) * 10) / 10;
-        const capacityGb = parseFloat(String((document.querySelector('#wzBody .trest [data-total]') || {}).textContent || '')) || 0;
         const before = readValues();
         const button = document.querySelector('#wzBody .presets button[data-preset="200"]');
         if (button) button.click();
@@ -387,9 +417,10 @@ async function main() {
           extraBefore: before.extra,
           extraAfter: after.extra,
           sumAfter: sum(after),
-          capacityGb: capacityGb,
-          over: sum(after) > capacityGb,
-          evenSplit: after.extra !== undefined && Math.abs(after.data - after.extra) <= 0.1,
+          diskNumber: Number((document.querySelector('#wzBody .tgt') || { dataset: {} }).dataset.disk) || 0,
+          // “平分”允许 0.2 GB 的取整差：D 向下取整到 0.1，E 被写成精确的剩余量，
+          // 两者本来就可能差 0.1（831.3 / 831.4），卡在 0.1 会被浮点误差判死。
+          evenSplit: after.extra !== undefined && Math.abs(after.data - after.extra) <= 0.2,
           error: String((document.querySelector('#wzBody .errmsg') || {}).textContent || ''),
           nextDisabled: Boolean((document.querySelector('#wzNext') || {}).disabled),
         });
@@ -399,7 +430,10 @@ async function main() {
       const presetResult = JSON.parse(preset);
       summary.steps.push({ step2preset: presetResult });
       if (!presetResult.clicked) problems.push('第 2 步找不到快捷容量按钮 200');
-      if (presetResult.over) problems.push('快捷容量 200 之后 C+D+E 超过了盘容量');
+      const presetCapacityGb = capacityOf(presetResult);
+      if (presetResult.sumAfter > presetCapacityGb + 0.5) {
+        problems.push(`快捷容量 200 之后 C+D+E（${presetResult.sumAfter} GB）超过了盘容量 ${presetCapacityGb} GB`);
+      }
       if (!presetResult.evenSplit) {
         problems.push(`快捷容量 200 之后 D(${presetResult.dataAfter}) 与 E(${presetResult.extraAfter}) 没有平分剩余容量`);
       }
@@ -413,8 +447,9 @@ async function main() {
           problems.push(`改 D 之后 E 没有跟着变（还是 ${splitStep.extraGb} GB，应等于剩余空间）`);
         }
         const sum = splitStep.sysGb + splitStep.dataGb + splitStep.extraGb + 0.3;
-        if (Math.abs(sum - splitStep.capacityGb) > 1) {
-          problems.push(`改 D=100 之后 C+D+E 与总容量 ${splitStep.capacityGb} GB 对不上（和=${sum.toFixed(1)}）`);
+        const capacityGb = capacityOf(splitStep);
+        if (Math.abs(sum - capacityGb) > 1) {
+          problems.push(`改 D=100 之后 C+D+E 与总容量 ${capacityGb} GB 对不上（和=${sum.toFixed(1)}）`);
         }
         if (splitStep.err) problems.push(`改 D 之后出现错误提示: ${splitStep.err}`);
       }
@@ -427,8 +462,9 @@ async function main() {
         if (manualStep.hasFreeSeg) problems.push('手动改 C 之后进度条不该出现“未分配”段');
         // C + D + 预留余量(0.3 GB) 应该就是总容量，允许 1 GB 的取整误差
         const sum = manualStep.sysGb + manualStep.dataGb + 0.3;
-        if (Math.abs(sum - manualStep.capacityGb) > 1) {
-          problems.push(`手动把 C 改成 116 之后 C(${manualStep.sysGb}) + D(${manualStep.dataGb}) 与总容量 ${manualStep.capacityGb} GB 对不上`);
+        const capacityGb = capacityOf(manualStep);
+        if (Math.abs(sum - capacityGb) > 1) {
+          problems.push(`手动把 C 改成 116 之后 C(${manualStep.sysGb}) + D(${manualStep.dataGb}) 与总容量 ${capacityGb} GB 对不上`);
         }
         if (manualStep.err) problems.push(`手动改 C 之后出现错误提示: ${manualStep.err}`);
       }
@@ -484,10 +520,9 @@ async function main() {
           dragTo(sysGrip, 0.999);
           afterSys = readValues();
         }
-        // 盘容量直接读“总容量”那个 <b>（拖动时只有“剩余”会变）
-        const totalEl = document.querySelector('#wzBody .trest [data-total]');
-        const caption = String((totalEl || {}).textContent || '');
-        const capacityGb = parseFloat(caption) || 0;
+        // 盘容量不在页面里解析：“1.82 TB”这种展示串换算会丢精度，只带回盘号，
+        // 由 Node 侧按 /api/disks 的真实字节数算。
+        const caption = String((document.querySelector('#wzBody .trest [data-total]') || {}).textContent || '');
         return JSON.stringify({
           grips: grips.length,
           hasSysGrip: Boolean(sysGrip),
@@ -499,7 +534,7 @@ async function main() {
           splitTotalBefore: total(before),
           splitTotalAfter: total(afterSplit),
           sysTotalAfter: total(afterSys),
-          capacityGb: capacityGb,
+          diskNumber: Number((document.querySelector('#wzBody .tgt') || { dataset: {} }).dataset.disk) || 0,
           caption: caption,
         });
       })()`);
@@ -523,16 +558,14 @@ async function main() {
             return out;
           };
           const values = readValues();
-          const capacityGb = parseFloat(String((document.querySelector('#wzBody .trest [data-total]') || {}).textContent || '')) || 0;
           return JSON.stringify({
             clicked: ${removed ? 'true' : 'false'},
             rows: document.querySelectorAll('#wzBody .szrow.extra').length,
             sysGb: values.sys,
             dataGb: values.data,
-            capacityGb: capacityGb,
+            diskNumber: Number((document.querySelector('#wzBody .tgt') || { dataset: {} }).dataset.disk) || 0,
             // 删掉 E 之后 D 变回“吃满剩余”的 auto，输入框只读、数字是预估
             dataReadonly: Boolean(document.querySelector('#wzBody .szrow input[data-size="data"]')?.readOnly),
-            spareGb: Math.round((capacityGb - (values.sys || 0) - (values.data || 0)) * 10) / 10,
             error: String((document.querySelector('#wzBody .errmsg') || {}).textContent || ''),
           });
         })()`)),
@@ -663,8 +696,9 @@ async function main() {
       if (Math.abs(dragStep.splitTotalBefore - dragStep.splitTotalAfter) > 1) {
         problems.push(`拖 D/E 分隔条改变了总容量（${dragStep.splitTotalBefore} → ${dragStep.splitTotalAfter} GB）`);
       }
-      if (dragStep.capacityGb && dragStep.sysTotalAfter > dragStep.capacityGb + 0.5) {
-        problems.push(`拖动后总量 ${dragStep.sysTotalAfter} GB 超过了盘容量 ${dragStep.capacityGb} GB`);
+      const dragCapacityGb = capacityOf(dragStep);
+      if (dragCapacityGb > 0 && dragStep.sysTotalAfter > dragCapacityGb + 0.5) {
+        problems.push(`拖动后总量 ${dragStep.sysTotalAfter} GB 超过了盘容量 ${dragCapacityGb} GB`);
       }
     }
     const removedStep = summary.steps.find((step) => step.step2extraRemoved);

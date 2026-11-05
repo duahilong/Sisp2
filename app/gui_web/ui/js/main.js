@@ -22,7 +22,7 @@ import {
 } from './view-install.js';
 import { renderSettings, saveSettings, resetSettings, exportSettings, importSettings } from './view-settings.js';
 import {
-  openPartitionDialog, openBootDialog, openCheckDialog, openAboutDialog, openKeysDialog,
+  openBootDialog, openCheckDialog, openAboutDialog, openKeysDialog,
 } from './dialogs.js';
 
 let installSig = '';
@@ -230,7 +230,6 @@ function startPolling() {
 /* ------------------------------------------------------------------ 动作 */
 const ACTIONS = {
   install: () => goTo('install'),
-  partition: () => openPartitionDialog(),
   boot: () => openBootDialog(),
   check: () => openCheckDialog(),
   settings: () => goTo('settings'),

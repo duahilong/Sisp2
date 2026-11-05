@@ -35,7 +35,9 @@ from app.application.contracts import CheckItem, DiskInfo
 from app.application.jobs import ExecutionPlan, Job, JobManager, JobSpec, JobStatus
 from app.application.partitions import (
     PartitionLayoutError,
+    allow_small_partitions,
     check_layout,
+    check_minimums,
     data_partition_count,
     normalise_data_partitions,
     plan_partitions,
@@ -385,10 +387,15 @@ def _apply_image_defaults(
 
 
 def _check_partition_fit(disk: DiskInfo, payload: dict[str, Any]) -> list[str]:
-    """检查分区布局是否放得下（不依赖 PowerShell，纯算术）。
+    """检查分区布局是否放得下、以及各分区是不是小到不可用（纯算术）。
 
     布局由 ``app.application.partitions.plan_partitions`` 统一解析，所以加了
-    额外数据分区（E）之后这里自动算上新分区；错误信息保持“硬盘 N 容量不足”。
+    额外数据分区（E）之后这里自动算上新分区；错误信息保持“硬盘 N 容量不足”/
+    “硬盘 N 分区过小”，界面直接展示。
+
+    下限（C ≥ 60 GB、数据分区 ≥ 20 GB、E ≥ 1 GB）以前只在前端表单里，直连
+    ``/api/prepare`` 能绕过；这里补上，并由执行器在清盘前再查一次。单测与小盘
+    实测通过 ``partition_info.allow_small_partitions`` 显式放宽。
     """
     if not isinstance(disk.size_bytes, int) or disk.size_bytes <= 0:
         return []
@@ -396,10 +403,16 @@ def _check_partition_fit(disk: DiskInfo, payload: dict[str, Any]) -> list[str]:
         parts = plan_partitions(payload)
     except PartitionLayoutError as exc:
         return [f"硬盘 {disk.disk_number} 分区配置无效：{exc}"]
-    return [
+    allow_small = allow_small_partitions(payload)
+    problems = [
         f"硬盘 {disk.disk_number} 容量不足：{problem}"
         for problem in check_layout(parts, disk.size_bytes)
     ]
+    problems += [
+        f"硬盘 {disk.disk_number} 分区过小：{problem}"
+        for problem in check_minimums(parts, disk.size_bytes, allow_small=allow_small)
+    ]
+    return problems
 
 
 class WorkflowController:

@@ -887,16 +887,7 @@ input.confirm.bad{border-color:var(--danger);box-shadow:0 0 0 2px var(--danger-b
 .checklist li.bad .cm{color:var(--danger)}
 .checklist .cw{flex:none;font-family:var(--mono);font-size:10px;color:var(--faint)}
 
-/* 弹窗里的操作清单（分区动作） */
-.actrows{display:flex;flex-direction:column;gap:6px;margin-top:10px}
-.actrow{display:grid;grid-template-columns:96px 96px 96px minmax(0,1fr) 26px;gap:7px;align-items:center;
-  border:1px solid var(--line);border-radius:3px;background:#fff;padding:6px 8px}
-.actrow select,.actrow input{height:25px;border:1px solid var(--line2);border-radius:2px;background:#fff;
-  font:inherit;font-size:11.8px;color:var(--ink);padding:0 5px;width:100%}
-.actrow .ax{width:20px;height:20px;border-radius:2px;color:var(--faint);font-size:13px;display:flex;
-  align-items:center;justify-content:center}
-.actrow .ax:hover{background:var(--danger-bg);color:var(--danger)}
-.actrow.add{display:block;border-style:dashed;background:transparent;text-align:center;color:var(--muted);padding:4px}
+/* 弹窗里的命令预览 */
 .codebox{margin-top:10px;max-height:150px;overflow:auto;background:#F8FBFE;border:1px solid var(--line);
   border-radius:2px;padding:6px 8px;font-family:var(--mono);font-size:11px;line-height:1.6;color:var(--ink2);white-space:pre}
 .dark-code{background:#101820;color:#D6E2EE}

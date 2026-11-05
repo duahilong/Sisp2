@@ -43,9 +43,7 @@ python -m app.gui_web.main --serve --port 8765
 | `GET /api/jobs/{job_id}/log?tail=200` | 任务日志尾部；只允许 `logDir` 下的 `.log` 文件，越界返回 `E_PATH` |
 | `POST /api/images` | `{directory?, path?}` 列镜像目录或读某个镜像的索引（`dism /Get-WimInfo`；ISO 挂载后必定卸载） |
 | `GET /api/boot/report` | 扫描各盘的 Windows 目录与 ESP，返回可修复性报告 |
-| `POST /api/boot/repair` | `{disk_number}`；临时盘符挂 ESP → `bcdboot … /f UEFI` → 重新扫描，结束必定释放盘符；真实模式受闸门与 `confirmDelete` 约束 |
-| `POST /api/partition/plan` | `{disk_number, actions}`；**永远 dry_run**，只生成 diskpart 脚本（单盘操作路径；整盘安装的脚本预览在 `prepare()` 的 `diskpart_preview`，含“1/3 清盘 + 2/3 删 MSR（删完复查）+ 3/3 建分区”三段） |
-| `POST /api/partition/execute` | `{disk_number, actions, confirm_text?}`；`confirmDelete` 开启时确认文本必须是盘号或型号，ESP/MSR/恢复分区不可删 |
+| `POST /api/boot/repair` | `{disk_number}`；临时盘符挂 ESP → `bcdboot … /f UEFI` → 重新扫描，结束必定释放盘符；真实模式受写盘闸门约束 |
 | `POST /api/events/poll` | `{cursor, limit}`，游标轮询补发 |
 | `GET /api/events?cursor=N` | SSE 事件流；可读 `Last-Event-ID` |
 | `GET /api/settings`、`PUT /api/settings`、`DELETE /api/settings` | 读取、patch 更新、重置设置；patch 任一项非法整体拒绝 |

@@ -37,8 +37,14 @@ _FAKE_IMAGE_PATH = Path(tempfile.gettempdir()) / "sisp-test-web-api.wim"
 _FAKE_IMAGE_PATH.write_bytes(b"wim")
 
 _GIB = 1024**3
+# 单测用小尺寸（C 30 GB）测算术：显式放宽后端下限（真实布局 C ≥ 60 GB）。
 _PAYLOAD: dict[str, Any] = {
-    "partition_info": {"efi_size_mb": 300, "c_size_gb": 30, "data_size_gb": "auto"},
+    "partition_info": {
+        "efi_size_mb": 300,
+        "c_size_gb": 30,
+        "data_size_gb": "auto",
+        "allow_small_partitions": True,
+    },
     # 计划会按 payload 重算镜像可用性（类型 + 存在性 + 索引），所以这里用
     # 一个真实存在的 .wim 占位文件；索引读取器在 _build_client 里注入。
     "image_info": {"image_path": str(_FAKE_IMAGE_PATH), "image_index": 1},
@@ -430,36 +436,6 @@ def test_job_log_rejects_non_log_suffix(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 # ---------------------------------------------------------------- 危险操作确认
-def test_partition_execute_requires_typed_confirmation(tmp_path: Path) -> None:
-    client, _wf = _build_client(tmp_path)
-    body = client.post(
-        "/api/partition/execute",
-        json={"disk_number": 1, "actions": [{"kind": "create", "size_gb": 1}]},
-    ).json()
-    assert body["ok"] is False
-    assert body["error"]["code"] == "E_CONFIRM"
-    assert "确认" in body["error"]["message"]
-
-
-def test_partition_execute_rejects_bad_disk_number(tmp_path: Path) -> None:
-    client, _wf = _build_client(tmp_path)
-    body = client.post("/api/partition/execute", json={"disk_number": "x"}).json()
-    assert body["error"]["code"] == "E_PARTITION"
-
-
-def test_delete_confirmed_accepts_several_spellings(tmp_path: Path) -> None:
-    store = build_store(tmp_path / "settings.json")
-    _client, wf = _build_client(tmp_path)
-    api = WebApi(wf, settings=store)
-    identity = {"model": "Samsung SSD 990"}
-    for text in ("1", "disk1", "disk 1", "硬盘1", "硬盘 1", "samsung ssd 990", " SAMSUNG  SSD 990 "):
-        assert api._delete_confirmed(1, identity, text) is True, text
-    assert api._delete_confirmed(1, identity, None) is False
-    assert api._delete_confirmed(1, identity, "2") is False
-
-    store.update({"confirmDelete": False})
-    assert api._delete_confirmed(1, identity, None) is True
-
 
 def test_session_without_dry_run_keeps_process_mode(tmp_path: Path) -> None:
     """界面刷新会话时不传 dry_run，不能把演练模式的进程切成真实写盘。"""
@@ -507,31 +483,6 @@ def test_resolve_identity_prefers_caller_then_scans(tmp_path: Path, monkeypatch)
     monkeypatch.setattr("app.gui_web.api._scan_summary", boom)
     assert api._resolve_identity(9, None) == {}
 
-
-def test_partition_execute_passes_resolved_identity_to_gate(tmp_path: Path, monkeypatch) -> None:
-    """真实分区执行要把补齐后的身份交给写盘闸门，而不是空字典。"""
-    _client, wf = _build_client(tmp_path)
-    api = WebApi(wf, settings=build_store(tmp_path / "settings.json"))
-    seen: dict[str, Any] = {}
-
-    class _Runner:
-        def run(self, number, actions, *, identity=None, dry_run=False):
-            seen["identity"] = identity
-            return {"disk_number": number, "dry_run": True, "exit": 0, "script": [], "message": "ok"}
-
-    monkeypatch.setattr(
-        "app.gui_web.api._scan_summary",
-        lambda number: {"disk_number": number, "unique_id": "eui-1", "serial_number": "SN"},
-    )
-    api._partition_runner = _Runner  # type: ignore[method-assign]
-
-    body = api.partition_execute(1, [{"kind": "format", "partition_number": 2}], confirm_text="1")
-    assert body["ok"] is True, body
-    # 闸门由 PartitionRunner 在真实模式下调用，identity 从这里传进去
-    assert seen["identity"]["unique_id"] == "eui-1"
-
-
-# ------------------------------------------------------ 设置导出 / 导入
 def test_export_settings_writes_file_and_roundtrips(tmp_path: Path) -> None:
     store = build_store(tmp_path / "settings.json")
     store.update({"sysDefaultGb": 200, "excludedDiskNames": ["A disk"]})

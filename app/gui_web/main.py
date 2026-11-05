@@ -450,7 +450,7 @@ def _run_desktop(args) -> int:
                 return 1
         else:
             # 提权被取消：退回进程内服务，界面照常打开；写盘会被预检拦住。
-            print("提权被取消：以普通权限运行，真实写盘会被预检拒绕。", file=sys.stderr)
+            print("提权被取消：以普通权限运行，真实写盘会被预检拒绝。", file=sys.stderr)
             api, wf = build_api(args.config, args.dry_run, args.settings)
             from app.gui_web.server import create_app
 

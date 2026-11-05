@@ -154,7 +154,13 @@ def _preflight(config_path=None, dry_run=False) -> dict[str, Any]:
     return {
         "results": [{"name": "运行前检查", "passed": True, "message": "ok"}],
         "config_payload": {
-            "partition_info": {"efi_size_mb": 100, "c_size_gb": 10, "data_size_gb": "auto"},
+            "partition_info": {
+                "efi_size_mb": 100,
+                "c_size_gb": 10,
+                "data_size_gb": "auto",
+                # 单测用小尺寸：显式放宽后端下限（C ≥ 60 GB）
+                "allow_small_partitions": True,
+            },
             "image_info": {"image_path": _FAKE_IMAGE, "image_index": 1},
             "excluded_disk_names": [],
         },

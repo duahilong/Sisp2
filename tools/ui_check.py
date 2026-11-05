@@ -33,7 +33,7 @@ _IMPORT_RE = re.compile(r"""from\s+['"]\./([\w.-]+\.js)['"]""")
 _ATTR_RE = re.compile(r"""(?:href|src)="(/static/[^"]+)\"""")
 
 DERIVE_SCRIPT = """
-import { fmtSize, fsClass, segments, checkSizes, checkLayout, unallocatedBytes, partShortName, suggestLetter, fitLayout, reserveGb, lastPartitionIsAuto } from './derive.js';
+import { fmtSize, fsClass, segments, checkSizes, checkLayout, unallocatedBytes, partShortName, fitLayout, reserveGb, autoPartitionRole } from './derive.js';
 
 const GB = 1024 ** 3;
 const esp = { partition_number: 1, size_bytes: 100 * 1024 * 1024,
@@ -53,7 +53,6 @@ const out = {
   ordered: segs.filter((seg) => !seg.free).map((seg) => seg.part.partition_number),
   esp_cls: fsClass(esp),
   short: partShortName(dat),
-  letter: suggestLetter([{ partitions: [{ drive_letter: 'Z' }, { drive_letter: 'D' }] }]),
   ok_sizes: checkSizes(1000 * GB, 120, 380),
   small_sys: checkSizes(1000 * GB, 20, 100) !== '',
   too_big: checkSizes(100 * GB, 120, 380) !== '',
@@ -67,8 +66,8 @@ const out = {
   layout_auto_last_data: checkLayout(160 * GB, 120, 100) === '',
   layout_auto_too_small: checkLayout(100 * GB, 120, 100) !== '',
   layout_auto_extra_small: checkLayout(100 * GB, 60, 39.5, [{ sizeGb: 1 }]) !== '',
-  auto_role_data: lastPartitionIsAuto([]),
-  auto_role_extra: lastPartitionIsAuto([{ sizeGb: 200 }]),
+  auto_role_data: autoPartitionRole([]),
+  auto_role_extra: autoPartitionRole([{ sizeGb: 200 }]),
   // 快捷容量（100/120/150/200）必须把 E 一起重算：以前只算 C 和 D，
   // 于是 C=200 + D=275.9 + E=71.7 在 477 GB 的盘上超了一大截。
   // 并且剩下的容量要由 D / E 平分，不能全给 D。
@@ -118,7 +117,6 @@ EXPECTED = {
     "classes": ["ESP", "NTFS", "exFAT", "FREE"],
     "esp_cls": "ESP",
     "short": "D: exFAT",
-    "letter": "Y",
     "ok_sizes": "",
     "small_sys": True,
     "too_big": True,

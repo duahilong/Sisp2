@@ -47,8 +47,9 @@ node tools/ui_smoke.mjs --url http://127.0.0.1:8765/ --out build/shots  # headle
   `#startBtn`/`.set-row` 做计数断言；第 2 步还会真点一次「➕ 添加数据分区」：要求出现
   1 行 `.szrow.extra`（名字就是“数据分区”、**没有**文件系统下拉）、进度条 4 段、D/E
   平分容量、➕ 隐藏；然后用合成 PointerEvent 分别拖 **D|E** 和 **C|D** 两根分隔条，
-  断言 D/E 互换但总量不变、总量不超过盘容量（盘容量从 `.trest [data-total]` 读，避免
-  用正则——模板字面量里的 `\d` 会被吃掉）；最后点 ✕ 回 0 行，再加回来，第 4 步要求
+  断言 D/E 互换但总量不变、总量不超过盘容量（盘容量**从 `/api/disks` 取真实字节数**，
+  不再 parse 界面上的 `总容量` 文本——`fmtSize` 输出的是 `1.82 TB` 这类展示串，
+  `parseFloat` 会把它当成 1.82 GB，在 ≥1 TB 的盘上所有容量断言都会误报）；最后点 ✕ 回 0 行，再加回来，第 4 步要求
   计划表里出现两个数据分区——这条路径以前只能靠人眼看截图；**截图小于 20 KB 视为空白直接判失败**（曾经因为
   `.fatal` 的 `display:flex` 盖掉了 `[hidden]`，整块遮罩把界面糊成纯背景色，十张截图
   全是空白而且脚本还“通过”了）。
@@ -56,6 +57,17 @@ node tools/ui_smoke.mjs --url http://127.0.0.1:8765/ --out build/shots  # headle
   `test_frontend_static_check` 用 `skipif` 跳过。
 
 ## 2. 专用 VM：只读与 dry-run
+
+### 先把代码/产物送到 VM：优先走 Git
+
+大文件（源码树、`dist/Sisp2.exe`）**不要用 MCP 的文件通道搬**：
+
+- `read` 超过 50 KB 会被截断，写回去就是半个文件；
+- 写入会把 LF 转成 CRLF，`git apply` 直接失败（退出码 128），而且补丁里的行尾混着两种；
+- 实测能用的兜底只有“分片 base64 + VM 端解码”，又慢又容易传错。
+
+所以默认流程：本机 `git push` → VM 上 `git pull` / `git clone` → 在 VM 里跑测试。
+只需要跑产物时才把 `dist/Sisp2.exe` 单独拷过去，并核对 SHA256。
 
 推荐在专用 Windows VM 上验证真实 PowerShell 扫描与 GUI：
 
@@ -110,11 +122,20 @@ dism /English /Capture-Image /ImageFile:D:\sisp-test\test.wim `
 
 ```json
 {
-  "partition_info": { "efi_size_mb": 100, "c_size_gb": 3, "data_size_gb": "auto" },
+  "partition_info": {
+    "efi_size_mb": 100,
+    "c_size_gb": 3,
+    "data_size_gb": "auto",
+    "allow_small_partitions": true
+  },
   "image_info": { "image_path": "D:\\sisp-test\\test.wim", "image_index": 1 },
   "excluded_disk_names": []
 }
 ```
+
+> `allow_small_partitions` 是**必须**的：后端下限是 C ≥ 60 GB、数据分区 ≥ 20 GB（E ≥ 1 GB），
+> 8 GB 这类小盘／单测必须显式放宽，否则计划阶段就报“分区过小”，不会清盘。
+> 界面永远不发这个字段，它只给测试与文档用。
 
 ```powershell
 python -m app.gui_web.main -j D:\sisp-test\config.json --serve --port 8765
@@ -178,10 +199,11 @@ diskpart /s $env:TEMP\detach.txt
 - VM 上没有 Chrome，`tools/ui_smoke.mjs` 自动改用 Edge 跑通：10 张截图都在 50 KB 以上，
   主页面 `tree=9`、设置页 34 行、第 4 步计划表 9 行、修复引导弹窗有 1 条 finding；
 - 新增接口在 VM 上用真实数据验证：`/api/images` 读出 `test.wim` 的索引 1（SispTest）、
-  `/api/boot/report` 给出 `boot_ok` + ESP 分区 1、`/api/partition/plan` 在“未分配空间为 0”
-  时回明确中文原因、格式化演练只生成 5 行 diskpart 脚本、
-  `/api/partition/execute` 不带确认文本时 `E_CONFIRM`、盘号不存在时 `E_PARTITION`、
+  `/api/boot/report` 给出 `boot_ok` + ESP 分区 1、
   `/api/jobs/{id}/log` 在没配 `logDir` 时回 `message` 而不是报错；
+
+  > 同轮还验证过 `/api/partition/plan|execute`（单盘分区工具），该接口已于 2026-11 整套移除，
+  > 保留这条记录只为说明当时的实测范围，现在**不要**再按它测。
 - **真实写盘走了新代码路径**：新建 8 GB 动态 VHDX → Disk 2，`prepare(dry_run=false)`
   给出 `executable=true`，`confirm(confirm_text="2")` 后六步全绿，
   `progress` 为 `6/6 = 100%`、`result.steps` 六步 `ok`，分区为
@@ -216,7 +238,9 @@ diskpart /s $env:TEMP\detach.txt
   「Windows」/ D 300 GB NTFS「Data」，GPT；
 - 执行日志：`logDir` 下生成 `disk-runner-*.log`（11.8 KB），`/api/jobs/{id}/log?tail=`
   能取到尾部（含「已释放 EFI 盘符 G」「任务结束：success=True」），`app.log` 记录路径；
-- **真实分区操作**（新增的 partition 模块）：`/api/partition/plan` 只出 5 行脚本、
+- ~~**真实分区操作**（当时的 partition 模块）：`/api/partition/plan` 只出 5 行脚本~~——
+  该模块已于 2026-11 整套删除（`app/modules/partition` 与 `/api/partition/*` 均不存在），
+  下面两行是删除前的历史记录，仅作存档：
   `dry_run=true`；`/api/partition/execute` 真实创建 50 GB NTFS 分区并格式化成功，
   日志含 diskpart 输出；`/api/partition/plan` 对 ESP 一律拒绝（“分区 2 是 EFI 系统分区”）；
 - 修复引导：`/api/boot/report` 给出 `boot_ok` + `orphan_esp`（合成镜像没有 `Windows` 目录，

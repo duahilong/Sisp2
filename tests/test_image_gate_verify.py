@@ -146,7 +146,12 @@ def _controller(image_path: str) -> WorkflowController:
         return {
             "results": [{"name": "运行前检查", "passed": True, "message": "ok"}],
             "config_payload": {
-                "partition_info": {"efi_size_mb": 300, "c_size_gb": 10},
+                "partition_info": {
+                    "efi_size_mb": 300,
+                    "c_size_gb": 10,
+                    # 单测用小尺寸测算术：后端下限（C ≥ 60 GB）显式放宽
+                    "allow_small_partitions": True,
+                },
                 "image_info": {"image_path": image_path, "image_index": 1},
             },
         }
@@ -328,7 +333,11 @@ def _settings_controller(settings: dict, image_path: str) -> WorkflowController:
             "results": [{"name": "运行前检查", "passed": True, "message": "ok"}],
             "config_payload": {
                 # 业务配置里的占位镜像：界面设置优先时应该被压掉
-                "partition_info": {"efi_size_mb": 100, "c_size_gb": 30},
+                "partition_info": {
+                    "efi_size_mb": 100,
+                    "c_size_gb": 30,
+                    "allow_small_partitions": True,
+                },
                 "image_info": {"image_path": image_path, "image_index": 1},
             },
         }

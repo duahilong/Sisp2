@@ -247,7 +247,13 @@ def test_runner_accepts_runner_options_on_spec(tmp_path, monkeypatch) -> None:
     spec = SimpleNamespace(
         disk_number=1,
         config_payload={
-            "partition_info": {"efi_size_mb": 100, "c_size_gb": 3, "data_size_gb": "auto"},
+            "partition_info": {
+                "efi_size_mb": 100,
+                "c_size_gb": 3,
+                "data_size_gb": "auto",
+                # 单测用小尺寸：显式放宽后端下限（C ≥ 60 GB）
+                "allow_small_partitions": True,
+            },
             "image_info": {"image_path": str(image), "image_index": 1},
         },
         drive_letters={"efi": "E", "windows": "F", "data": "G"},

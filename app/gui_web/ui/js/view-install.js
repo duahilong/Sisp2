@@ -13,7 +13,7 @@ import { $, $$, esc, on } from './dom.js';
 import {
   fmtSize, segments, fsColor, isSelectable,
   protectionText, clamp, MIN_SYS_GB, MIN_DATA_GB, MIN_EXTRA_GB, MAX_EXTRAS,
-  toGb, fromGb, extraColor, extraLetter, fitLayout, lastPartitionIsAuto,
+  toGb, fromGb, extraColor, extraLetter, fitLayout, autoPartitionRole,
 } from './derive.js';
 import {
   state, diskOf, targetOf, targetError, autoPartitionBytes, syncAutoPartition, addTarget, removeTarget,
@@ -302,7 +302,7 @@ function stepSizeHtml() {
 
 /** 这块盘“吃剩余空间”的那个分区：有 E 就是 E，否则是 D。 */
 function autoRole(target) {
-  return lastPartitionIsAuto(Array.isArray(target.extras) ? target.extras : []);
+  return autoPartitionRole(Array.isArray(target.extras) ? target.extras : []);
 }
 
 /** 脚注：各分区大小；最后那个自动分区显示预估大小（真实尺寸由 diskpart 决定）。 */

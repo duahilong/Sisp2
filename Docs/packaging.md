@@ -133,7 +133,7 @@ Error launching CrashSender.exe
 | `GET /static/js/main.js`、`/static/css/app.css` | 都返回 200（证明资源真的进了包） |
 | 打包后的界面冒烟（`tools/ui_smoke.mjs` 对 `Sisp2.exe --serve`） | `ok=true`，10 张截图全部 54–105 KB，磁盘树 9 个节点、设置页 34 行、第 4 步计划表 9 行 |
 | `Sisp2.exe --serve` 走 REST 真实整盘安装（2 TB 测试盘） | 六步全绿、`progress` 6/6、分区为 MSR/ESP 300 MB/C 120 GB/D 300 GB，日志 11.8 KB 可读（旧记录；现在 MSR 会在建分区前删掉，布局是 ESP + C + D(+E)，见 [testing.md](testing.md) 的 MSR 一节） |
-| 同一 exe 的真实分区操作 | `/api/partition/execute` 建 50 GB NTFS 分区成功，日志含 diskpart 输出，temp 目录无残留 |
+| 同一 exe 的真实分区操作（**已移除的能力**） | 历史上 `/api/partition/execute` 建 50 GB NTFS 分区成功（该接口于 2026-11 整套删除，现在分区只走装机向导） |
 
 ## 启动耗时
 

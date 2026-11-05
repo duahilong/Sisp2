@@ -177,22 +177,6 @@ def create_app(
             payload.get("dry_run"),
         )
 
-    # ------------------------------------------------------------- 分区操作
-    @app.post("/api/partition/plan")
-    def partition_plan(body: dict[str, Any] | None = None) -> dict[str, Any]:
-        payload = body or {}
-        return api.partition_plan(payload.get("disk_number"), payload.get("actions"))
-
-    @app.post("/api/partition/execute")
-    def partition_execute(body: dict[str, Any] | None = None) -> dict[str, Any]:
-        payload = body or {}
-        return api.partition_execute(
-            payload.get("disk_number"),
-            payload.get("actions"),
-            payload.get("identity"),
-            payload.get("confirm_text"),
-        )
-
     # ------------------------------------------------------------- 事件：轮询兜底
     @app.post("/api/events/poll")
     def poll_events(body: dict[str, Any] | None = None) -> dict[str, Any]:

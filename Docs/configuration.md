@@ -23,7 +23,7 @@ Sisp2 有两类配置：**界面设置**是日常入口（GUI 全部参数都在
 {
   "partition_info": {
     "efi_size_mb": 300,
-    "c_size_gb": 30,
+    "c_size_gb": 120,
     "data_size_gb": "auto",
     "data_partitions": [
       { "size_gb": 300, "file_system": "NTFS" },
@@ -40,7 +40,8 @@ Sisp2 有两类配置：**界面设置**是日常入口（GUI 全部参数都在
 
 | 字段 | 当前校验/用途 |
 |---|---|
-| `partition_info` | 可省略；存在时须为对象。`efi_size_mb`、`c_size_gb` 若提供须为正数。这几项在设置页都有对应项（`efiDefaultMb`/`sysDefaultGb`/`dataDefaultGb`/`defaultFs`）。 |
+| `partition_info` | 可省略；存在时须为对象。`efi_size_mb`、`c_size_gb` 若提供须为正数。这几项在设置页都有对应项（`efiDefaultMb`/`sysDefaultGb`/`dataDefaultGb`/`defaultFs`）。**大小有下限**：`efi_size_mb` ≥ 64 MB（自动抬到 64），`c_size_gb` ≥ 60 GB，第一个数据分区 ≥ 20 GB，额外的数据分区（E）≥ 1 GB；低于下限在**计划阶段**就被拒（`E_PREPARE`，消息形如“硬盘 1 分区过小：…”），执行器在清盘前还会再拦一次。 |
+| `partition_info.allow_small_partitions` | 默认 `false`。写成 `true` 才允许低于上面那些下限的布局（单测、8 GB 小盘实测用；界面永远不发这个字段）。 |
 | `partition_info.data_size_gb` | 可空、`""`、`"auto"` 或数字；结构校验允许非负数（错误文案称正数），实际 runner 将其转整数，0/缺省按剩余空间处理。**`data_partitions` 存在时被它取代。** |
 | `partition_info.data_partitions` | 可选数组，1–2 项（最多再加一个数据分区，即 E）。每项给 `size_gb`（正整数，也接受 `size_mb`）与 `file_system`（`NTFS`/`exFAT`，不支持 FAT32）。**只有最后一项可以是 `auto`/缺省**（表示吃掉剩余空间，diskpart 不写 `size=`），中间的项 `auto` 会被拒绝。界面生成的配置**总是**把最后一项写成 `auto`（最后那个分区的输入框是只读的）；手写配置可以给显式值，但那样就要自己留够 3 MB 的 GPT 余量。结构错误在预检阶段就阻断，不会等到清盘。 |
 | `image_info` | 可省略；存在时须为对象。`image_path` 可省略/空值，若提供须为字符串；`image_index` 未由此结构校验器验证。 |

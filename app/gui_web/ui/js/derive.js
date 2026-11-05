@@ -229,32 +229,6 @@ export function protectionText(disk) {
   return '';
 }
 
-/** 当前所有已用盘符（不带冒号）。 */
-export function usedLetters(disks) {
-  const used = new Set(['A', 'B', 'C']);
-  for (const disk of disks || []) {
-    for (const part of disk.partitions || []) {
-      const letter = String(part.drive_letter || '').trim().toUpperCase();
-      if (letter) used.add(letter);
-    }
-  }
-  return used;
-}
-
-/**
- * 给分区操作建议空闲盘符：从 Z 往 D 降序取第一个没被占用的字母。
- * 只用于输入框默认值，后端 validate() 会再检查一遍。
- */
-export function suggestLetter(disks, exclude = []) {
-  const used = usedLetters(disks);
-  for (const letter of exclude) used.add(String(letter || '').toUpperCase());
-  for (let code = 'Z'.charCodeAt(0); code >= 'D'.charCodeAt(0); code -= 1) {
-    const letter = String.fromCharCode(code);
-    if (!used.has(letter)) return letter;
-  }
-  return '';
-}
-
 /** EFI（ESP）分区的默认大小（MB）：与设置里的 ``efiDefaultMb`` 默认值一致。 */
 export const DEFAULT_EFI_MB = 100;
 
@@ -358,12 +332,13 @@ export function checkSizes(totalBytes, sysGb, dataGb, efiMb = 100) {
 export const floor1Gb = (value) => Math.floor((Number(value) || 0) * 10 + 1e-9) / 10;
 
 /**
- * 最后一个数据分区永远会“吃掉剩余空间”（不写 `size=`，由 diskpart 决定）。
+ * 最后一个数据分区的**角色名**（不是布尔）：有 E 就是 `'extra'`，否则是 `'data'`。
  *
- * 这里不再做阈值判断，只是把这个约定写成一个可读的谓词：有 E 时是 E，没 E 时是 D；
- * 它的大小永远是“剩下多少算多少”，所以界面上它的输入框是只读的、显示的是预估值。
+ * 最后一个数据分区永远会“吃掉剩余空间”（不写 `size=`，由 diskpart 决定），
+ * 所以界面上它的输入框是只读的、显示的是预估值。调用方拿这个角色去判断
+ * “哪一行只读 / 哪个框要被写回”，名字里带 `Role` 免得被当成谓词用。
  */
-export function lastPartitionIsAuto(extras = []) {
+export function autoPartitionRole(extras = []) {
   return (Array.isArray(extras) ? extras.length : 0) > 0 ? 'extra' : 'data';
 }
 

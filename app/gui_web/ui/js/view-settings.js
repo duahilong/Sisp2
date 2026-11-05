@@ -44,7 +44,6 @@ const FIELDS = [
 
   { section: 'install', key: 'confirmBeforeStart', kind: 'bool', effect: '立即生效', hint: '真实写盘前再弹一次确认框。' },
   { section: 'install', key: 'typeToConfirm', kind: 'bool', effect: '立即生效', hint: '输入盘号或型号才允许开始，后端同样校验。' },
-  { section: 'install', key: 'confirmDelete', kind: 'bool', effect: '立即生效', hint: '分区/格式化等删除类操作也要输入确认。' },
   { section: 'install', key: 'sysDefaultGb', kind: 'int', effect: '下次生成计划生效', hint: '向导第 2 步的初始值，可以在那一步改。' },
   { section: 'install', key: 'efiDefaultMb', kind: 'int', effect: '下次生成计划生效', hint: 'EFI（ESP）分区大小，最小 64 MB；向导第 2 步只显示不可改。' },
   { section: 'install', key: 'dataDefaultGb', kind: 'auto-int', effect: '下次生成计划生效', hint: '“自动”= 剩余空间全给数据分区。' },
@@ -87,7 +86,6 @@ const LABELS = {
   startView: '启动时打开',
   confirmBeforeStart: '真实写盘前二次确认',
   typeToConfirm: '危险操作需输入确认',
-  confirmDelete: '删除/格式化前需输入确认',
   sysDefaultGb: '系统分区默认大小',
   efiDefaultMb: 'EFI 分区大小',
   imageDefaultIndex: '默认镜像版本',

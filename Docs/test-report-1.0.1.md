@@ -73,8 +73,8 @@
 | B2 | `/api/disks` 卷标编码正确（安装前 `["Windows","Data"]`，安装后同） | ✅ | ✅ |
 | B3 | `POST /api/images` 用 dism 读出 `test.wim` 索引（1 / SispTest） | ✅ | ✅ |
 | B4 | `GET /api/boot/report` 给出 `boot_ok` + `orphan_esp`，不写盘 | ✅ | ✅ |
-| C1 | `POST /api/partition/plan` 永远演练：`dry_run=true`，只出 5 行 diskpart 脚本 | ✅ | ✅ |
-| C2 | ESP/MSR/恢复分区拒绝删除（`E_PARTITION`：分区 2 是 EFI 系统分区，拒绝操作） | ✅ | ✅ |
+| C1 | ~~`POST /api/partition/plan` 永远演练~~（历史记录：该接口已于 2026-11 移除） | ✅ | ✅ |
+| C2 | ~~ESP/MSR/恢复分区拒绝删除~~（历史记录：该接口已于 2026-11 移除） | ✅ | ✅ |
 | H1 | 危险操作缺确认文本 → `E_CONFIRM` | ✅ | ✅ |
 | H2 | 不存在的任务 → `E_NOT_FOUND` | ✅ | ✅ |
 | H3 | 受保护的系统盘：计划带阻断项、不可执行 | ✅ | ✅ |

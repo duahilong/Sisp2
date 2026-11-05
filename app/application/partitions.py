@@ -43,6 +43,22 @@ BYTES_PER_MB = 1024 * 1024
 EFI_MIN_MB = 64
 EFI_DEFAULT_MB = 100
 
+# 装机分区的大小下限：与界面 ``app/gui_web/ui/js/derive.js`` 的
+# ``MIN_SYS_GB`` / ``MIN_DATA_GB`` / ``MIN_EXTRA_GB`` 以及设置页的
+# ``sysDefaultGb ∈ [60, 2000]`` 同口径（``tests/test_partition_layout.py``
+# 会把这两边钉在一起，避免以后只剩一端改了）。
+#
+# 为什么后端也要拦：界面那套只是表单校验，直连 ``POST /api/prepare``
+# 可以传 ``c_size_gb = 1``，那样会一路排到 dism 才失败——而那时候盘已经清空了。
+MIN_C_GB = 60
+MIN_DATA_GB = 20
+MIN_EXTRA_DATA_GB = 1
+
+# 小尺寸逃生阀：单测与小盘（8 GB VHDX）实测需要低于下限的布局，
+# 必须在 payload 里显式写 ``partition_info.allow_small_partitions: true``。
+# 界面永远不发这个字段，普通用户也看不到，只给测试/文档用。
+ALLOW_SMALL_KEY = "allow_small_partitions"
+
 # C 之后最多再加一个数据分区（E）。盘符池、verify 判据都按这个上限设计。
 MAX_DATA_PARTITIONS = 2
 
@@ -123,6 +139,11 @@ def data_partition_count(payload: Mapping[str, Any] | None) -> int:
     if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)) and raw:
         return min(len(raw), MAX_DATA_PARTITIONS)
     return 1
+
+
+def allow_small_partitions(payload: Mapping[str, Any] | None) -> bool:
+    """这次载荷是否显式放宽了下限（单测 / 小盘实测专用，严格 ``is True``）。"""
+    return partition_info(payload).get(ALLOW_SMALL_KEY) is True
 
 
 def _positive_number(value: Any) -> float | None:
@@ -346,6 +367,57 @@ def layout_summary(parts: Sequence[PlannedPartition]) -> str:
             size = f"{part.size_mb / 1024:.0f}GB" if part.size_mb else "剩余空间"
         pieces.append(f"{label} {size}")
     return " + ".join(pieces)
+
+
+def check_minimums(
+    parts: Sequence[PlannedPartition],
+    disk_size_bytes: Any = None,
+    *,
+    allow_small: bool = False,
+) -> list[str]:
+    """分区大小下限（返回阻断项，消息不含硬盘编号）。
+
+    与界面 ``derive.checkLayout`` 同一套语义：
+
+    - 系统分区 ≥ ``MIN_C_GB``（装不下 Windows 的最小可用值）；
+    - 第一个数据分区 ≥ ``MIN_DATA_GB``，额外数据分区（E）≥ ``MIN_EXTRA_DATA_GB``；
+    - 最后一个数据分区是 auto（``size_mb is None``）时，按
+      “容量 − 显式项 − ``LAYOUT_SLACK_MB``”估算它能不能到自己的下限。
+
+    ``disk_size_bytes`` 不给时只看显式项（执行器在清盘前用它兜底，
+    它没有盘容量也不影响“显式项太小”这条拦截）。
+    """
+    if allow_small:
+        return []
+    problems: list[str] = []
+    for part in parts:
+        if part.size_mb is None:
+            continue
+        gb = part.size_mb / 1024
+        if part.role == "windows" and gb < MIN_C_GB:
+            problems.append(f"系统分区至少 {MIN_C_GB} GB（当前 {gb:.1f} GB）")
+            continue
+        if part.is_data:
+            minimum = MIN_DATA_GB if part.role == "data" else MIN_EXTRA_DATA_GB
+            if gb < minimum:
+                problems.append(f"{part.label} 分区至少 {minimum} GB（当前 {gb:.1f} GB）")
+
+    if not isinstance(disk_size_bytes, int) or isinstance(disk_size_bytes, bool):
+        return problems
+    if disk_size_bytes <= 0:
+        return problems
+    auto = [part for part in parts if part.size_mb is None]
+    if not auto:
+        return problems
+    minimum = MIN_DATA_GB if auto[-1].role == "data" else MIN_EXTRA_DATA_GB
+    explicit = sum(int(part.size_mb) for part in parts if part.size_mb is not None)
+    left_mb = disk_size_bytes // BYTES_PER_MB - explicit - LAYOUT_SLACK_MB
+    if left_mb < minimum * 1024:
+        problems.append(
+            f"剩下的空间只够 {max(left_mb, 0) / 1024:.1f} GB，"
+            f"最后一个数据分区至少要 {minimum} GB"
+        )
+    return problems
 
 
 def check_layout(parts: Sequence[PlannedPartition], disk_size_bytes: Any) -> list[str]:

@@ -58,6 +58,24 @@
 - 界面上不再有“未分配”这个概念：第 2 步进度条没有灰色段、第 4 步计划表没有“未分配”行，最后那个分区在计划表里显示成“剩余空间（约 X GB）”；
 - **改 C（或改显式的 D）时，最后那个分区的预估值要立刻重算**（`state.syncAutoPartition()`，在输入框 `input`、失焦、以及每次渲染第 2 步前都会跑）。它的输入框是只读的、不会自己触发 `input` 事件，所以 `updateSizeVisual()` 还要把新值写回输入框——否则用户看到的是“C 改成 116，D 还停在 276.6，两个数加起来不等于整块盘”。
 
+## 分区大小下限（后端也拦）
+
+界面的第 2 步有表单校验（`MIN_SYS_GB = 60`、`MIN_DATA_GB = 20`、`MIN_EXTRA_GB = 1`），
+但那只是**表单**：直连 `POST /api/prepare` 可以传 `c_size_gb = 1`，旧实现会一路排到
+`dism` 才失败——而那时候盘已经清空了。现在后端也有同一套下限（`partitions.MIN_C_GB`
+等，`tests/test_partition_layout.py` 会把两边的常量钉在一起），生效在两处：
+
+1. `workflow._check_partition_fit()`：计划阶段就报“硬盘 N 分区过小：…”，`/api/prepare`
+   直接失败，**不会生成 executable=true 的计划**（演练同样拦，避免“演练绿、真跑红”）；
+2. `WindowsDiskRunner._run_steps()`：`plan_partitions` 之后、`_wipe_script` 之前再拦一次，
+   保证绕过 `prepare` 直接塞 JobSpec 的调用方也不能在盘上建出 1 GB 的系统分区。
+
+最后那个 auto 分区没有显式大小，按“容量 − 显式项 − `LAYOUT_SLACK_MB`”估算，够不够
+它自己的下限同样会拦（与界面 `checkLayout()` 的判断一致）。
+
+单测和小盘（8 GB VHDX）需要低于下限的布局时，必须在 payload 里显式写
+`partition_info.allow_small_partitions: true`——界面永远不发这个字段。
+
 ## 演练与真实模式的判定
 
 `SispService` 构造默认 `dry_run=True`，入口会覆盖其策略。`main.py` 的有效 dry-run 为命令行 `--dry-run` 与设置 `dryRunByDefault` 的逻辑或；`WorkflowController` 会把构造时的 dry-run 锁定为硬上限，后续 `start()` / `prepare()` 只能降级为演练，不能升级为真实执行。真实模式下，`prepare()` / `authorize_disks()` 会把本次勾选并确认过的盘加入服务白名单（没有显式白名单文件）。见[安全说明](security.md)。
@@ -67,7 +85,8 @@
 三个视图（主页面、系统安装、设置）+ 一个外壳，不引入框架、也没有构建步骤：
 
 - `js/state.js` 是唯一可变状态：磁盘快照、选中项、设置草稿、任务、执行计划、向导进度；写状态后调 `notify()`。
-- `js/view-*.js` 只读状态并返回/写入 DOM；`js/shell.js` 包掉菜单、工具栏、日志坞、状态栏、toast、弹窗、主题与密度；`js/derive.js` 是纯函数层（容量格式化、分区地图切片、盘符建议、大小校验），能在 `node` 里直接跑。
+- `js/view-*.js` 只读状态并返回/写入 DOM；`js/shell.js` 包掉菜单、工具栏、日志坞、状态栏、toast、弹窗、主题与密度；`js/derive.js` 是纯函数层（容量格式化、分区地图切片、大小校验），能在 `node` 里直接跑。
+- 弹窗只剩两个（修复引导、磁盘检查），都在 `js/dialogs.js`；单盘分区工具（`/api/partition/*`）已于 2026-11 移除，分区只走装机向导。
 - 主页面只读：分区地图与明细表都来自 `GET /api/disks` 的快照，不允许在这里发起写盘。
 - 写盘只有一条链路：`POST /api/prepare` → `submit` → `confirm`。界面不自己拼 diskpart/dism 命令，也不自己算盘符：向导第 4 步显示的盘符来自 `plan.drive_letters`，第 2 步填的大小（含可选的额外数据分区 E）只是 `prepare` 的入参，后端 `_check_partition_fit` 还会再验一次。
 - 进度不是前端“估”的：执行器通过 `on_step` 回调把每个步骤的状态交给 `JobManager`，变成 `job.step` 事件和 `Job.progress`（详见 [Web API 文档](web-api.md)）。

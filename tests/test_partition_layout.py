@@ -18,9 +18,14 @@ import pytest
 from app.application.contracts import DiskInfo
 from app.application.partitions import (
     MAX_DATA_PARTITIONS,
+    MIN_C_GB,
+    MIN_DATA_GB,
+    MIN_EXTRA_DATA_GB,
     MSR_GPT,
     PartitionLayoutError,
+    allow_small_partitions,
     check_layout,
+    check_minimums,
     data_partition_count,
     diskpart_lines,
     plan_partitions,
@@ -592,7 +597,12 @@ def _controller(tmp_path, image_name: str = "win11.wim") -> WorkflowController:
         return {
             "results": [{"name": "运行前检查", "passed": True, "message": "ok"}],
             "config_payload": {
-                "partition_info": {"efi_size_mb": 300, "c_size_gb": 20},
+                "partition_info": {
+                    "efi_size_mb": 300,
+                    "c_size_gb": 20,
+                    # 单测用小尺寸：显式放宽后端下限（C ≥ 60 GB）
+                    "allow_small_partitions": True,
+                },
                 "image_info": {"image_path": str(image), "image_index": 1},
             },
         }
@@ -692,3 +702,92 @@ def test_prepare_without_extra_partition_keeps_three_letters(tmp_path) -> None:
         "windows",
         "data",
     ]
+
+
+# ------------------------------------------------------------------ 分区大小下限
+def _no_flag_controller(tmp_path) -> WorkflowController:
+    """不带 ``allow_small_partitions`` 的控制器：C 20 GB 必须在计划阶段被拒。"""
+    image = tmp_path / "win11.wim"
+    image.write_bytes(b"wim")
+
+    def preflight(config_path=None, dry_run=False):
+        return {
+            "results": [{"name": "运行前检查", "passed": True, "message": "ok"}],
+            "config_payload": {
+                "partition_info": {"efi_size_mb": 300, "c_size_gb": 20},
+                "image_info": {"image_path": str(image), "image_index": 1},
+            },
+        }
+
+    return WorkflowController(
+        service=_FakeService([_disk(1)]),
+        dry_run=True,
+        preflight_runner=preflight,
+        image_indexes=lambda path: [1],
+    )
+
+
+def test_check_minimums_blocks_tiny_partitions() -> None:
+    tiny_c = plan_partitions({"partition_info": {"efi_size_mb": 100, "c_size_gb": 20}})
+    assert any("系统分区至少 60 GB" in item for item in check_minimums(tiny_c, 500 * GIB))
+
+    tiny_data = plan_partitions(
+        {
+            "partition_info": {
+                "efi_size_mb": 100,
+                "c_size_gb": 120,
+                "data_partitions": [{"size_gb": 5}, {"size_gb": 0.5}],
+            }
+        }
+    )
+    problems = check_minimums(tiny_data, 1000 * GIB)
+    assert any("Data 分区至少 20 GB" in item for item in problems)
+    assert any("Data2 分区至少 1 GB" in item for item in problems)
+
+
+def test_check_minimums_checks_auto_partition_remainder() -> None:
+    """最后一个分区是 auto：剩下多少要够它自己的下限。"""
+    parts = plan_partitions({"partition_info": {"efi_size_mb": 100, "c_size_gb": 120}})
+    assert parts[-1].size_mb is None
+    assert any("至少要 20 GB" in item for item in check_minimums(parts, 130 * GIB))
+    assert check_minimums(parts, 500 * GIB) == []
+
+
+def test_allow_small_partitions_flag_relaxes_minimums() -> None:
+    payload = {
+        "partition_info": {
+            "efi_size_mb": 100,
+            "c_size_gb": 20,
+            "data_size_gb": 5,
+            "allow_small_partitions": True,
+        }
+    }
+    parts = plan_partitions(payload)
+    assert check_minimums(parts, 100 * GIB)  # 没放宽时拦得住
+    assert (
+        check_minimums(parts, 100 * GIB, allow_small=allow_small_partitions(payload)) == []
+    )
+
+
+def test_prepare_rejects_tiny_layout_unless_flag(tmp_path) -> None:
+    controller = _no_flag_controller(tmp_path)
+    controller.start(None, dry_run=True)
+
+    with pytest.raises(Exception, match="分区过小"):
+        controller.prepare([1])
+
+    allowed = _controller(tmp_path)  # 同一个布局，但显式带了 allow_small_partitions
+    allowed.start(None, dry_run=True)
+    assert allowed.prepare([1])[0].spec.disk_number == 1
+
+
+def test_minimums_match_frontend_constants() -> None:
+    """后端下限必须与 derive.js 一致，避免以后只有一端改了。"""
+    from pathlib import Path
+
+    derive = (
+        Path(__file__).resolve().parents[1] / "app" / "gui_web" / "ui" / "js" / "derive.js"
+    ).read_text(encoding="utf-8")
+    assert f"export const MIN_SYS_GB = {MIN_C_GB};" in derive
+    assert f"export const MIN_DATA_GB = {MIN_DATA_GB};" in derive
+    assert f"export const MIN_EXTRA_GB = {MIN_EXTRA_DATA_GB};" in derive

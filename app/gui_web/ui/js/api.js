@@ -71,10 +71,6 @@ export const api = {
   // 镜像
   images: (payload = {}) => post('/api/images', payload),
 
-  // 分区
-  partitionPlan: (diskNumber, actions) => post('/api/partition/plan', { disk_number: diskNumber, actions }),
-  partitionExecute: (payload) => post('/api/partition/execute', payload),
-
   // 引导
   bootReport: () => get('/api/boot/report'),
   bootRepair: (payload) => post('/api/boot/repair', payload),

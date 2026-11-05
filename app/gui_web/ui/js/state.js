@@ -8,7 +8,7 @@
 
 import {
   clamp, freeBytes, isSelectable, checkLayout, fitLayout, reserveGb as reserveGbFor,
-  DEFAULT_EFI_MB, MIN_DATA_GB, MIN_EXTRA_GB, MAX_EXTRAS, toGb,
+  DEFAULT_EFI_MB, MIN_DATA_GB, MIN_EXTRA_GB, MAX_EXTRAS, toGb, autoPartitionRole,
 } from './derive.js';
 
 export const STEP_LABELS = {
@@ -397,12 +397,12 @@ export function syncAutoPartition(target) {
   const totalGb = toGb(Number(disk && disk.size_bytes) || 0);
   if (!(totalGb > 0)) return;
   const extras = Array.isArray(target.extras) ? target.extras : [];
-  const autoRole = extras.length ? 'extra' : 'data';
+  const role = autoPartitionRole(extras);
   const explicitGb = (Number(target.sysGb) || 0)
-    + (autoRole === 'extra' ? Number(target.dataGb) || 0 : 0);
+    + (role === 'extra' ? Number(target.dataGb) || 0 : 0);
   // 与 fitLayout 同口径：向下取整到 0.1 GB，再加 1e-9 吸收浮点误差
   const left = Math.max(0, Math.floor((totalGb - explicitGb - reserveGb()) * 10 + 1e-9) / 10);
-  if (autoRole === 'extra') extras[extras.length - 1].sizeGb = left;
+  if (role === 'extra') extras[extras.length - 1].sizeGb = left;
   else target.dataGb = left;
 }
 

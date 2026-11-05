@@ -56,12 +56,6 @@ def _scan_summary(disk_number: int) -> dict[str, Any]:
     raise PermissionError(f"硬盘 {disk_number} 当前不存在")
 
 
-def _scan_used_letters() -> list[str]:
-    from app.modules.disk_info.service import scan_used_drive_letters
-
-    return scan_used_drive_letters()
-
-
 def _job_log_path(job: Any) -> str | None:
     """从任务结果最后一步的 details 里找日志路径。"""
     result = getattr(job, "result", None)
@@ -306,90 +300,14 @@ class WebApi:
             dry_run=self._service_dry_run(),
         )
 
-    # ------------------------------------------------------------------ 分区
-    def partition_plan(self, disk_number: Any, actions: Any) -> dict[str, Any]:
-        """只校验并生成 diskpart 脚本，不动磁盘。"""
-        try:
-            number = int(disk_number)
-        except (TypeError, ValueError):
-            return err("E_PARTITION", "硬盘编号不合法")
-        try:
-            result = self._partition_runner().run(number, actions, dry_run=True)
-        except Exception as exc:  # noqa: BLE001
-            return err("E_PARTITION", str(exc))
-        return ok(result)
-
-    def partition_execute(
-        self,
-        disk_number: Any,
-        actions: Any,
-        identity: dict[str, Any] | None = None,
-        confirm_text: str | None = None,
-    ) -> dict[str, Any]:
-        """执行分区操作；``confirmDelete`` 打开时必须回填盘号或型号。"""
-        try:
-            number = int(disk_number)
-        except (TypeError, ValueError):
-            return err("E_PARTITION", "硬盘编号不合法")
-        resolved = self._resolve_identity(number, identity)
-        self._wf.authorize_disks([number])
-        if not self._delete_confirmed(number, resolved, confirm_text):
-            return err(
-                "E_CONFIRM",
-                "已开启“删除/格式化前需输入确认”：请输入盘号或磁盘型号后再执行。",
-            )
-        try:
-            result = self._partition_runner().run(number, actions, identity=resolved)
-        except PermissionError as exc:
-            return err("E_CONFIRM", str(exc))
-        except Exception as exc:  # noqa: BLE001
-            return err("E_PARTITION", str(exc))
-        return ok(result)
-
-    def _delete_confirmed(
-        self,
-        disk_number: int,
-        identity: dict[str, Any],
-        confirm_text: str | None,
-    ) -> bool:
-        settings = self._settings.get()
-        if not bool(settings.get("confirmDelete", True)):
-            return True
-        text = " ".join(str(confirm_text or "").split()).casefold()
-        if not text:
-            return False
-        accepted = {
-            str(disk_number),
-            f"disk{disk_number}",
-            f"disk {disk_number}",
-            f"硬盘{disk_number}",
-            f"硬盘 {disk_number}",
-        }
-        model = " ".join(str(identity.get("model") or "").split()).casefold()
-        if model:
-            accepted.add(model)
-        return text in {" ".join(item.split()).casefold() for item in accepted}
-
-    def _partition_runner(self) -> Any:
-        from app.modules.partition.service import PartitionRunner
-
-        settings = self._settings.get()
-        return PartitionRunner(
-            self._gate,
-            diskpart=str(settings.get("extDiskpart") or "") or None,
-            temp_dir=str(settings.get("sysTemp") or "") or None,
-            log_dir=self._log_root,
-            dry_run=self._service_dry_run(),
-            used_letters=_scan_used_letters,
-        )
-
+    # ------------------------------------------------------------------ 分区/引导
     def _resolve_identity(
         self, disk_number: int, identity: dict[str, Any] | None
     ) -> dict[str, Any]:
         """取这块盘的强身份：调用方给了就用，没给就现场扫一次。
 
         ``blockUnverified`` 默认是打开的，写盘闸门要求“期望身份”里有 UniqueId 或
-        序列号；而界面上的分区/修复引导只传盘号。如果不在这里补齐身份，真实操作
+        序列号；而界面上的修复引导只传盘号。如果不在这里补齐身份，真实操作
         会一律被拒（写入前复核拿不到可比对的东西）——扫描本身是只读的，补这一下
         比放宽闸门安全得多。
         """

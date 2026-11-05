@@ -36,20 +36,26 @@ from app.application.workflow import WorkflowController
 from app.models import WorkerResult
 
 _GIB = 1024**3
+# 单测用小尺寸（C 30 GB）测算术：显式放宽后端下限（真实布局 C ≥ 60 GB）。
 _PAYLOAD: dict[str, Any] = {
-    "partition_info": {"efi_size_mb": 300, "c_size_gb": 30, "data_size_gb": "auto"},
+    "partition_info": {
+        "efi_size_mb": 300,
+        "c_size_gb": 30,
+        "data_size_gb": "auto",
+        "allow_small_partitions": True,
+    },
     "image_info": {"image_path": r"D:\images\win11.wim", "image_index": 1},
 }
 
 
-def _disk(number: int = 1, *, selectable: bool = True) -> DiskInfo:
+def _disk(number: int = 1, *, selectable: bool = True, size_gb: int = 60) -> DiskInfo:
     return DiskInfo(
         disk_number=number,
         model="test disk",
         serial_number=None,
         unique_id=f"unique-{number}",
-        size_bytes=60 * _GIB,
-        size_display="60 GB",
+        size_bytes=size_gb * _GIB,
+        size_display=f"{size_gb} GB",
         partition_style="RAW",
         bus_type="NVMe",
         drive_letters=(),
@@ -187,7 +193,7 @@ def test_per_disk_image_override_recomputes_image_blocker(tmp_path):
                 }
             ],
             "config_payload": {
-                "partition_info": {"c_size_gb": 30},
+                "partition_info": {"c_size_gb": 30, "allow_small_partitions": True},
                 "image_info": {"image_path": r"D:\images\missing.wim"},
             },
         }
@@ -569,18 +575,18 @@ def test_partition_defaults_settings_win_by_default():
         }
 
     controller = WorkflowController(
-        service=_FakeService([_disk(1)]),
+        service=_FakeService([_disk(1, size_gb=1000)]),
         dry_run=True,
         preflight_runner=preflight,
-        partition_defaults={"efi_size_mb": 100, "c_size_gb": 20, "data_size_gb": 10},
+        partition_defaults={"efi_size_mb": 100, "c_size_gb": 120, "data_size_gb": 30},
     )
     controller.start(None, dry_run=True)
 
     info = controller.prepare([1])[0].spec.config_payload["partition_info"]
 
     assert info["efi_size_mb"] == 100      # 设置值覆盖配置
-    assert info["c_size_gb"] == 20
-    assert info["data_size_gb"] == 10
+    assert info["c_size_gb"] == 120
+    assert info["data_size_gb"] == 30
 
 
 def test_partition_defaults_config_wins_when_config_explicit():
@@ -595,10 +601,10 @@ def test_partition_defaults_config_wins_when_config_explicit():
         }
 
     controller = WorkflowController(
-        service=_FakeService([_disk(1)]),
+        service=_FakeService([_disk(1, size_gb=1000)]),
         dry_run=True,
         preflight_runner=preflight,
-        partition_defaults={"efi_size_mb": 100, "c_size_gb": 20, "data_size_gb": 10},
+        partition_defaults={"efi_size_mb": 100, "c_size_gb": 120, "data_size_gb": 30},
     )
     session = controller.start("preset.json", dry_run=True)
     assert session.config_explicit is True
@@ -606,7 +612,7 @@ def test_partition_defaults_config_wins_when_config_explicit():
     info = controller.prepare([1])[0].spec.config_payload["partition_info"]
 
     assert info["efi_size_mb"] == 300      # 业务配置优先
-    assert info["c_size_gb"] == 20         # 缺失字段用设置默认值
+    assert info["c_size_gb"] == 120        # 缺失字段用设置默认值
     assert info["data_size_gb"] == "auto"  # auto 不被默认值覆盖
 
 
@@ -615,16 +621,16 @@ def test_partition_defaults_apply_when_config_has_no_partition_info():
         return {"results": [], "config_payload": {"image_info": {}}}
 
     controller = WorkflowController(
-        service=_FakeService([_disk(1)]),
+        service=_FakeService([_disk(1, size_gb=1000)]),
         dry_run=True,
         preflight_runner=preflight,
-        partition_defaults={"efi_size_mb": 100, "c_size_gb": 20, "data_size_gb": None},
+        partition_defaults={"efi_size_mb": 100, "c_size_gb": 120, "data_size_gb": None},
     )
     controller.start(None, dry_run=True)
 
     info = controller.prepare([1])[0].spec.config_payload["partition_info"]
 
-    assert info == {"efi_size_mb": 100, "c_size_gb": 20}
+    assert info == {"efi_size_mb": 100, "c_size_gb": 120}
 
 
 def test_tool_paths_reach_default_real_runner():
@@ -714,7 +720,13 @@ def test_runner_releases_efi_letter_even_when_image_fails(tmp_path):
     spec = SimpleNamespace(
         disk_number=2,
         config_payload={
-            "partition_info": {"efi_size_mb": 100, "c_size_gb": 3, "data_size_gb": "auto"},
+            "partition_info": {
+                "efi_size_mb": 100,
+                "c_size_gb": 3,
+                "data_size_gb": "auto",
+                # 单测用小尺寸：显式放宽后端下限（C ≥ 60 GB）
+                "allow_small_partitions": True,
+            },
             "image_info": {"image_path": str(image), "image_index": 1},
         },
         drive_letters={"efi": "E", "windows": "F", "data": "G"},
@@ -741,7 +753,12 @@ def _tiny_spec(image, data_size="auto"):
     return SimpleNamespace(
         disk_number=2,
         config_payload={
-            "partition_info": {"efi_size_mb": 100, "c_size_gb": 3, "data_size_gb": data_size},
+            "partition_info": {
+                "efi_size_mb": 100,
+                "c_size_gb": 3,
+                "data_size_gb": data_size,
+                "allow_small_partitions": True,
+            },
             "image_info": {"image_path": str(image), "image_index": 1},
         },
         drive_letters={"efi": "E", "windows": "F", "data": "G"},
@@ -1142,3 +1159,37 @@ def test_runner_reports_diskpart_timeout(tmp_path, monkeypatch) -> None:
     efi = next(step for step in result.steps if step.key == "efi")
     assert efi.failed is True
     assert "超时" in efi.message
+
+
+def test_runner_refuses_tiny_layout_before_touching_disk(tmp_path, monkeypatch) -> None:
+    """下限拦截必须在 ``_wipe_script`` 之前：盘一根毛都不能动。"""
+    image = tmp_path / "tiny.wim"
+    image.write_bytes(b"x")
+    spec = SimpleNamespace(
+        disk_number=2,
+        config_payload={
+            # 没有 allow_small_partitions：3 GB 的系统分区必须被拒
+            "partition_info": {"efi_size_mb": 100, "c_size_gb": 3, "data_size_gb": "auto"},
+            "image_info": {"image_path": str(image), "image_index": 1},
+        },
+        drive_letters={"efi": "E", "windows": "F", "data": "G"},
+    )
+    runner = WindowsDiskRunner(
+        diskpart="diskpart.exe",
+        dism="dism.exe",
+        bcdboot="bcdboot.exe",
+        powershell="powershell.exe",
+    )
+    scripts: list[list[str]] = []
+
+    def record(lines, log, **kwargs):
+        scripts.append(list(lines))
+        return 0, "diskpart ok"
+
+    _stub_runner(monkeypatch, runner, diskpart=record)
+
+    result = runner.run(spec, threading.Event())
+
+    assert result.success is False
+    assert "分区过小" in (result.error or "")
+    assert scripts == []  # 一段 diskpart 都没跑过

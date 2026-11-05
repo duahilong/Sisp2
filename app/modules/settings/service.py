@@ -44,7 +44,6 @@ DEFAULTS: dict[str, Any] = {
     # 安装默认值
     "confirmBeforeStart": True,
     "typeToConfirm": True,
-    "confirmDelete": True,
     "sysDefaultGb": 120,
     "efiDefaultMb": 100,
     "dataDefaultGb": "auto",
@@ -106,7 +105,6 @@ _BOOL_KEYS = {
     "autoRefresh",
     "confirmBeforeStart",
     "typeToConfirm",
-    "confirmDelete",
     "protectSystemDisk",
     "dryRunByDefault",
     "blockUnverified",

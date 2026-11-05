@@ -47,6 +47,8 @@ from app.application.partitions import (
     MSR_GPT,
     PartitionLayoutError,
     PlannedPartition,
+    allow_small_partitions,
+    check_minimums,
     diskpart_lines,
     plan_partitions,
     strip_msr_lines,
@@ -294,7 +296,7 @@ def _layout_verdict(
         first_size = (_to_int(first.get("size_bytes")) or 0) / BYTES_PER_MB
         if abs(first_size - efi_plan.size_mb) > 1:
             problems.append(
-                f"盘首分区不是计划的 EFI（实隖 {first_size:.0f} MB，预期 {efi_plan.size_mb} MB）"
+                f"盘首分区不是计划的 EFI（实际 {first_size:.0f} MB，预期 {efi_plan.size_mb} MB）"
             )
         first_offset = (_to_int(first.get("offset_bytes")) or 0) / BYTES_PER_MB
         if first_offset > 2:
@@ -600,6 +602,12 @@ class WindowsDiskRunner:
             parts = plan_partitions(payload, letters=letters)
         except PartitionLayoutError as exc:
             return steps, str(exc)
+
+        # 最后一道下限拦截：任何入口（包括绕过 prepare 直接塞 JobSpec 的调用方）
+        # 都不能在盘上建出 1 GB 的系统分区。这里还在 _wipe_script 之前，盘没动。
+        too_small = check_minimums(parts, allow_small=allow_small_partitions(payload))
+        if too_small:
+            return steps, "分区过小，已中止（未碰磁盘）：" + "；".join(too_small)
 
         missing_letters = [part.role for part in parts if not part.letter]
         if missing_letters:
