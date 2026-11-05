@@ -196,3 +196,83 @@ assign letter=G
 | `app/modules/boot/service.py` | 同上 |
 | `app/gui_web/api.py` | GUI 生产入口显式授权 |
 | `Docs/testing.md` | 测试规范（新增"测试绝不能碰真实磁盘"一节） |
+
+---
+
+## 附录 A：测试用例风险审计（2026-11-06）
+
+用临时插件在 `pytest` 进程里钩住 `ensure_command_allowed`，统计"危险命令尝试"：
+
+| 指标 | 结果 |
+| --- | --- |
+| 全量用例 | 345 passed |
+| 危险命令尝试 | **6 次**（diskpart×3、bcdboot×2、dism×1） |
+| 被护栏拦下 | **6 次** |
+| **被放行（真的会执行）** | **0 次** |
+
+6 次尝试里 5 次来自 `tests/test_safety_guard.py`（故意构造，断言必须被拦），
+1 次来自"显式授权但处于测试环境"的用例（验证环境封锁优先级）。
+结论：**当前测试集没有任何用例会真实写盘**。
+
+### A.1 仍然存在的结构性风险（重构前必须清理）
+
+P0（会在本机真实写盘）：**0 条**。
+
+P1（当前安全，但门槛很薄）：**14 个测试用"直接赋值"mock 内部方法**——
+这正是本次事故的形态。基线里这些方法还在 `WindowsDiskRunner` 上，所以 mock 目前
+有效；**一旦把实现搬到 `PartitionService`，它们会像这次一样静默失效**。
+
+| 文件 | 行 | 测试 | 被 mock 的方法 |
+| --- | --- | --- | --- |
+| `test_real_execution.py` | 708 | `test_release_efi_letter_switch_off_keeps_letter` | `_run_diskpart` |
+| `test_real_execution.py` | 729 | `test_release_efi_letter_switch_on_removes_letter` | `_esp_partition_number`, `_run_diskpart` |
+| `test_real_execution.py` | 749 | `test_release_efi_letter_switch_off_does_not_even_query` | 同上 |
+| `test_real_execution.py` | 770 | `test_release_efi_letter_switch_skips_when_disk_untouched` | `_run_diskpart` |
+| `test_real_execution.py` | 788 | `test_release_efi_letter_uses_disk_and_partition_not_letter` | 同上 + `_esp_partition_number` |
+| `test_real_execution.py` | 812 | `test_release_efi_letter_reuses_partition_number_from_layout_check` | 同上 |
+| `test_real_execution.py` | 829 | `test_release_efi_letter_skips_when_no_esp_found` | 同上 |
+| `test_real_execution.py` | 845 | `test_release_efi_letter_skips_when_query_fails` | 同上 |
+| `test_real_execution.py` | 867 | `test_esp_partition_number_matches_gpt_type` | `_query_partitions` |
+| `test_real_execution.py` | 882 | `test_release_efi_letter_skips_without_letter` | `_run_diskpart` |
+| `test_real_execution.py` | 892 | `test_runner_keeps_efi_letter_when_switch_off` | **事故肇事测试之一** |
+| `test_real_execution.py` | 933 | `test_runner_releases_efi_letter_even_when_image_fails` | **事故肇事测试之一** |
+| `test_settings_wiring.py` | 241 | `test_runner_accepts_runner_options_on_spec` | **事故肇事测试之一** |
+| `test_settings_wiring.py` | 311 | `test_diskpart_script_written_into_configured_temp_dir` | `_spawn` |
+
+### A.2 使用真实盘号的测试
+
+以下测试把 `disk_number` 写成 1/2/3（真实盘号）。只要 mock 有效就不会碰盘，
+但**mock 一旦失效就直指本机真实磁盘**：
+
+- `test_real_execution.py`：`_whole_disk_spec()`（盘号 1）、`test_runner_refuses_tiny_layout_before_touching_disk`（2）、
+  以及 A.1 表里所有带 `spec.disk_number` 的用例；
+- `test_partition_layout.py::test_msr_delete_is_a_separate_step_before_layout`（1，只生成脚本，不执行）；
+- `test_settings_wiring.py::test_runner_accepts_runner_options_on_spec`（1）。
+
+### A.3 重构前必须完成的四项整改
+
+1. **A.1 的 14 处直接赋值 → `monkeypatch.setattr`**：至少让"方法已不存在"立刻
+   `AttributeError`，而不是静默失效。若方法签名需要 fixture，就给测试函数加
+   `monkeypatch` 参数。
+2. **给 `_stub_runner` 加存在性断言**（最省事、最有效的一道网）：
+
+   ```python
+   for name in ("_run_diskpart", "_query_partitions", "_verify_partitions_after_create"):
+       assert hasattr(runner, name), f"{name} 已不存在：mock 会静默失效，先改测试再跑"
+   ```
+
+3. **真实盘号改成 9xx**（如 `999`、`1001`），同步改断言里的字符串；
+   真实盘号只允许出现在 VM 集成测试里。
+4. **搬实现前先把测试改成注入式**：新模块通过构造参数接收 `shell=`，
+   测试注入 `FakeShell`（脚本 → 输出映射），不再 monkeypatch 任何内部方法。
+
+### A.4 其它已核实为安全的情形
+
+| 情形 | 结论 |
+| --- | --- |
+| `test_runner_reports_missing_image_without_touching_disks` | 在 `_wipe_script` 之前返回（镜像不存在），不碰盘 |
+| `test_runner_rejects_incomplete_letters` / `test_runner_honours_pre_cancelled_event` | 分区前返回 |
+| `test_runner_refuses_tiny_layout_before_touching_disk` | 下限拦截在清盘前 |
+| `test_runner_fails_cleanly_when_diskpart_cannot_start` | **依赖护栏**（路径不存在也会先被 `RealDiskBlocked` 拦下） |
+| `test_partition_layout.py` 里所有 `_diskpart_script` / `_wipe_script` 断言 | 只生成脚本文本，不执行 |
+| `tests/test_safety_guard.py` 的 3 条"P0 标记" | 护栏自测：故意制造危险调用并断言被拦 |
