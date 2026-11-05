@@ -8,6 +8,6 @@
 #     Python 解释器**里（onefile 内嵌的是这个解释器的 python3xx.dll）。
 #   - 图形界面后端（pywebview / WebView2）来自 requirements-web.txt，
 #     打包时会一并收进 exe，所以这里直接包含它。
-#   - 只在 Windows 上验证过；构建脚本见 packaging/build.py，说明见 Docs/packaging.md。
+#   - 只在 Windows 上验证过；构建脚本见 packaging/build.py，说明见 Docs/打包与分发.md。
 -r requirements-web.txt
 pyinstaller>=6.0

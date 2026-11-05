@@ -25,7 +25,7 @@ python -m app.gui_web.main --dry-run
 
 扫盘、装机向导、修复引导、镜像索引全部在界面里完成，命令行已经不是必需入口（`app.cli` 已移除）。**分区只在装机向导里做**（整盘重建 EFI + 系统 + 数据分区）：单盘级的新建/格式化/删分区属于破坏性操作，请用 Windows 磁盘管理（`diskmgmt.msc`）——历史上那套 `/api/partition/*` 已于 2026-11 移除。实际模式由命令行 `--dry-run` 与设置 `dryRunByDefault` 共同决定：任一为真即演练，且该演练状态是硬上限，启动后的界面操作或 Web API 不能把它升级为真实执行。二者都为假时可能进入真实模式；启动 GUI 不等同于安全演练，请显式传 `--dry-run`。
 
-GUI 默认监听 `127.0.0.1:8765`；可用 `--host`、`--port` 改变监听参数。接口文档默认在 `/docs`。非 loopback 监听没有鉴权，属于高风险配置，详见[安全边界](Docs/security.md)及[Web API](Docs/web-api.md)。
+GUI 默认监听 `127.0.0.1:8765`；可用 `--host`、`--port` 改变监听参数。接口文档默认在 `/docs`。非 loopback 监听没有鉴权，属于高风险配置，详见[安全边界](Docs/安全边界.md)及[Web API](Docs/Web接口与部署.md)。
 
 ## 打包成 exe
 
@@ -34,16 +34,16 @@ GUI 默认监听 `127.0.0.1:8765`；可用 `--host`、`--port` 改变监听参�
 ```powershell
 python -m pip install -r requirements-build.txt
 python packaging/build.py
-# → dist/Sisp2.exe（图形界面，约 18 MB）
+# → dist/Sisp2.exe（图形界面，约 22 MB）
 ```
 
-exe 的参数与源码运行一致（`--dry-run` / `--serve` / `--config` / `--settings` 等）；首次运行会在 exe 同目录把 `json/win11.example.json` 复制成可编辑的 `json/win11.json`，设置仍保存在 `%APPDATA%\Sisp`。细节（提权、日志位置、体积、未签名等限制）见[打包说明](Docs/packaging.md)。
+exe 的参数与源码运行一致（`--dry-run` / `--serve` / `--config` / `--settings` 等）；首次运行会在 exe 同目录把 `json/win11.example.json` 复制成可编辑的 `json/win11.json`，设置仍保存在 `%APPDATA%\Sisp`。细节（提权、日志位置、体积、未签名等限制）见[打包说明](Docs/打包与分发.md)。
 
 ## 配置
 
-日常配置都在界面「设置」里（EFI/系统/数据分区大小、文件系统、默认镜像与版本、禁止操作的硬盘型号、外部工具路径、安全开关）。业务 JSON 是可选的预设文件：仓库跟踪模板 `json/win11.example.json`，首次运行复制成 `json/win11.json`（已 gitignore）；也可以用 `-j`/`--config` 或 `SISP_CONFIG` 指定。无 `-j` 时界面设置优先，显式指定时业务 JSON 优先。详见[配置说明](Docs/configuration.md)。
+日常配置都在界面「设置」里（EFI/系统/数据分区大小、文件系统、默认镜像与版本、禁止操作的硬盘型号、外部工具路径、安全开关）。业务 JSON 是可选的预设文件：仓库跟踪模板 `json/win11.example.json`，首次运行复制成 `json/win11.json`（已 gitignore）；也可以用 `-j`/`--config` 或 `SISP_CONFIG` 指定。无 `-j` 时界面设置优先，显式指定时业务 JSON 优先。详见[配置说明](Docs/配置说明.md)。
 
-界面设置与业务配置分离，默认保存于 `%APPDATA%\Sisp\settings.json`（无 `APPDATA` 时为用户目录下 `.config/Sisp/settings.json`）；GUI 可用 `--settings` 指定位置。表内字段均已接入运行时，每个字段的真实行为、生效时机以及仍需说明的边界（例如 `language` 只影响页面 `lang`、外部工具类路径只参与预检）列于[配置说明](Docs/configuration.md)。
+界面设置与业务配置分离，默认保存于 `%APPDATA%\Sisp\settings.json`（无 `APPDATA` 时为用户目录下 `.config/Sisp/settings.json`）；GUI 可用 `--settings` 指定位置。表内字段均已接入运行时，每个字段的真实行为、生效时机以及仍需说明的边界（例如 `language` 只影响页面 `lang`、外部工具类路径只参与预检）列于[配置说明](Docs/配置说明.md)。
 
 ## 当前安全行为与限制
 
@@ -55,7 +55,7 @@ exe 的参数与源码运行一致（`--dry-run` / `--serve` / `--config` / `--s
 - SSE 重放依赖进程内有限缓冲；队列满会丢弃新事件，缓冲淘汰也会使旧事件无法补发，不能保证完整事件历史。
 - 预检仅在拿到镜像路径（业务配置或设置里的默认镜像）时检查文件是否存在；都没有路径时预检不报，真实执行器仍会拒绝缺少镜像路径。
 
-详见[安全边界](Docs/security.md)。
+详见[安全边界](Docs/安全边界.md)。
 
 ## 测试
 
@@ -64,7 +64,8 @@ python -m pip install -r requirements-web.txt -r requirements-dev.txt
 python -m pytest tests/ -q
 ```
 
-测试主要依赖替身与注入实现，目标是验证逻辑而非真实设备写盘；不能据此声称 Windows 实际写盘流程已端到端验证。Web API 测试需要 `httpx`；SSE 测试会在后台线程启动真实 uvicorn（随机空闲端口），因此需要 `uvicorn`。不要在真实磁盘环境中尝试写盘测试。
+测试主要依赖替身与注入实现，目标是验证逻辑而非真实设备写盘；`app/safety_guard.py` 会在
+执行前拦下 diskpart/format/bcdboot/dism 等写盘命令（详见[测试指南](Docs/测试指南.md)）。Web API 测试需要 `httpx`；SSE 测试会在后台线程启动真实 uvicorn（随机空闲端口），因此需要 `uvicorn`。不要在真实磁盘环境中尝试写盘测试。
 
 ## 设计原型
 
@@ -72,10 +73,12 @@ python -m pytest tests/ -q
 
 ## 文档索引
 
-- [架构与工作流](Docs/architecture.md)
-- [安全边界与已知风险](Docs/security.md)
-- [界面设置与可选业务配置](Docs/configuration.md)
-- [Web API、SSE 与部署](Docs/web-api.md)
-- [测试与真实写盘验证](Docs/testing.md)
-- [打包成 exe](Docs/packaging.md)
-- [前端开发说明](app/gui_web/ui/README.md)
+| 文档 | 内容 |
+| --- | --- |
+| [架构与工作流](Docs/架构与工作流.md) | 分层、一次工作流、分区/MSR/盘符/验收、演练与真实模式判定 |
+| [配置说明](Docs/配置说明.md) | 界面设置、业务 JSON、两者优先级与生效时机 |
+| [Web接口与部署](Docs/Web接口与部署.md) | 启动与部署、路由、Host 校验、SSE、前端目录与开发约定 |
+| [安全边界](Docs/安全边界.md) | 写盘门禁、Web 暴露面、事件与日志、预检边界 |
+| [测试指南](Docs/测试指南.md) | 三层测试、护栏规则、VM 真实写盘流程、历史测试报告（附录 A） |
+| [打包与分发](Docs/打包与分发.md) | 构建、产物、提权链、运行方式、启动耗时、已知限制 |
+| [事故报告-2026-11-06-磁盘被格式化](Docs/事故报告-2026-11-06-磁盘被格式化.md) | 一次测试真实清盘事故的完整复盘、护栏修复、测试风险审计 |

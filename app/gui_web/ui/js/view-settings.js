@@ -7,7 +7,7 @@
  * `settings.DEFAULTS` 的键逐个核对，后端新增设置而前端漏了会直接测试失败。
  *
  * 改动先写进 state.draft，点“保存设置”才 `PUT /api/settings`；
- * 保存后按三类生效时机提示：立即 / 下次任务 / 下次启动（见 Docs/configuration.md）。
+ * 保存后按三类生效时机提示：立即 / 下次任务 / 下次启动（见 Docs/配置说明.md）。
  */
 
 import { api, ApiError } from './api.js';
