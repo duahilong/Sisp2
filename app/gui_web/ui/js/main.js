@@ -20,7 +20,7 @@ import {
   renderInstall, goStep, next, back, resetAll, onStepEvent, refreshPhase,
   pollJobLogs, loadImages,
 } from './view-install.js';
-import { renderSettings, saveSettings, resetSettings, exportSettings, importSettings } from './view-settings.js';
+import { renderSettings, saveSettings, resetSettings, exportSettings, importSettings, probeAllQuiet } from './view-settings.js';
 import {
   openBootDialog, openCheckDialog, openAboutDialog, openKeysDialog,
 } from './dialogs.js';
@@ -58,6 +58,7 @@ function render() {
   if (!settingsPainted && state.settings) {
     settingsPainted = true;
     renderSettings();
+    probeAllQuiet();
   }
 }
 

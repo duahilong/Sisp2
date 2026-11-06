@@ -98,7 +98,7 @@ class _FakeService:
 # （曾经还有第三个：``-j`` 指定的业务 JSON，显式传时压过设置。那一层已移除。）
 _PARTITION_DEFAULTS: dict[str, Any] = dict(_PAYLOAD["partition_info"])
 _SETTINGS: dict[str, Any] = {
-    "sysWim": _PAYLOAD["image_info"]["image_path"],
+    "sysImageA": _PAYLOAD["image_info"]["image_path"],
     "imageDefaultIndex": 1,
 }
 
@@ -219,7 +219,7 @@ def test_per_disk_image_override_recomputes_image_blocker(tmp_path):
         dry_run=True,
         preflight_runner=preflight,
         partition_defaults={"c_size_gb": 30, "allow_small_partitions": True},
-        settings_provider=lambda: {"sysWim": missing},
+        settings_provider=lambda: {"sysImageA": missing},
     )
     controller.start(dry_run=True)
 

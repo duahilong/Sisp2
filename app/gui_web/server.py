@@ -152,7 +152,7 @@ def create_app(
     # ------------------------------------------------------------- 镜像探测
     @app.post("/api/images")
     def probe_images(body: dict[str, Any] | None = None) -> dict[str, Any]:
-        """列镜像目录（``directory``）或读取某个 WIM/ISO 的索引（``path``）。"""
+        """设置里的两个系统版本（带文件头校验），或单独校验某个 GHO（``path``）。"""
         payload = body or {}
         return api.probe_images(payload.get("directory"), payload.get("path"))
 

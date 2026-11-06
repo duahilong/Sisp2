@@ -753,7 +753,7 @@ def _controller(tmp_path, image_name: str = "win11.GHO") -> WorkflowController:
             # 单测用小尺寸：显式放宽后端下限（C ≥ 60 GB）
             "allow_small_partitions": True,
         },
-        settings_provider=lambda: {"sysWim": str(image)},
+        settings_provider=lambda: {"sysImageA": str(image)},
     )
 
 
@@ -860,7 +860,7 @@ def _no_flag_controller(tmp_path) -> WorkflowController:
         dry_run=True,
         preflight_runner=preflight,
         partition_defaults={"efi_size_mb": 300, "c_size_gb": 20},
-        settings_provider=lambda: {"sysWim": str(image)},
+        settings_provider=lambda: {"sysImageA": str(image)},
     )
 
 

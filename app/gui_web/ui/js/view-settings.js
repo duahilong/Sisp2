@@ -46,7 +46,7 @@ const FIELDS = [
   { section: 'install', key: 'sysDefaultGb', kind: 'int', effect: '下次生成计划生效', hint: '向导第 2 步的初始值，可以在那一步改。' },
   { section: 'install', key: 'efiDefaultMb', kind: 'int', effect: '下次生成计划生效', hint: 'EFI（ESP）分区大小，最小 64 MB；向导第 2 步只显示不可改。' },
   { section: 'install', key: 'dataDefaultGb', kind: 'auto-int', effect: '下次生成计划生效', hint: '“自动”= 剩余空间全给数据分区。' },
-  { section: 'install', key: 'imageDefaultIndex', kind: 'int', effect: '下次生成计划生效', hint: '默认镜像里的第几个版本；0 = 用第一个。向导第 3 步可逐盘覆盖。' },
+  { section: 'install', key: 'imageDefaultIndex', kind: 'int', effect: '下次生成计划生效', hint: 'GHO 里的分区块序号（不是系统版本）；0 = 交给 Ghost 挑第一个。' },
 
   { section: 'external', key: 'extEnabled', kind: 'bool', effect: '立即生效', hint: '关掉后一律用系统自带命令。' },
   { section: 'external', key: 'extConfirm', kind: 'bool', effect: '立即生效', hint: '调用外部程序前先确认路径。' },
@@ -55,9 +55,11 @@ const FIELDS = [
   { section: 'external', key: 'extVentoy', kind: 'path', pick: 'file', effect: '下次任务生效', hint: '可选，做启动盘才用。' },
   { section: 'external', key: 'ext7z', kind: 'path', pick: 'file', effect: '下次任务生效', hint: '可选，解压驱动包用。' },
 
-  { section: 'system_files', key: 'sysIsoDir', kind: 'path', pick: 'dir', effect: '立即生效', hint: '安装向导第 3 步从这里列镜像。' },
-  { section: 'system_files', key: 'sysWim', kind: 'path', pick: 'file', effect: '下次任务生效', hint: '默认 GHO 镜像；向导里可以另选。' },
-  { section: 'system_files', key: 'sysBoot', kind: 'path', pick: 'dir', effect: '下次任务生效', hint: '写引导时用的引导文件来源目录。' },
+  { section: 'system_files', key: 'sysImageALabel', kind: 'text', effect: '下次任务生效', hint: '向导第 3 步按钮上的名字，例如 Windows 10 22H2。' },
+  { section: 'system_files', key: 'sysImageA', kind: 'path', pick: 'file', effect: '下次任务生效', hint: '系统 A 的 GHO；留空 = 不提供这个版本。' },
+  { section: 'system_files', key: 'sysImageBLabel', kind: 'text', effect: '下次任务生效', hint: '向导第 3 步按钮上的名字，例如 Windows 11 23H2。' },
+  { section: 'system_files', key: 'sysImageB', kind: 'path', pick: 'file', effect: '下次任务生效', hint: '系统 B 的 GHO；留空 = 不提供这个版本。' },
+  { section: 'system_files', key: 'sysBoot', kind: 'path', pick: 'dir', effect: '下次任务生效', hint: '写引导时用的引导文件来源目录；留空 = 用还原出来的 Windows 目录。' },
   { section: 'system_files', key: 'sysTemp', kind: 'path', pick: 'dir', effect: '下次任务生效', hint: '空 = 系统临时目录；diskpart 脚本也写这里。' },
 
   { section: 'safety', key: 'protectSystemDisk', kind: 'bool', effect: '立即生效', hint: '系统盘/引导盘一律拒绝写。' },
@@ -84,7 +86,7 @@ const LABELS = {
   typeToConfirm: '危险操作需输入确认',
   sysDefaultGb: '系统分区默认大小',
   efiDefaultMb: 'EFI 分区大小',
-  imageDefaultIndex: '默认镜像版本',
+  imageDefaultIndex: 'GHO 分区块序号',
   dataDefaultGb: '数据分区默认大小',
   extEnabled: '允许调用外部程序',
   extConfirm: '外部程序调用前确认',
@@ -92,8 +94,10 @@ const LABELS = {
   extGhost: 'Ghost 路径',
   extVentoy: 'Ventoy 路径',
   ext7z: '7-Zip 路径',
-  sysIsoDir: '镜像目录',
-  sysWim: '系统镜像文件（GHO）',
+  sysImageALabel: '系统 A 名称',
+  sysImageA: '系统 A 镜像（GHO）',
+  sysImageBLabel: '系统 B 名称',
+  sysImageB: '系统 B 镜像（GHO）',
   sysBoot: '引导文件目录',
   sysTemp: '临时目录',
   protectSystemDisk: '保护系统盘',
@@ -167,6 +171,7 @@ function defaultDesc(field) {
   if (field.kind === 'bool') return '开关类设置，保存后立即按新值判断。';
   if (field.kind === 'path') return `路径类设置，可以点“检测”确认是否存在（${field.pick === 'dir' ? '目录' : '文件'}）。`;
   if (field.kind === 'list') return '列表类设置，一行一条；保存时自动去掉空行和重复项。';
+  if (field.kind === 'text') return field.hint ? '' : '文本设置，存的就是这一串字符。';
   return '';
 }
 
@@ -197,6 +202,10 @@ function renderControl(field, value) {
     const items = Array.isArray(value) ? value : [];
     return `<textarea class="txtin" rows="4" spellcheck="false" data-key="${esc(key)}"
       placeholder="一行一个型号，例如：Samsung SSD 980 PRO 1TB">${esc(items.join('\n'))}</textarea>`;
+  }
+  if (field.kind === 'text') {
+    return `<input class="textin" type="text" data-key="${esc(key)}" value="${esc(value)}"
+      placeholder="${esc(field.placeholder || '')}" spellcheck="false">`;
   }
   return `<input class="numin" style="width:200px;text-align:left" data-key="${esc(key)}" value="${esc(value)}">`;
 }
@@ -245,6 +254,15 @@ function bindSettings() {
     });
   });
 
+  // 纯文本类（系统版本名称）：保留原字符串，不能走下面的 Number() 转换，
+  // 否则 "Windows 10" 会变成 NaN，存进去就是 null。
+  $$('#settingsBody input.textin[data-key]').forEach((input) => {
+    input.addEventListener('input', () => {
+      setDraft(input.dataset.key, input.value);
+      markDirty();
+    });
+  });
+
   $$('#settingsBody input.numin[data-key]').forEach((input) => {
     input.addEventListener('input', () => {
       const key = input.dataset.key;
@@ -277,7 +295,7 @@ function bindSettings() {
   });
 }
 
-async function probeRow(key) {
+async function probeRow(key, quiet = false) {
   const field = FIELD_BY_KEY.get(key);
   try {
     // 带着草稿探测：选完路径还没保存时，角标也应该描述刚选的那个值
@@ -291,10 +309,23 @@ async function probeRow(key) {
         box.outerHTML = renderPathBox(field, current);
       }
     }
-    toast(`${LABELS[key] || key}：${result.state === 'ok' ? '路径存在' : (result.message || '不可用')}`,
-      result.state === 'ok' ? '' : 'err');
+    if (!quiet) {
+      toast(`${LABELS[key] || key}：${result.state === 'ok' ? '路径存在' : (result.message || '不可用')}`,
+        result.state === 'ok' ? '' : 'err');
+    }
   } catch (exc) {
-    toast(`检测失败：${exc.message || exc}`, 'err');
+    if (!quiet) toast(`检测失败：${exc.message || exc}`, 'err');
+  }
+}
+
+/** 把已经填好、还没测过的路径静默测一遍（进设置页时调），免得角标一直停在「未检测」。 */
+export function probeAllQuiet() {
+  if (!state.settings) return;
+  for (const field of FIELDS) {
+    if (field.kind !== 'path') continue;
+    if (!state.settings[field.key]) continue;
+    if (state.probes[field.key]) continue;
+    void probeRow(field.key, true);
   }
 }
 
@@ -338,12 +369,14 @@ export async function saveSettings() {
     state.settings = data.settings || state.settings;
     state.settingsMeta = data;
     state.draft = {};
-    // 保存后清掉对应的探测结果，重新检测
+    const recheck = Object.keys(patch).filter((key) => PATH_KEYS.has(key) && state.settings[key]);
+    // 保存后清掉对应的探测结果，再按新值静默重测（不让一串提示音一样地蹦）
     for (const key of Object.keys(patch)) {
       if (PATH_KEYS.has(key)) state.probes[key] = null;
     }
     applyAppearance(state.settings);
     renderSettings();
+    for (const key of recheck) void probeRow(key, true);
     pushLog(`设置已保存：${Object.keys(patch).join('、')}`, '', 'settings');
     toast('设置已保存');
     const effects = new Set(Object.keys(patch).map((key) => (FIELD_BY_KEY.get(key) || {}).effect).filter(Boolean));

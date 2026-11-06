@@ -274,3 +274,41 @@ def test_image_default_index_range(store: SettingsStore) -> None:
         with pytest.raises(SettingsError):
             coerce_value("imageDefaultIndex", bad)
     assert coerce_value("imageDefaultIndex", 3) == 3
+
+
+# ------------------------------------------------- 两个系统槽位（A / B）
+def test_system_slot_labels_are_trimmed_text(store: SettingsStore) -> None:
+    assert store.get()["sysImageALabel"] == "Windows 10"
+    assert store.get()["sysImageBLabel"] == "Windows 11"
+    store.update({"sysImageALabel": "  Windows   10  22H2 "})
+    assert store.get()["sysImageALabel"] == "Windows 10 22H2"
+
+
+def test_system_slot_label_length_limit(store: SettingsStore) -> None:
+    assert coerce_value("sysImageBLabel", "x" * 32) == "x" * 32
+    with pytest.raises(SettingsError):
+        coerce_value("sysImageBLabel", "x" * 33)
+
+
+def test_two_system_slots_cannot_point_at_the_same_file(store: SettingsStore) -> None:
+    with pytest.raises(SettingsError) as excinfo:
+        store.update({"sysImageA": "D:/images/win10.GHO", "sysImageB": r"d:\IMAGES\WIN10.gho"})
+    assert excinfo.value.field == "sysImageB"
+    assert "同一个镜像文件" in excinfo.value.message
+    # 只有一边填了不算冲突
+    store.update({"sysImageB": ""})
+    store.update({"sysImageA": "D:/images/win10.GHO"})
+    assert store.get()["sysImageA"].endswith("win10.GHO")
+
+
+def test_two_system_slots_need_distinct_labels(store: SettingsStore) -> None:
+    with pytest.raises(SettingsError) as excinfo:
+        store.update(
+            {
+                "sysImageA": "D:/images/win10.GHO",
+                "sysImageB": "D:/images/win11.GHO",
+                "sysImageALabel": "Windows",
+                "sysImageBLabel": "windows",
+            }
+        )
+    assert excinfo.value.field == "sysImageBLabel"

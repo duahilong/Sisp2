@@ -31,7 +31,13 @@ from app.modules.ghost.service import (
     parse_ghosterr,
     sniff_gho,
 )
-from app.modules.image.service import ImageError, inspect_image, list_directory
+from app.modules.image.service import (
+    ImageError,
+    configured_versions,
+    find_version,
+    inspect_image,
+    list_directory,
+)
 from app.safety_guard import RealDiskBlocked, ensure_command_allowed, is_dangerous_command
 
 PAYLOAD = {
@@ -404,3 +410,30 @@ def test_plan_skips_engine_check_when_unknown(tmp_path) -> None:
     gho = tmp_path / "test.GHO"
     gho.write_bytes(GHO_MAGIC + b"\x00" * 8)
     assert _problems(_payload(str(gho)), ghost_available=None) == []
+
+
+# ------------------------------------------------- 设置里的两个系统槽位
+def test_configured_versions_skips_empty_slots():
+    versions = configured_versions({"sysImageA": "", "sysImageB": ""})
+    assert versions == []
+
+
+def test_configured_versions_labels_and_paths():
+    versions = configured_versions(
+        {
+            "sysImageA": "D:/images/win10.GHO",
+            "sysImageALabel": "Windows 10 22H2",
+            "sysImageB": "D:/images/win11.GHO",
+            "sysImageBLabel": "  ",
+        }
+    )
+    assert [item["id"] for item in versions] == ["A", "B"]
+    assert versions[0]["label"] == "Windows 10 22H2"
+    # 名字留空时退回“系统 B”，向导按钮上总有字
+    assert versions[1]["label"] == "系统 B"
+
+
+def test_find_version_matches_by_path():
+    settings = {"sysImageA": "D:/images/win10.GHO", "sysImageB": "D:/images/win11.GHO"}
+    assert find_version(settings, "D:/images/win11.GHO")["id"] == "B"
+    assert find_version(settings, "D:/images/other.GHO") is None

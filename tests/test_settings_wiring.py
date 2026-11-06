@@ -61,11 +61,11 @@ def test_preflight_accepts_existing_configured_tool(tmp_path) -> None:
 
 def test_preflight_reports_missing_system_image(tmp_path) -> None:
     item = _check(
-        _preflight({"sysWim": str(tmp_path / "install.GHO")}, tmp_path),
+        _preflight({"sysImageA": str(tmp_path / "install.GHO")}, tmp_path),
         CHECK_SETTING_PATHS,
     )
     assert item["passed"] is False
-    assert "系统 GHO 镜像" in item["message"]
+    assert "系统 A 镜像" in item["message"]
 
 
 def test_preflight_creates_temp_dir_and_passes(tmp_path) -> None:
@@ -78,7 +78,7 @@ def test_preflight_creates_temp_dir_and_passes(tmp_path) -> None:
 def test_preflight_rejects_wrong_path_kind(tmp_path) -> None:
     directory = tmp_path / "wim-dir"
     directory.mkdir()
-    item = _check(_preflight({"sysWim": str(directory)}, tmp_path), CHECK_SETTING_PATHS)
+    item = _check(_preflight({"sysImageA": str(directory)}, tmp_path), CHECK_SETTING_PATHS)
     assert item["passed"] is False
     assert "类型不对" in item["message"]
 
@@ -396,7 +396,7 @@ def test_settings_excluded_names_hide_disks_at_start() -> None:
 
 
 def test_default_system_image_from_settings() -> None:
-    wf = _controller({"sysWim": r"D:\\sisp-test\\test.GHO", "imageDefaultIndex": 3})
+    wf = _controller({"sysImageA": r"D:\\sisp-test\\test.GHO", "imageDefaultIndex": 3})
     wf.start(dry_run=True)
     payload = wf.session.task_payload
     assert payload["image_info"]["image_path"] == str(Path(r"D:\\sisp-test\\test.GHO"))
@@ -404,16 +404,35 @@ def test_default_system_image_from_settings() -> None:
 
 
 def test_settings_image_is_the_only_source() -> None:
-    """``sysWim`` 是镜像路径的唯一来源：会话载荷里就是设置里那一份。"""
-    wf = _controller({"sysWim": r"D:\sisp-test\test.GHO", "imageDefaultIndex": 1})
+    """``sysImageA`` 是镜像路径的唯一来源：会话载荷里就是设置里那一份。"""
+    wf = _controller({"sysImageA": r"D:\sisp-test\test.GHO", "imageDefaultIndex": 1})
     wf.start(dry_run=True)
     info = wf.session.task_payload["image_info"]
     assert info["image_path"] == str(Path(r"D:\sisp-test\test.GHO"))
     assert info["image_index"] == 1
 
 
+def test_default_system_image_falls_back_to_slot_b() -> None:
+    """只配了系统 B 时默认镜像就是 B —— 两个槽位是并列的，没有“主槽位”。"""
+    wf = _controller({"sysImageB": r"D:\sisp-test\win11.GHO"})
+    wf.start(dry_run=True)
+    assert wf.session.task_payload["image_info"]["image_path"] == str(
+        Path(r"D:\sisp-test\win11.GHO")
+    )
+
+
+def test_default_system_image_prefers_slot_a() -> None:
+    wf = _controller(
+        {"sysImageA": r"D:\sisp-test\win10.GHO", "sysImageB": r"D:\sisp-test\win11.GHO"}
+    )
+    wf.start(dry_run=True)
+    assert wf.session.task_payload["image_info"]["image_path"] == str(
+        Path(r"D:\sisp-test\win10.GHO")
+    )
+
+
 def test_image_default_index_zero_keeps_ghost_default() -> None:
-    wf = _controller({"sysWim": r"D:\images	est.GHO", "imageDefaultIndex": 0})
+    wf = _controller({"sysImageA": r"D:\images	est.GHO", "imageDefaultIndex": 0})
     wf.start(dry_run=True)
     assert "image_index" not in wf.session.task_payload["image_info"]
 
@@ -426,10 +445,10 @@ def _image_check(report: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def test_preflight_image_check_reads_settings_syswim(tmp_path) -> None:
-    """预检只认设置里的 ``sysWim``（业务配置那一层已移除）。"""
+    """预检只认设置里的 ``sysImageA``（业务配置那一层已移除）。"""
     wim = tmp_path / "real.GHO"
     wim.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
-    report = _preflight({"sysWim": str(wim)}, tmp_path)
+    report = _preflight({"sysImageA": str(wim)}, tmp_path)
     image = _image_check(report)
     assert image is not None and image["passed"] is True, image
     assert "real.GHO" in image["message"]
@@ -445,7 +464,7 @@ def test_preflight_image_check_flags_missing_file(tmp_path) -> None:
         admin_checker=lambda: True,
         command_lookup=lambda name: f"C:/{name}.exe",
         disk_usage=lambda root: (0, 0, 10 * 1024**3),
-        settings={"sysWim": str(missing)},
+        settings={"sysImageA": str(missing)},
     )
     image = _image_check(report)
     assert image is not None and image["passed"] is False, image

@@ -28,8 +28,8 @@ const GB = 1024 ** 3;
 const images = {
   loading: false,
   error: '',
-  listing: null,     // {directory, images[], exists}
-  probe: null,       // {path, name, kind, magic_ok, block_index}
+  versions: [],      // [{id, label, path, ok, reason, block_index, size_display}]
+  defaultPath: '',   // 第一个可用版本，默认选中它
 };
 
 const ROLE_TEXT = { efi: 'EFI 分区', windows: '系统分区', data: '数据分区' };
@@ -94,6 +94,19 @@ function renderFoot() {
       if (error) { reason = `磁盘 ${target.diskNumber}：${error}`; break; }
     }
   }
+  if (step === 3) {
+    for (const target of state.wizard.targets) {
+      if (!target.imagePath) {
+        reason = `磁盘 ${target.diskNumber}：还没选系统版本`;
+        break;
+      }
+      const chosen = versionByPath(target.imagePath);
+      if (chosen && !chosen.ok) {
+        reason = `磁盘 ${target.diskNumber}：${chosen.reason || '镜像不可用'}`;
+        break;
+      }
+    }
+  }
   if (step === 4) {
     if (state.wizard.error) reason = reason || `生成计划失败：${state.wizard.error}`;
     else if (!state.plans.length) reason = reason || '正在生成执行计划…';
@@ -111,7 +124,7 @@ function renderFoot() {
 function hintText(step) {
   if (step === 1) return `${state.disks.filter(isSelectable).length} 块盘可安装 · 系统盘和只读盘已置灰`;
   if (step === 2) return '拖分隔条调大小：最后一个数据分区永远吃满剩余，剩下多少就给它多少';
-  if (step === 3) return images.loading ? '正在读取镜像目录…' : '用 Ghost 还原 GHO 分区块镜像，装完再写 UEFI 引导';
+  if (step === 3) return images.loading ? '正在读取系统版本…' : '每块盘选一个系统版本，装完再写 UEFI 引导';
   if (step === 4) return state.info && state.info.dry_run
     ? '当前是演练模式：点开始只会走一遍计划，不会真的写盘'
     : '点开始后先做五道安全检查，任何一道不通过都会拒绝写盘';
@@ -549,88 +562,80 @@ function bindDrag(bar) {
 }
 
 /* ---- 第 3 步 ---- */
-function ghostFiles() {
-  return ((images.listing && images.listing.images) || []).filter((file) => file.kind === 'gho');
+function versionByPath(path) {
+  return (images.versions || []).find((version) => version.path === path) || null;
+}
+
+/** 默认选中的版本：后端给的第一个可用版本，没有就用第一个配置了的。 */
+function defaultImagePath() {
+  if (images.defaultPath) return images.defaultPath;
+  const first = (images.versions || [])[0];
+  return first ? first.path : '';
 }
 
 function stepVersionHtml() {
+  const versions = images.versions || [];
   const rows = state.wizard.targets.map((target) => {
     const current = target.imagePath || defaultImagePath();
-    const options = ['<option value="">设置里的镜像（不改）</option>']
-      .concat(ghostFiles().map((file) => `<option value="${esc(file.path)}"${file.path === current ? ' selected' : ''}>${esc(file.name)} · ${esc(file.size_display || fmtSize(file.size_bytes))}</option>`))
-      .join('');
-    const probing = images.probe && images.probe.path === current;
+    const chips = versions.map((version) => `<button class="vchip${version.path === current ? ' on' : ''}"
+        data-disk="${target.diskNumber}" data-path="${esc(version.path)}"
+        title="${esc(version.path)}">${esc(version.label)}${version.ok ? '' : '<em>不可用</em>'}</button>`).join('');
+    const chosen = versionByPath(current);
     let hint = '';
     if (images.error) {
       hint = `<span class="errmsg">${esc(images.error)}</span>`;
-    } else if (probing) {
+    } else if (chosen) {
       // 只显示 Ghost 自己的判定：文件头对不对、分区块几号。
-      hint = images.probe.magic_ok
-        ? `<span class="szsub ok">Ghost 分区块 #${esc(String(images.probe.block_index || 1))}</span>`
-        : `<span class="errmsg">${esc(images.probe.reason || '不是有效 Ghost 镜像')}</span>`;
+      hint = chosen.ok
+        ? `<span class="szsub ok">Ghost 分区块 #${esc(String(chosen.block_index || 1))} · ${esc(chosen.size_display || '大小未知')}</span>`
+        : `<span class="errmsg">${esc(chosen.reason || '不是有效的 Ghost 镜像')}</span>`;
     } else if (current) {
-      hint = '<span class="szsub">点“校验镜像”读取文件头</span>';
+      hint = `<span class="szsub">${esc(current)}</span>`;
     }
     return `<div class="vrow">
       <span class="vrow-n">磁盘 ${target.diskNumber}</span>
-      <select class="sel" data-image="${target.diskNumber}">${options}</select>
-      <span class="vchips">${hint}</span>
+      <span class="vchips">${chips || '<span class="szsub">设置里还没有配系统镜像</span>'}</span>
+      <span class="vrow-hint">${hint}</span>
     </div>`;
   }).join('');
 
-  const dir = images.listing ? images.listing.directory : (state.settings ? state.settings.sysIsoDir : '');
-  const others = ((images.listing && images.listing.images) || []).filter((file) => file.kind !== 'gho');
   return `<div class="wz-inner">
-    <h3 class="wz-h">系统镜像（GHO）</h3>
-    <p class="wz-p">装机用 Ghost 把 GHO 分区块镜像还原到系统分区。目录里的文件由「设置 → 系统文件 → 镜像目录」决定，不选就沿用设置里指定的镜像。</p>
+    <h3 class="wz-h">系统版本</h3>
+    <p class="wz-p">每块盘单独选一个系统版本，互不影响。版本来自「设置 → 系统文件」里的系统 A / 系统 B 两个槽位，每个槽位存一个 GHO。</p>
     <div class="selbar">
-      镜像目录 <b>${esc(dir || '（未设置）')}</b>
+      已配置 <b>${esc(String(versions.length))}</b> 个版本
       <button class="lnk" id="imgReload">重新读取</button>
       ${images.loading ? '<span class="szsub">正在读取…</span>' : ''}
     </div>
-    ${others.length ? `<div class="szsub" style="margin:-2px 0 6px">目录里还有 ${others.length} 个文件不能装机（ISO / WIM / ESD / SWM）：Ghost 只还原 GHO。</div>` : ''}
     ${rows || '<div class="empty-hint">还没有选盘</div>'}
-    ${images.listing && ghostFiles().length === 0
-      ? `<div class="warnbox"><span class="wi">!</span><div>镜像目录里没找到 GHO 文件。可以先去「设置 → 系统文件 → 镜像目录」指一个目录。</div></div>`
+    ${versions.length === 0
+      ? `<div class="warnbox"><span class="wi">!</span><div>设置里还没配系统镜像。先去「设置 → 系统文件」把系统 A / 系统 B 的 GHO 指上。</div></div>`
       : ''}
   </div>`;
 }
 
-function defaultImagePath() {
-  const files = ghostFiles();
-  const preferred = (state.settings && state.settings.sysWim) || '';
-  const hit = files.find((file) => file.path === preferred);
-  return hit ? hit.path : (files.length ? files[0].path : '');
-}
-
 function bindStepVersion() {
-  $$('#wzBody select[data-image]').forEach((select) => {
-    select.addEventListener('change', () => {
-      const target = targetOf(Number(select.dataset.image));
-      if (!target) return;
-      target.imagePath = select.value;
+  $$('#wzBody .vchip[data-disk]').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const target = targetOf(Number(chip.dataset.disk));
+      if (!target || target.imagePath === chip.dataset.path) return;
+      target.imagePath = chip.dataset.path;
       target.imageIndex = null;
-      target.imageLabel = '';
+      const version = versionByPath(target.imagePath);
+      target.imageLabel = version ? version.label : '';
       state.wizard.ack = false;
-      void probeImage(select.value);
+      renderInstall();
     });
   });
   const reload = $('#imgReload');
-  if (reload) {
-    reload.addEventListener('click', () => {
-      images.listing = null;
-      images.probe = null;
-      void loadImages();
-    });
-  }
+  if (reload) reload.addEventListener('click', () => { void loadImages(); });
 }
 
 /**
- * 读取镜像目录并校验默认镜像。
+ * 读取设置里的两个系统版本（顺带读文件头）。
  *
- * 两件事：先 ``POST /api/images`` 不带 path 列目录（只列 installable 的 .gho/.ghs），
- * 再对默认镜像单独 probe 一次读文件头。``main.js`` 在进入第 3 步时调它，
- * 「重新读取」按钮也调它——所以必须 export。
+ * ``POST /api/images`` 不带参数：后端把设置里的 A/B 槽位逐个 sniff 一遍，返回
+ * ``{versions, default}``。「重新读取」按钮与进入第 3 步时都会调它，所以必须 export。
  */
 export async function loadImages() {
   if (images.loading) return;
@@ -638,38 +643,24 @@ export async function loadImages() {
   images.error = '';
   if (state.view === 'install' && state.wizard.step === 3) renderInstall();
   try {
-    images.listing = await api.images({});
+    const data = await api.images({});
+    images.versions = (data && data.versions) || [];
+    images.defaultPath = (data && data.default) || '';
   } catch (exc) {
-    images.listing = { directory: '', images: [], exists: false };
+    images.versions = [];
+    images.defaultPath = '';
     images.error = exc instanceof ApiError ? exc.message : String(exc);
   } finally {
     images.loading = false;
   }
-  const path = defaultImagePath();
-  if (path) await probeImage(path);
-  else if (state.view === 'install') renderInstall();
-}
-
-/** 校验单个镜像：只看 Ghost 文件头和分区块序号，返回给第 3 步的 chip 显示。 */
-async function probeImage(path) {
-  if (!path) {
-    images.probe = null;
-    if (state.view === 'install') renderInstall();
-    return;
-  }
-  images.loading = true;
-  images.error = '';
-  if (state.view === 'install') renderInstall();
-  try {
-    images.probe = await api.images({ path });
-  } catch (exc) {
-    images.probe = null;
-    images.error = exc instanceof ApiError ? exc.message : String(exc);
-  } finally {
-    images.loading = false;
-  }
-  for (const target of state.wizard.targets) {
-    if (!target.imagePath) target.imagePath = path;
+  // 还没选过版本的盘默认用第一个可用版本，避免用户必须挨个点。
+  const fallback = defaultImagePath();
+  if (fallback) {
+    for (const target of state.wizard.targets) {
+      if (!target.imagePath) target.imagePath = fallback;
+      const version = versionByPath(target.imagePath);
+      if (version) target.imageLabel = version.label;
+    }
   }
   if (state.view === 'install') renderInstall();
 }
@@ -1196,6 +1187,8 @@ export function resetAll() {
   resetWizard();
   logCache.clear();
   state.plans = [];
-  images.probe = null;
+  images.versions = [];
+  images.defaultPath = '';
+  images.error = '';
   renderInstall();
 }

@@ -53,6 +53,7 @@ from app.application.shell import find_program
 from app.application.steps import phases_payload
 from app.models import WorkerResult
 from app.modules.ghost.service import GHO_SUFFIXES, sniff_gho
+from app.modules.image.service import configured_versions
 from app.orchestrator import build_worker_disk_identity
 from app.preflight import run_preflight_checks
 
@@ -325,15 +326,18 @@ def _apply_partition_defaults(
 
 
 def _image_from_settings(settings: Mapping[str, Any] | None) -> dict[str, Any]:
-    """设置页的「引用的镜像存储位置」+「默认镜像版本」→ ``image_info``。
+    """设置页的系统槽位 + 「默认镜像版本」→ ``image_info``。
+
+    两个槽位（A/B）是并列的版本，默认用**第一个填了路径的**；向导第 3 步里
+    每块盘可以改成另一个，逐盘覆盖在 ``_merge_payload`` 里合并，晚于这里。
 
     ``image_index`` 只在 >0 时写入：0 表示“用第一个版本”，交给执行层的
     ``or 1`` 兜底，载荷里不必出现一个等于默认值的键。
     """
-    wim = str((settings or {}).get("sysWim") or "").strip()
-    if not wim:
+    versions = configured_versions(settings)
+    if not versions:
         return {}
-    info: dict[str, Any] = {"image_path": str(Path(wim).expanduser())}
+    info: dict[str, Any] = {"image_path": versions[0]["path"]}
     try:
         index = int((settings or {}).get("imageDefaultIndex") or 0)
     except (TypeError, ValueError):

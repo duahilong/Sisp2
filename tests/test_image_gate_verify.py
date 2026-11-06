@@ -152,7 +152,7 @@ def _controller(image_path: str) -> WorkflowController:
             # 单测用小尺寸测算术：后端下限（C ≥ 60 GB）显式放宽
             "allow_small_partitions": True,
         },
-        settings_provider=lambda: {"sysWim": image_path, "imageDefaultIndex": 1},
+        settings_provider=lambda: {"sysImageA": image_path, "imageDefaultIndex": 1},
     )
 
 
@@ -190,7 +190,7 @@ def test_preflight_flags_iso_image(tmp_path):
         dry_run=True,
         admin_checker=lambda: True,
         command_lookup=lambda name: "found",
-        settings={"sysWim": str(iso)},
+        settings={"sysImageA": str(iso)},
     )
     results = {item["name"]: item for item in report["results"]}
     assert results[CHECK_IMAGE_TYPE]["passed"] is False
@@ -204,7 +204,7 @@ def test_preflight_accepts_applicable_image(tmp_path):
         dry_run=True,
         admin_checker=lambda: True,
         command_lookup=lambda name: "found",
-        settings={"sysWim": str(wim)},
+        settings={"sysImageA": str(wim)},
     )
     results = {item["name"]: item for item in report["results"]}
     assert results[CHECK_IMAGE_TYPE]["passed"] is True
@@ -335,7 +335,7 @@ def test_preflight_iso_check_maps_to_image_type_key(tmp_path):
         dry_run=True,
         admin_checker=lambda: True,
         command_lookup=lambda name: "found",
-        settings={"sysWim": str(iso)},
+        settings={"sysImageA": str(iso)},
     )
     checks = {item.key: item for item in _build_check_items(report["results"])}
     assert checks["image_type"].passed is False
@@ -363,7 +363,7 @@ def _settings_controller(settings: dict, image_path: str = "") -> WorkflowContro
 
 
 def test_prepare_reflects_live_settings_image(tmp_path):
-    """改设置里的 sysWim 之后，**下一次 prepare** 就要用它，不用重启会话。
+    """改设置里的 sysImageA 之后，**下一次 prepare** 就要用它，不用重启会话。
 
     以前 ``_apply_image_defaults`` 在 prepare 里以 override=False 调用，会话载荷
     里已经有镜像路径就直接返回，于是设置页改了镜像也不生效（第 4 步仍报旧阻断）。
@@ -372,7 +372,7 @@ def test_prepare_reflects_live_settings_image(tmp_path):
     iso.write_bytes(b"iso")
     good = _gho(tmp_path)
 
-    settings: dict[str, Any] = {"sysWim": str(iso), "imageDefaultIndex": 1}
+    settings: dict[str, Any] = {"sysImageA": str(iso), "imageDefaultIndex": 1}
     controller = _settings_controller(settings, str(iso))
     controller.start(dry_run=True)
 
@@ -380,7 +380,7 @@ def test_prepare_reflects_live_settings_image(tmp_path):
     assert blocked.plan.executable is False
     assert any("ISO" in blocker for blocker in blocked.plan.blockers)
 
-    settings["sysWim"] = str(good)
+    settings["sysImageA"] = str(good)
     fixed = controller.prepare([1])[0]
     assert fixed.plan.executable is True
     assert not any("镜像" in blocker for blocker in fixed.plan.blockers)
@@ -393,7 +393,7 @@ def test_per_disk_overrides_beat_settings_defaults(tmp_path):
     other = _gho(tmp_path, "other.GHO")
 
     settings: dict[str, Any] = {
-        "sysWim": str(wim),
+        "sysImageA": str(wim),
         "imageDefaultIndex": 1,
         "efiDefaultMb": 100,
         "sysDefaultGb": 100,
@@ -418,7 +418,7 @@ def test_image_path_is_normalized_for_ghost(tmp_path):
     slashed = str(wim).replace("\\", "/")
     assert "/" in slashed or _Path(wim).drive  # 单字符路径在 Linux 上无分隔符，跳过
 
-    controller = _settings_controller({"sysWim": slashed, "imageDefaultIndex": 1}, slashed)
+    controller = _settings_controller({"sysImageA": slashed, "imageDefaultIndex": 1}, slashed)
     controller.start(dry_run=True)
     prepared = controller.prepare([1])[0]
 

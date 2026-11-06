@@ -57,9 +57,11 @@ DEFAULTS: dict[str, Any] = {
     "extGhost": "",
     "extVentoy": "",
     "ext7z": "",
-    # 系统文件
-    "sysIsoDir": "",
-    "sysWim": "",
+    # 系统文件：两个具名系统槽位（各存一个 GHO），外加引导/临时目录
+    "sysImageA": "",
+    "sysImageALabel": "Windows 10",
+    "sysImageB": "",
+    "sysImageBLabel": "Windows 11",
     "sysBoot": "",
     "sysTemp": "",
     # 安全
@@ -81,11 +83,17 @@ _PATH_KEYS: dict[str, str] = {
     "extGhost": "file",
     "extVentoy": "file",
     "ext7z": "file",
-    "sysIsoDir": "dir",
-    "sysWim": "file",
+    "sysImageA": "file",
+    "sysImageB": "file",
     "sysBoot": "dir",
     "sysTemp": "dir",
     "logDir": "dir",
+}
+
+# 纯文本设置（系统槽位的显示名）：单条最长字符数
+_TEXT_LIMITS: dict[str, int] = {
+    "sysImageALabel": 32,
+    "sysImageBLabel": 32,
 }
 
 # 空值时可以尝试从系统里自动发现的命令
@@ -165,6 +173,13 @@ def _expand(value: str) -> str:
     return os.path.expanduser(os.path.expandvars(value)).strip()
 
 
+def _same_path(left: str, right: str) -> bool:
+    """两个路径是否指向同一个位置（Windows 盘符/大小写不敏感）。"""
+    return os.path.normcase(os.path.normpath(_expand(left))) == os.path.normcase(
+        os.path.normpath(_expand(right))
+    )
+
+
 def coerce_value(key: str, raw: Any) -> Any:
     """把界面传来的任意值收敛成合法值；不合法时抛 ``SettingsError``。"""
     if key in _BOOL_KEYS:
@@ -212,6 +227,13 @@ def coerce_value(key: str, raw: Any) -> Any:
         if raw is None:
             return ""
         return _expand(str(raw))
+
+    if key in _TEXT_LIMITS:
+        text = " ".join(str(raw or "").split())
+        limit = _TEXT_LIMITS[key]
+        if len(text) > limit:
+            raise SettingsError(key, f"不能超过 {limit} 个字符")
+        return text
 
     if key in _LIST_LIMITS:
         return _coerce_name_list(key, raw)
@@ -360,6 +382,17 @@ class SettingsStore:
         log_dir = str(data.get("logDir") or "").strip()
         if temp_dir and log_dir and Path(temp_dir) == Path(log_dir):
             raise SettingsError("sysTemp", "临时目录不能与日志目录相同")
+
+        # 两个系统槽位是并列的两个“版本”，重了就没得选：同一个 GHO 装两次没有意义，
+        # 同名会让向导上两个按钮长得一模一样。
+        image_a = str(data.get("sysImageA") or "").strip()
+        image_b = str(data.get("sysImageB") or "").strip()
+        if image_a and image_b and _same_path(image_a, image_b):
+            raise SettingsError("sysImageB", "系统 B 与系统 A 指向同一个镜像文件")
+        label_a = str(data.get("sysImageALabel") or "").strip()
+        label_b = str(data.get("sysImageBLabel") or "").strip()
+        if image_a and image_b and label_a and label_b and label_a.casefold() == label_b.casefold():
+            raise SettingsError("sysImageBLabel", "两个系统的名称不能相同")
 
     # ------------------------------------------------------------------ 探测
     def probe(self, key: str, path: str | None = None) -> ProbeResult:

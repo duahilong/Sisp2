@@ -233,17 +233,44 @@ class WebApi:
 
     # ------------------------------------------------------------------ 镜像
     def probe_images(self, directory: str | None = None, path: str | None = None) -> dict[str, Any]:
-        """列镜像目录，或校验单个 GHO（读文件头，全部是纯文件操作）。"""
+        """设置里的两个系统版本（带文件头校验），或单独校验某个 GHO。
+
+        不带 ``path`` 时返回 ``{"versions": [...], "default": 第一个可用路径}``：
+        向导第 3 步直接拿它渲染按钮，不再扫描目录（``directory`` 参数只为兼容
+        旧请求体保留，已不再使用）。
+        """
         try:
+            from app.modules.image.service import configured_versions, inspect_image
             from app.modules.image.service import probe as probe_image
 
-            target_dir = directory
-            if path is None and not target_dir:
-                target_dir = str(self._settings.get().get("sysIsoDir") or "")
-            data = probe_image(directory=target_dir, path=path)
+            if path is not None:
+                return ok(probe_image(path=path))
+
+            versions: list[dict[str, Any]] = []
+            for version in configured_versions(self._settings.get()):
+                entry: dict[str, Any] = dict(version)
+                try:
+                    info = inspect_image(version["path"])
+                except Exception as exc:  # noqa: BLE001
+                    entry.update({"ok": False, "reason": str(exc), "exists": False})
+                else:
+                    entry.update(
+                        {
+                            "ok": bool(info.get("magic_ok")),
+                            "exists": bool(info.get("exists")),
+                            "reason": info.get("reason", ""),
+                            "size_bytes": info.get("size_bytes"),
+                            "size_display": info.get("size_display"),
+                            "block_index": info.get("block_index", 1),
+                        }
+                    )
+                versions.append(entry)
+            default = next((item["path"] for item in versions if item.get("ok")), "")
+            if not default and versions:
+                default = versions[0]["path"]
+            return ok({"versions": versions, "default": default})
         except Exception as exc:  # noqa: BLE001
             return err("E_IMAGE", str(exc))
-        return ok(data)
 
     # ------------------------------------------------------------------ 分区预览
     def partition_preview(self, disk_number: Any = None) -> dict[str, Any]:

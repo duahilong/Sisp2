@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from app.modules.ghost.service import GHO_SUFFIXES
+from app.modules.image.service import configured_versions
 
 # 临时目录/日志目录至少要有这么多余量，低于它就先别开工。
 MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024
@@ -54,8 +55,8 @@ OPTIONAL_TOOLS: tuple[tuple[str, str], ...] = (
 
 # 界面设置里的系统文件路径：(键名, 中文名, 期望类型)
 SETTING_PATHS: tuple[tuple[str, str, str], ...] = (
-    ("sysIsoDir", "镜像目录", "dir"),
-    ("sysWim", "系统 GHO 镜像", "file"),
+    ("sysImageA", "系统 A 镜像", "file"),
+    ("sysImageB", "系统 B 镜像", "file"),
     ("sysBoot", "引导文件目录", "dir"),
     ("sysTemp", "临时目录", "dir"),
 )
@@ -184,31 +185,42 @@ def run_preflight_checks(
         add(CHECK_POWERSHELL, False, "未找到 powershell/pwsh，无法扫描硬盘或执行 diskpart")
 
     # --------------------------------------------------------------- 镜像
-    # 镜像只有一个来源：设置页的「引用的镜像存储位置」(`sysWim`)。
-    # 配置文件这一层移除之后，“配置赢还是设置赢”的优先级分歧彻底消失。
-    image_path = _text((settings or {}).get("sysWim"))
-    if image_path is not None:
-        target = Path(image_path).expanduser()
-        if target.is_file():
-            add(CHECK_IMAGE, True, f"镜像文件存在: {target}")
+    # 镜像来源只有设置页的两个系统槽位：A / B 各存一个 GHO，向导第 3 步里
+    # 每块盘二选一。一个槽位坏了不应该拦住另一个能装的版本，所以“存在/可应用”
+    # 两项都是**至少一个**可用就算通过，消息里列清每个槽位的状态。
+    versions = configured_versions(settings)
+    if versions:
+        present: list[str] = []
+        missing: list[str] = []
+        usable: list[str] = []
+        unusable: list[str] = []
+        for version in versions:
+            label = version["label"]
+            target = Path(version["path"])
+            if not target.is_file():
+                missing.append(f"{label} 镜像文件不存在: {target}")
+                continue
+            present.append(f"{label} 镜像文件存在: {target}")
             # 类型检查：装机只走 Ghost，只认 GHO/GHS 分区块镜像。
             suffix = target.suffix.lower()
             if suffix in GHO_SUFFIXES:
-                add(CHECK_IMAGE_TYPE, True, f"Ghost 分区块镜像：{suffix}")
+                usable.append(f"{label} Ghost 分区块镜像：{suffix}")
             elif suffix == ".iso":
-                add(
-                    CHECK_IMAGE_TYPE,
-                    False,
-                    f"{target.name} 是 ISO：Ghost 只能还原 .GHO，请先封装成 GHO",
-                )
+                unusable.append(f"{label} 是 ISO：Ghost 只能还原 .GHO，请先封装成 GHO")
             else:
-                add(
-                    CHECK_IMAGE_TYPE,
-                    False,
-                    f"不支持 {suffix or '无后缀'} 文件：装机只接受 GHO/GHS",
+                unusable.append(
+                    f"{label} 不支持 {suffix or '无后缀'} 文件：装机只接受 GHO/GHS"
                 )
-        else:
-            add(CHECK_IMAGE, False, f"镜像文件不存在: {target}")
+        add(
+            CHECK_IMAGE,
+            bool(present),
+            "；".join(present + missing) or "设置里还没有配系统镜像",
+        )
+        add(
+            CHECK_IMAGE_TYPE,
+            bool(usable),
+            "；".join(usable + unusable) or "没有可用的系统镜像",
+        )
 
     # ----------------------------------------------------------- 剩余空间
     # 与业务配置无关：只要做镜像/读盘就需要临时空间，永远检查。

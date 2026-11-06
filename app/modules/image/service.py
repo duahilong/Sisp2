@@ -143,13 +143,48 @@ def probe(directory: str | Path | None = None, path: str | Path | None = None) -
 
 
 def find_default_image(images: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> str:
-    """从目录列表里挑一个默认镜像：优先 .gho，其次 .ghs。"""
+    """从列表里挑一个默认镜像：优先 .gho，其次 .ghs。"""
     items = list(images)
     for suffix in GHO_SUFFIXES:
         for item in items:
             if str(item.get("suffix")) == suffix and item.get("installable", True):
                 return str(item.get("path") or "")
     return ""
+
+
+# --------------------------------------------------------------- 系统版本槽位
+# 设置页里固定两个槽位，各存一个 GHO。名字是用户可改的显示名（向导第 3 步的
+# 按钮文字），所以槽位 id（A/B）与显示名分开存。
+VERSION_SLOTS: tuple[tuple[str, str, str], ...] = (
+    ("A", "sysImageA", "sysImageALabel"),
+    ("B", "sysImageB", "sysImageBLabel"),
+)
+
+
+def configured_versions(settings: Any) -> list[dict[str, str]]:
+    """设置 → 可选系统版本列表（只含填了镜像路径的槽位）。
+
+    ``label`` 空时退回 ``系统 A`` / ``系统 B``，保证向导上的按钮总有字。
+    这里不做文件检查：调用方（预检查 / API）各自决定要不要 stat 文件。
+    """
+    data = settings if isinstance(settings, dict) else {}
+    versions: list[dict[str, str]] = []
+    for slot, path_key, label_key in VERSION_SLOTS:
+        path = str(data.get(path_key) or "").strip()
+        if not path:
+            continue
+        label = " ".join(str(data.get(label_key) or "").split()) or f"系统 {slot}"
+        versions.append({"id": slot, "label": label, "path": str(Path(path).expanduser())})
+    return versions
+
+
+def find_version(settings: Any, path: str) -> dict[str, str] | None:
+    """按镜像路径反查它属于哪个槽位（向导里回填时用）。"""
+    wanted = str(Path(str(path)).expanduser())
+    for version in configured_versions(settings):
+        if version["path"] == wanted:
+            return version
+    return None
 
 
 __all__ = [
@@ -160,8 +195,11 @@ __all__ = [
     "KIND_LEGACY",
     "LEGACY_SUFFIXES",
     "LIST_SUFFIXES",
+    "VERSION_SLOTS",
     "ImageError",
+    "configured_versions",
     "find_default_image",
+    "find_version",
     "inspect_image",
     "list_directory",
     "probe",

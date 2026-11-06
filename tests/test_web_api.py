@@ -44,7 +44,7 @@ _GIB = 1024**3
 _SETTINGS: dict[str, Any] = {
     # 计划会按 payload 重算镜像可用性（后缀 + 存在性 + Ghost 文件头），
     # 所以这里用一个真实存在的 .GHO 占位文件。
-    "sysWim": str(_FAKE_IMAGE_PATH),
+    "sysImageA": str(_FAKE_IMAGE_PATH),
     "imageDefaultIndex": 1,
 }
 _PARTITION_DEFAULTS: dict[str, Any] = {
@@ -286,7 +286,7 @@ def test_dialog_pick_returns_path_without_saving(client: TestClient, monkeypatch
     """
     from app.gui_web import native_dialog
 
-    _unwrap(client.put("/api/settings", json={"sysWim": str(_FAKE_IMAGE_PATH)}))
+    _unwrap(client.put("/api/settings", json={"sysImageA": str(_FAKE_IMAGE_PATH)}))
     seen: dict[str, Any] = {}
 
     def fake_pick(kind: str = "file", **kwargs: Any) -> str:
@@ -295,34 +295,74 @@ def test_dialog_pick_returns_path_without_saving(client: TestClient, monkeypatch
         return "D:\\images\\Win11.GHO"
 
     monkeypatch.setattr(native_dialog, "pick_path", fake_pick)
-    data = _unwrap(client.post("/api/dialog/pick", json={"key": "sysWim", "kind": "file"}))
+    data = _unwrap(client.post("/api/dialog/pick", json={"key": "sysImageA", "kind": "file"}))
     assert data == {"path": "D:\\images\\Win11.GHO", "cancelled": False}
     assert seen["kind"] == "file"
     # 当前值当起始位置传给对话框
     assert str(seen["initial"]) == str(_FAKE_IMAGE_PATH)
     # 选中不落盘：设置里的值还是原来的
-    assert _unwrap(client.get("/api/settings"))["settings"]["sysWim"] == str(_FAKE_IMAGE_PATH)
+    assert _unwrap(client.get("/api/settings"))["settings"]["sysImageA"] == str(_FAKE_IMAGE_PATH)
 
 
 def test_probe_follows_the_draft_path(client: TestClient) -> None:
     """探测能就着传进来的草稿路径跑，保存前角标也描述刚选的值。"""
-    _unwrap(client.put("/api/settings", json={"sysWim": str(_FAKE_IMAGE_PATH)}))
-    assert _unwrap(client.post("/api/settings/probe", json={"key": "sysWim"}))["state"] == "ok"
+    _unwrap(client.put("/api/settings", json={"sysImageA": str(_FAKE_IMAGE_PATH)}))
+    assert _unwrap(client.post("/api/settings/probe", json={"key": "sysImageA"}))["state"] == "ok"
 
     missing = str(_FAKE_IMAGE_PATH.parent / "nope.GHO")
-    result = _unwrap(client.post("/api/settings/probe", json={"key": "sysWim", "path": missing}))
+    result = _unwrap(client.post("/api/settings/probe", json={"key": "sysImageA", "path": missing}))
     assert result["state"] == "miss"
     assert result["path"] == missing
 
     # 草稿是真文件就报 ok（即使磁盘上不是这个值）
     other = _FAKE_IMAGE_PATH.parent / "sisp-test-web-api-draft.GHO"
     other.write_bytes(bytes([0xFE, 0xEF]))
-    draft = _unwrap(client.post("/api/settings/probe", json={"key": "sysWim", "path": str(other)}))
+    draft = _unwrap(client.post("/api/settings/probe", json={"key": "sysImageA", "path": str(other)}))
     assert draft["state"] == "ok"
     assert draft["path"] == str(other)
 
     # 没传 path 时退回已保存的值
-    assert _unwrap(client.post("/api/settings/probe", json={"key": "sysWim", "path": None}))["state"] == "ok"
+    assert _unwrap(client.post("/api/settings/probe", json={"key": "sysImageA", "path": None}))["state"] == "ok"
+
+
+def test_images_returns_configured_versions(client: TestClient) -> None:
+    """``/api/images`` 不带 path 时返回设置里的两个槽位（各自带文件头校验）。
+
+    这一步以前是「扫目录列文件」；改成两个具名槽位后，向导第 3 步只认这两个。
+    """
+    good = _FAKE_IMAGE_PATH
+    missing = good.parent / "sisp-test-missing-b.GHO"
+    if missing.exists():
+        missing.unlink()
+    _unwrap(
+        client.put(
+            "/api/settings",
+            json={
+                "sysImageA": str(good),
+                "sysImageALabel": "Windows 10 22H2",
+                "sysImageB": str(missing),
+                "sysImageBLabel": "Windows 11 23H2",
+            },
+        )
+    )
+
+    data = _unwrap(client.post("/api/images", json={}))
+    versions = data["versions"]
+    assert [item["id"] for item in versions] == ["A", "B"]
+    assert versions[0]["label"] == "Windows 10 22H2"
+    assert versions[0]["ok"] is True
+    assert versions[0]["path"] == str(good)
+    # B 指着一个不存在的文件：不通过，但要把原因带回去给界面显示
+    assert versions[1]["ok"] is False
+    assert versions[1]["path"] == str(missing)
+    # 默认选中第一个可用版本
+    assert data["default"] == str(good)
+
+
+def test_images_without_settings_returns_empty_list(client: TestClient) -> None:
+    data = _unwrap(client.post("/api/images", json={}))
+    assert data["versions"] == []
+    assert data["default"] == ""
 
 
 def test_dialog_pick_cancel_reports_cancelled(client: TestClient, monkeypatch) -> None:
