@@ -20,8 +20,9 @@ Python 允许给实例挂任意属性，赋值成功但没人调用它——于�
 只拦"写"，不拦"读"：``Get-Disk`` / ``Get-Partition`` / ``dism /Get-WimInfo`` 这类只读
 查询放行，否则界面连硬盘列表和镜像索引都拿不到。判定规则：
 
-- 外部程序看**程序名**（``diskpart`` / ``format`` / ``bcdboot`` / ``bootrec``）与**参数**
-  （``dism`` 只有 ``/Get-*`` 只读动词放行，``/Apply-Image`` / ``/Add-Driver`` 一律危险）；
+- 外部程序看**程序名**（``diskpart`` / ``format`` / ``bcdboot`` / ``bootrec`` / ``ghost*``）
+  与**参数**（``dism`` 只有 ``/Get-*`` 只读动词放行；``ghost64`` 只有 ``-ver`` 这类探测开关
+  放行，``-clone`` 一律危险）；
 - PowerShell 看四件事，任一命中即危险：
 
   1. 脚本里的**写盘 cmdlet**（``Format-Volume`` / ``Clear-Disk`` / ``New-Partition`` /
@@ -62,6 +63,13 @@ DANGEROUS_PROGRAMS = frozenset(
         "dism.exe",
         "bootrec",
         "bootrec.exe",
+        # Ghost：还原会重写目标分区内容，属于写盘工具（11.x 的 ghost32/ghost64）。
+        "ghost",
+        "ghost.exe",
+        "ghost32",
+        "ghost32.exe",
+        "ghost64",
+        "ghost64.exe",
     }
 )
 
@@ -90,11 +98,23 @@ DANGEROUS_POWERSHELL = (
     "dismount-diskimage",
 )
 
+# Ghost 的只读开关：版本探测要用。没有参数（打开交互界面）不算只读。
+GHOST_READ_ONLY = frozenset({"-ver", "-?", "-h", "-help", "--version"})
+
 # 脚本里看不到内容的动态执行：一律当危险（无法静态判定它执行了什么东西）。
 DANGEROUS_DYNAMIC = ("invoke-expression", "iex")
 
 # PowerShell 脚本里可能出现的外部写盘程序（必须带“调用”上下文才算，见下）。
-DANGEROUS_SCRIPT_PROGRAMS = ("diskpart", "bcdboot", "bootrec", "dism", "format")
+DANGEROUS_SCRIPT_PROGRAMS = (
+    "diskpart",
+    "bcdboot",
+    "bootrec",
+    "dism",
+    "format",
+    "ghost",
+    "ghost32",
+    "ghost64",
+)
 
 _POWERSHELL_PROGRAMS = frozenset({"powershell", "powershell.exe", "pwsh", "pwsh.exe"})
 _DANGEROUS_CALL = re.compile(
@@ -176,6 +196,16 @@ def _dism_is_read_only(args: Sequence[str]) -> bool:
     return any(str(arg).strip().lower().startswith(DISM_READ_ONLY_PREFIX) for arg in args)
 
 
+def _ghost_is_read_only(args: Sequence[str]) -> bool:
+    """``ghost64 -ver`` 这类只读开关吗；无参数（交互界面）按危险处理。"""
+    lowered = [str(arg).strip().lower() for arg in args if str(arg).strip()]
+    if not lowered:
+        return False
+    if any(arg.startswith("-clone") for arg in lowered):
+        return False
+    return all(arg in GHOST_READ_ONLY for arg in lowered)
+
+
 def _script_text(parts: Sequence[str]) -> str:
     """取 PowerShell 的**脚本文本**：``-Command`` 之后的参数；没写 ``-Command`` 就全算。
 
@@ -202,16 +232,22 @@ def _powershell_is_dangerous(args: Sequence[str]) -> bool:
 def is_dangerous_command(command: Sequence[str]) -> bool:
     """这条命令会不会改磁盘（或改挂载状态）。
 
-    - 外部程序：``diskpart`` / ``format`` / ``bcdboot`` / ``bootrec`` 按程序名拦；
-      ``dism`` 再看参数——``/Get-*`` 只读放行，其余拦；
+    - 外部程序：``diskpart`` / ``format`` / ``bcdboot`` / ``bootrec`` / ``ghost*``
+      按程序名拦；``dism`` 再看参数——``/Get-*`` 只读放行，其余拦；
+      ``ghost64 -ver`` 这类版本探测放行；
     - PowerShell：写盘 cmdlet、脚本里调用外部写盘程序、``-File`` / ``-EncodedCommand``
       这类看不到内容的调用，任一命中即拦；注释先剥掉。
     """
     name = program_name(command)
     args = [str(part) for part in command[1:]]
     if name in DANGEROUS_PROGRAMS:
-        # dism 的 ``/Get-*`` 是只读查询（ImageProbe 读索引靠它），其余动词才算写。
-        return not (name in {"dism", "dism.exe"} and _dism_is_read_only(args))
+        # dism 的 ``/Get-*`` 是只读查询，其余动词才算写。
+        if name in {"dism", "dism.exe"}:
+            return not _dism_is_read_only(args)
+        # Ghost 只有版本探测是只读的：``-clone`` 与"无参数"都按写盘处理。
+        if name.startswith("ghost"):
+            return not _ghost_is_read_only(args)
+        return True
     if name in _POWERSHELL_PROGRAMS:
         return _powershell_is_dangerous(args)
     return False
