@@ -139,6 +139,34 @@ def test_probe_state_machine(tmp_path: Path) -> None:
     assert json_path.exists()
 
 
+def test_probe_can_check_a_draft_value(tmp_path: Path) -> None:
+    """设置页只回填草稿后，探测必须能跟着草稿走。"""
+    saved = tmp_path / "saved.exe"
+    saved.write_text("x", encoding="utf-8")
+    draft_dir = tmp_path / "draft"
+    draft_dir.mkdir()
+
+    store = SettingsStore(
+        tmp_path / "settings.json",
+        which=lambda name: "C:/Windows/system32/diskpart.exe" if name == "diskpart" else None,
+    )
+    store.update({"extGhost": str(saved)})
+
+    # 不传 path → 看已保存的值
+    assert store.probe("extGhost").state == "ok"
+    # 传 path → 看草稿（类型也要匹配：extGhost 是文件）
+    assert store.probe("extGhost", str(saved)).state == "ok"
+    assert store.probe("extGhost", str(draft_dir)).state == "miss"
+    assert store.probe("extGhost", str(tmp_path / "nope.exe")).state == "miss"
+    # 草稿清空 → 回到未设置/系统自带那一套判断
+    store.update({"extGhost": ""})
+    assert store.probe("extGhost", "").state == "na"
+    # 草稿是空值时依然走内置命令回退
+    assert store.probe("extDiskpart", "").state == "builtin"
+    # 非路径键传什么都不影响
+    assert store.probe("theme", str(saved)).state == "na"
+
+
 def test_probe_all_covers_every_path_key(store: SettingsStore) -> None:
     probed = store.probe_all()
     assert "extGhost" in probed

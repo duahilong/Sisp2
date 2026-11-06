@@ -408,9 +408,14 @@ class WebApi:
             return err("E_SETTINGS", str(exc))
 
     def update_settings(self, patch: dict[str, Any] | None = None) -> dict[str, Any]:
-        """局部更新；任一项不合法则整体拒绝，不落盘。"""
+        """局部更新；任一项不合法则整体拒绝，不落盘。
+
+        回包与 ``GET /api/settings`` 同形（``settings`` / ``warnings`` / …）：界面保存
+        后要拿它直接刷新本地快照和提醒，扁平回包会让界面停在旧值上。
+        """
         try:
-            return ok(self._settings.update(patch or {}))
+            self._settings.update(patch or {})
+            return ok(self._settings.to_dict())
         except Exception as exc:  # noqa: BLE001
             return err("E_SETTINGS", str(exc), {"field": getattr(exc, "field", None)})
 
@@ -463,20 +468,23 @@ class WebApi:
         stored = parsed.get("settings")
         patch = stored if isinstance(stored, dict) else parsed
         try:
-            settings = self._settings.update(dict(patch))
+            self._settings.update(dict(patch))
         except Exception as exc:  # noqa: BLE001
             return err("E_SETTINGS", str(exc), {"field": getattr(exc, "field", None)})
-        return ok({"settings": settings, "source": source or "inline"})
+        payload = {"source": source or "inline"}
+        payload.update(self._settings.to_dict())
+        return ok(payload)
 
     def reset_settings(self) -> dict[str, Any]:
         try:
-            return ok(self._settings.reset())
+            self._settings.reset()
+            return ok(self._settings.to_dict())
         except Exception as exc:  # noqa: BLE001
             return err("E_SETTINGS", str(exc))
 
-    def probe_path(self, key: str) -> dict[str, Any]:
+    def probe_path(self, key: str, path: str | None = None) -> dict[str, Any]:
         try:
-            return ok(self._settings.probe(key).to_dict())
+            return ok(self._settings.probe(key, path).to_dict())
         except Exception as exc:  # noqa: BLE001
             return err("E_SETTINGS", str(exc))
 
@@ -487,7 +495,11 @@ class WebApi:
             return err("E_SETTINGS", str(exc))
 
     def pick_path(self, key: str = "", kind: str = "file") -> dict[str, Any]:
-        """打开原生选择框；取消返回 ``{"cancelled": True}``。
+        """打开原生选择框，只把选中的路径交回去；取消返回 ``{"cancelled": True}``。
+
+        不落盘：设置页把选中值填进草稿，由「保存设置」统一写入 —— 选完立刻写盘
+        却同时显示「未保存的改动」会自相矛盾，用户也无法反悔。``key`` 只用来取
+        当前值作对话框的起始位置。
 
         不能用 pywebview 的 ``window.create_file_dialog``：桌面模式下窗口在父
         进程，本 API 跑在 UAC 拉起的提权子进程里，子进程的 ``webview.windows``
@@ -511,11 +523,6 @@ class WebApi:
         if not chosen:
             return ok({"cancelled": True})
 
-        if key:
-            try:
-                self._settings.update({key: chosen})
-            except Exception as exc:  # noqa: BLE001
-                return err("E_SETTINGS", str(exc), {"field": getattr(exc, "field", None)})
         return ok({"path": chosen, "cancelled": False})
 
     def open_settings_folder(self) -> dict[str, Any]:

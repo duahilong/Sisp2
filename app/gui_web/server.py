@@ -286,7 +286,12 @@ def create_app(
 
     @app.post("/api/settings/probe")
     def probe_path(body: dict[str, Any] | None = None) -> dict[str, Any]:
-        return api.probe_path(str((body or {}).get("key") or ""))
+        body = body or {}
+        path = body.get("path")
+        return api.probe_path(
+            str(body.get("key") or ""),
+            None if path is None else str(path),
+        )
 
     @app.post("/api/settings/probe_all")
     def probe_all_paths() -> dict[str, Any]:

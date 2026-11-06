@@ -258,29 +258,35 @@ def test_settings_roundtrip(client: TestClient) -> None:
     assert data["settings"]["sysDefaultGb"] == 120
 
     updated = _unwrap(client.put("/api/settings", json={"sysDefaultGb": 300, "theme": "dark"}))
-    assert updated["sysDefaultGb"] == 300
-    assert updated["theme"] == "dark"
+    # 回包与 GET 同形：界面保存后直接用它刷新本地快照
+    assert updated["settings"]["sysDefaultGb"] == 300
+    assert updated["settings"]["theme"] == "dark"
+    assert "warnings" in updated
 
     bad = client.put("/api/settings", json={"theme": "neon"}).json()
     assert bad["ok"] is False
     assert bad["error"]["code"] == "E_SETTINGS"
 
     reset = _unwrap(client.delete("/api/settings"))
-    assert reset["sysDefaultGb"] == 120
+    assert reset["settings"]["sysDefaultGb"] == 120
+    assert reset["settings"]["theme"] == "light"
 
     probed = _unwrap(client.post("/api/settings/probe_all"))
     assert "extGhost" in probed
 
 
-def test_dialog_pick_uses_native_picker(client: TestClient, monkeypatch) -> None:
-    """选择框必须走本进程的 WinForms 弹框。
+def test_dialog_pick_returns_path_without_saving(client: TestClient, monkeypatch) -> None:
+    """选择框必须走本进程的原生弹框，且只交回路径、不落盘。
 
-    回归用例：以前这里调 ``webview.windows[0].create_file_dialog``，而桌面模式下
+    回归用例一：以前这里调 ``webview.windows[0].create_file_dialog``，而桌面模式下
     窗口在父进程、API 在提权子进程，子进程永远拿不到窗口，界面点「浏览…」只
     能得到「窗口尚未创建」。
+    回归用例二：曾经选完就写盘，界面又同时显示「未保存的改动」—— 现在只回填
+    草稿，由「保存设置」统一落盘。
     """
     from app.gui_web import native_dialog
 
+    _unwrap(client.put("/api/settings", json={"sysWim": str(_FAKE_IMAGE_PATH)}))
     seen: dict[str, Any] = {}
 
     def fake_pick(kind: str = "file", **kwargs: Any) -> str:
@@ -293,9 +299,30 @@ def test_dialog_pick_uses_native_picker(client: TestClient, monkeypatch) -> None
     assert data == {"path": "D:\\images\\Win11.GHO", "cancelled": False}
     assert seen["kind"] == "file"
     # 当前值当起始位置传给对话框
-    assert "initial" in seen
-    # 选中后立即落盘到设置
-    assert _unwrap(client.get("/api/settings"))["settings"]["sysWim"] == "D:\\images\\Win11.GHO"
+    assert str(seen["initial"]) == str(_FAKE_IMAGE_PATH)
+    # 选中不落盘：设置里的值还是原来的
+    assert _unwrap(client.get("/api/settings"))["settings"]["sysWim"] == str(_FAKE_IMAGE_PATH)
+
+
+def test_probe_follows_the_draft_path(client: TestClient) -> None:
+    """探测能就着传进来的草稿路径跑，保存前角标也描述刚选的值。"""
+    _unwrap(client.put("/api/settings", json={"sysWim": str(_FAKE_IMAGE_PATH)}))
+    assert _unwrap(client.post("/api/settings/probe", json={"key": "sysWim"}))["state"] == "ok"
+
+    missing = str(_FAKE_IMAGE_PATH.parent / "nope.GHO")
+    result = _unwrap(client.post("/api/settings/probe", json={"key": "sysWim", "path": missing}))
+    assert result["state"] == "miss"
+    assert result["path"] == missing
+
+    # 草稿是真文件就报 ok（即使磁盘上不是这个值）
+    other = _FAKE_IMAGE_PATH.parent / "sisp-test-web-api-draft.GHO"
+    other.write_bytes(bytes([0xFE, 0xEF]))
+    draft = _unwrap(client.post("/api/settings/probe", json={"key": "sysWim", "path": str(other)}))
+    assert draft["state"] == "ok"
+    assert draft["path"] == str(other)
+
+    # 没传 path 时退回已保存的值
+    assert _unwrap(client.post("/api/settings/probe", json={"key": "sysWim", "path": None}))["state"] == "ok"
 
 
 def test_dialog_pick_cancel_reports_cancelled(client: TestClient, monkeypatch) -> None:
@@ -572,6 +599,9 @@ def test_import_settings_applies_and_validates(tmp_path: Path) -> None:
     assert result["ok"] is True, result
     assert store.get()["sysDefaultGb"] == 333
     assert store.get()["theme"] == "dark"
+    # 导入回包也带 settings/warnings，界面直接拿它刷新快照
+    assert result["data"]["settings"]["sysDefaultGb"] == 333
+    assert result["data"]["source"].endswith("good.json")
 
     bad = tmp_path / "bad.json"
     bad.write_text(json.dumps({"settings": {"sysDefaultGb": 5}}), encoding="utf-8")

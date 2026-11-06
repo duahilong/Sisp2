@@ -362,12 +362,18 @@ class SettingsStore:
             raise SettingsError("sysTemp", "临时目录不能与日志目录相同")
 
     # ------------------------------------------------------------------ 探测
-    def probe(self, key: str) -> ProbeResult:
-        """检查某个路径型设置的当前状态。"""
+    def probe(self, key: str, path: str | None = None) -> ProbeResult:
+        """检查某个路径型设置的状态。
+
+        ``path`` 不为 ``None`` 时检查传进来的值（界面上的草稿），否则检查已保存
+        的设置值 —— 设置页改成「选路径只回填草稿、保存才落盘」之后，探测必须能
+        跟着草稿走，否则角标描述的是磁盘上那个旧值。
+        """
         if key not in _PATH_KEYS:
             return ProbeResult(key, "na", "", "该项不是路径")
 
-        value = str(self._data.get(key) or "").strip()
+        raw = self._data.get(key) if path is None else path
+        value = str(raw or "").strip()
         if not value:
             builtin = self._find_builtin(key)
             if builtin:

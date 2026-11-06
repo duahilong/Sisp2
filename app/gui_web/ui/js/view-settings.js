@@ -280,7 +280,8 @@ function bindSettings() {
 async function probeRow(key) {
   const field = FIELD_BY_KEY.get(key);
   try {
-    const result = await api.probePath(key);
+    // 带着草稿探测：选完路径还没保存时，角标也应该描述刚选的那个值
+    const result = await api.probePath(key, draftValue(key));
     state.probes[key] = result;
     const row = $(`#settingsBody .set-row[data-key="${key}"]`);
     if (row) {
@@ -366,6 +367,7 @@ export async function resetSettings() {
     renderSettings();
     toast('已恢复默认设置');
     pushLog('设置已恢复默认值', '', 'settings');
+    for (const warning of data.warnings || []) pushLog(`设置提醒：${warning}`, 'warn', 'settings');
   } catch (exc) {
     toast(`恢复默认失败：${exc.message || exc}`, 'err');
   }
@@ -406,6 +408,7 @@ export async function importSettings() {
     renderSettings();
     toast('设置已导入');
     pushLog(`设置已从 ${picked.path} 导入`, '', 'settings');
+    for (const warning of data.warnings || []) pushLog(`设置提醒：${warning}`, 'warn', 'settings');
   } catch (exc) {
     toast(`导入失败：${exc.message || exc}`, 'err');
   }

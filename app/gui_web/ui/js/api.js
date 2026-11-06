@@ -83,7 +83,7 @@ export const api = {
   resetSettings: () => del('/api/settings'),
   exportSettings: (path) => post('/api/settings/export', { path }),
   importSettings: (payload) => post('/api/settings/import', payload),
-  probePath: (key) => post('/api/settings/probe', { key }),
+  probePath: (key, path) => post('/api/settings/probe', path === undefined ? { key } : { key, path }),
   probeAllPaths: () => post('/api/settings/probe_all'),
   openSettingsFolder: () => post('/api/settings/open_folder'),
   pickPath: (key, kind) => post('/api/dialog/pick', { key, kind }),
