@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from app.application.real_runner import WindowsDiskRunner, _CommandLog, build_real_runner
+from app.application.shell import DiskpartShell, ProcessShell
 from app.modules.boot.service import BootError, BootRepairer
 from app.safety_guard import (
     BLOCK_ENV,
@@ -92,39 +93,40 @@ def test_runner_defaults_to_read_only() -> None:
     assert build_real_runner().allow_real_disk is True
 
 
-def test_runner_blocks_diskpart_without_authorization(monkeypatch) -> None:
-    """事故现场复现：直接构造 runner（未授权）执行 diskpart → 被护栏拦下。
+def test_shell_blocks_diskpart_without_authorization(monkeypatch) -> None:
+    """事故现场复现：未授权的 ``DiskpartShell`` 执行 diskpart → 被护栏拦下。
 
-    这条用例取代了"mock ``runner._run_diskpart``"的写法：即便将来又有人把 mock
-    搬到不存在的方法上，这里也只会在护栏处失败，不会真的 clean 任何盘。
+    这条用例取代了"给 ``runner._run_diskpart`` 赋值"的写法：即便将来又有人把
+    替身搬到不存在的方法上，这里也只会在护栏处失败，不会真的 clean 任何盘。
     """
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.delenv(BLOCK_ENV, raising=False)
-    runner = WindowsDiskRunner(diskpart="diskpart.exe")
+    shell = DiskpartShell(log=_CommandLog(None), diskpart="diskpart.exe")
     with pytest.raises(RealDiskBlocked):
-        runner._run_diskpart(["select disk 999", "clean"], _CommandLog(None))
+        shell.run_diskpart(["select disk 999", "clean"])
 
 
-def test_runner_blocks_diskpart_inside_pytest_even_if_authorized(monkeypatch) -> None:
+def test_shell_blocks_diskpart_inside_pytest_even_if_authorized(monkeypatch) -> None:
     monkeypatch.setenv(BLOCK_ENV, "1")
-    runner = WindowsDiskRunner(diskpart="diskpart.exe", allow_real_disk=True)
+    shell = DiskpartShell(
+        log=_CommandLog(None), diskpart="diskpart.exe", allow_real_disk=True
+    )
     with pytest.raises(RealDiskBlocked):
-        runner._run_diskpart(["select disk 999", "clean"], _CommandLog(None))
+        shell.run_diskpart(["select disk 999", "clean"])
 
 
-def test_runner_blocks_bcdboot_and_dism_through_spawn(monkeypatch) -> None:
+def test_process_shell_blocks_bcdboot_and_dism(monkeypatch) -> None:
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.delenv(BLOCK_ENV, raising=False)
-    runner = WindowsDiskRunner(diskpart="diskpart.exe", dism="dism.exe", bcdboot="bcdboot.exe")
-    log = _CommandLog(None)
+    process = ProcessShell(log=_CommandLog(None), source="unit-test")
     with pytest.raises(RealDiskBlocked):
-        runner._spawn(BCD, 30, log)
+        process.run(BCD, 30)
     with pytest.raises(RealDiskBlocked):
-        runner._spawn(DISM, 30, log)
+        process.run(DISM, 30)
     # 只读查询仍然可以执行（这里用 python 代替 powershell 验证"非危险命令放行"）
     import sys
 
-    result = runner._spawn([sys.executable, "-c", "print('ok')"], 30, log)
+    result = process.run([sys.executable, "-c", "print('ok')"], 30)
     assert result[0] == 0
 
 

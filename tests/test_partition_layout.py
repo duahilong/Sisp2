@@ -26,18 +26,17 @@ from app.application.partitions import (
     allow_small_partitions,
     check_layout,
     check_minimums,
+    create_partition_lines,
     data_partition_count,
     diskpart_lines,
+    msr_delete_lines,
+    partition_verdict,
     plan_partitions,
     strip_msr_lines,
     unallocated_bytes,
+    wipe_lines,
 )
-from app.application.real_runner import (
-    WindowsDiskRunner,
-    _CommandLog,
-    _partition_verdict,
-    _verify_verdict,
-)
+from app.application.real_runner import _verify_verdict
 from app.application.service import SispService
 from app.application.workflow import WorkflowController
 from app.drive_letters import build_drive_letter_allocations
@@ -52,10 +51,8 @@ def _legacy_runner_script(parts: list[Any], disk_number: int = 2) -> list[str]:
     这里把“清盘 + 建分区”两段拼起来（跳过删 MSR 那段，因为它依赖真实分区号），
     方便和重构前的单段脚本逐字对比。
     """
-    runner = WindowsDiskRunner()
-    log = _CommandLog(None)
-    wipe = runner._wipe_script(disk_number=disk_number, log=log)
-    layout = runner._diskpart_script(disk_number=disk_number, parts=parts, log=log)
+    wipe = wipe_lines(disk_number)
+    layout = create_partition_lines(disk_number, parts)
     return [*wipe[:-1], *layout[1:-1], layout[-1]]
 
 
@@ -79,16 +76,13 @@ def test_msr_delete_is_a_separate_step_before_layout() -> None:
         {"partition_info": {"efi_size_mb": 100, "c_size_gb": 120}},
         letters={"efi": "F", "windows": "G", "data": "H"},
     )
-    runner = WindowsDiskRunner()
-    log = _CommandLog(None)
-
-    wipe = runner._wipe_script(disk_number=1, log=log)
+    wipe = wipe_lines(1)
     assert wipe == ["select disk 1", "clean", "convert gpt", "exit"]
 
-    delete = runner._msr_delete_script(disk_number=1, msr_partition=1, log=log)
+    delete = msr_delete_lines(1, 1)
     assert delete == ["select disk 1", "select partition 1", "delete partition override", "exit"]
 
-    layout = runner._diskpart_script(disk_number=1, parts=parts, log=log)
+    layout = create_partition_lines(1, parts)
     assert "delete partition override" not in layout
     assert layout[1] == "create partition efi size=100"
 
@@ -103,8 +97,8 @@ def test_dry_run_preview_shows_three_phases() -> None:
     )
     lines = text.splitlines()
     assert "REM === 1/3 清盘 + 转 GPT ===" in lines
-    assert "REM === 2/3 删除 convert gpt 自动生成的 MSR（删完立刻复查）===" in lines
-    assert "REM === 3/3 建分区（最后一项不带 size=，由 diskpart 吃掉剩余空间）===" in lines
+    assert "REM === 2/3 删除 convert gpt 自动生成的 MSR（删完立刻复查） ===" in lines
+    assert "REM === 3/3 建分区（最后一项不带 size=，由 diskpart 吃掉剩余空间） ===" in lines
     # MSR 那两条只以 REM 出现（预览时不知道真实分区号）
     assert "REM select partition <MSR 分区号>" in lines
     assert "REM delete partition override" in lines
@@ -241,7 +235,7 @@ def _part_parts(extra: bool = False, c_size_gb: int = 120):
 
 
 def test_partition_verdict_accepts_plan_exact_match() -> None:
-    ok, message, details = _partition_verdict(_part_payload(), _part_parts())
+    ok, message, details = partition_verdict(_part_payload(), _part_parts())
     assert ok is True, message
     assert "与计划一致" in message
     assert details["problems"] == []
@@ -249,12 +243,12 @@ def test_partition_verdict_accepts_plan_exact_match() -> None:
 
 
 def test_partition_verdict_accepts_four_partitions() -> None:
-    ok, message, _ = _partition_verdict(_part_payload(extra=True), _part_parts(extra=True))
+    ok, message, _ = partition_verdict(_part_payload(extra=True), _part_parts(extra=True))
     assert ok is True, message
 
 
 def test_partition_verdict_rejects_leftover_msr() -> None:
-    ok, message, _ = _partition_verdict(_part_payload(msr=True), _part_parts())
+    ok, message, _ = partition_verdict(_part_payload(msr=True), _part_parts())
     assert ok is False
     assert "保留分区" in message
 
@@ -262,14 +256,14 @@ def test_partition_verdict_rejects_leftover_msr() -> None:
 def test_partition_verdict_rejects_wrong_efi_size() -> None:
     """EFI 建成 300 MB（计划 100 MB）→ 报大小不符，并定位到 EFI 那一行。"""
     payload = _part_payload(efi_size_mb=300)
-    ok, message, _ = _partition_verdict(payload, _part_parts())
+    ok, message, _ = partition_verdict(payload, _part_parts())
     assert ok is False
     assert "第 1 个分区（EFI）大小不符" in message
     assert "计划 100 MB" in message
 
 
 def test_partition_verdict_rejects_wrong_partition_count() -> None:
-    ok, message, _ = _partition_verdict(_part_payload(extra=True), _part_parts())
+    ok, message, _ = partition_verdict(_part_payload(extra=True), _part_parts())
     assert ok is False
     assert "分区数与计划不符" in message
 
@@ -277,7 +271,7 @@ def test_partition_verdict_rejects_wrong_partition_count() -> None:
 def test_partition_verdict_rejects_wrong_size() -> None:
     """C 实际只建了 100 GB（计划 120 GB）→ 必须报大小不符。"""
     payload = _part_payload(c_size_gb=100)
-    ok, message, _ = _partition_verdict(payload, _part_parts(c_size_gb=120))
+    ok, message, _ = partition_verdict(payload, _part_parts(c_size_gb=120))
     assert ok is False
     assert "大小不符" in message
     assert "计划 122880 MB" in message
@@ -286,21 +280,21 @@ def test_partition_verdict_rejects_wrong_size() -> None:
 def test_partition_verdict_rejects_wrong_drive_letter() -> None:
     """盘符被别的卷抢走 / assign 到错的分区 → 必须报盘符不符。"""
     payload = _part_payload(c_letter="G")
-    ok, message, _ = _partition_verdict(payload, _part_parts())
+    ok, message, _ = partition_verdict(payload, _part_parts())
     assert ok is False
     assert "盘符不符" in message
 
 
 def test_partition_verdict_rejects_wrong_label() -> None:
     payload = _part_payload(data_label="Data9")
-    ok, message, _ = _partition_verdict(payload, _part_parts())
+    ok, message, _ = partition_verdict(payload, _part_parts())
     assert ok is False
     assert "卷标不符" in message
 
 
 def test_partition_verdict_rejects_wrong_file_system() -> None:
     payload = _part_payload(data_fs="exFAT")
-    ok, message, _ = _partition_verdict(payload, _part_parts())
+    ok, message, _ = partition_verdict(payload, _part_parts())
     assert ok is False
     assert "文件系统不符" in message
 
@@ -308,7 +302,7 @@ def test_partition_verdict_rejects_wrong_file_system() -> None:
 def test_partition_verdict_rejects_leftover_free_space() -> None:
     """最后一个分区没吃满（还剩 50 GB）→ 报未分配 + 容量不闭合。"""
     payload = _part_payload(largest_free=50 * GIB)
-    ok, message, _ = _partition_verdict(payload, _part_parts())
+    ok, message, _ = partition_verdict(payload, _part_parts())
     assert ok is False
     assert "未分配" in message
 
@@ -316,7 +310,7 @@ def test_partition_verdict_rejects_leftover_free_space() -> None:
 def test_partition_verdict_warns_when_efi_letter_missing() -> None:
     """ESP 的临时字母查不到只告警：它是隐藏卷，任务收尾就释放。"""
     payload = _part_payload(drop_efi_letter=True)
-    ok, message, details = _partition_verdict(payload, _part_parts())
+    ok, message, details = partition_verdict(payload, _part_parts())
     assert ok is True, message
     assert details["warnings"], "应当有 ESP 盘符查不到的告警"
     assert "告警" not in "".join(details["problems"])
@@ -325,7 +319,7 @@ def test_partition_verdict_warns_when_efi_letter_missing() -> None:
 def test_partition_verdict_rejects_too_small_auto_partition() -> None:
     """auto 分区只剩 16 GB（下限 20 GB）→ 报低于下限。"""
     payload = _part_payload(c_size_gb=460)
-    ok, message, _ = _partition_verdict(payload, _part_parts(c_size_gb=460))
+    ok, message, _ = partition_verdict(payload, _part_parts(c_size_gb=460))
     assert ok is False
     assert "低于下限" in message
 

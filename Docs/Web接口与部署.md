@@ -41,6 +41,7 @@ python -m app.gui_web.main --serve --port 8765
 | `GET /api/jobs` | 任务列表（首屏兜底，SSE 未连上时也能画出进度） |
 | `GET /api/jobs/{job_id}` | 单任务查询（含 `progress`） |
 | `GET /api/jobs/{job_id}/log?tail=200` | 任务日志尾部；只允许 `logDir` 下的 `.log` 文件，越界返回 `E_PATH` |
+| `POST /api/partition/preview` | `{disk_number?}`；返回**真实会执行的三段 diskpart 脚本**（只读，需先 `/api/prepare`；与执行器同源生成） |
 | `POST /api/images` | `{directory?, path?}` 列镜像目录或读某个镜像的索引（`dism /Get-WimInfo`；ISO 挂载后必定卸载） |
 | `GET /api/boot/report` | 扫描各盘的 Windows 目录与 ESP，返回可修复性报告 |
 | `POST /api/boot/repair` | `{disk_number}`；临时盘符挂 ESP → `bcdboot … /f UEFI` → 重新扫描，结束必定释放盘符；真实模式受写盘闸门约束 |

@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import json
+import pathlib
 import threading
 from types import SimpleNamespace
 from typing import Any
@@ -20,12 +22,14 @@ import pytest
 
 from app.application.contracts import DiskInfo
 from app.application.jobs import ExecutionPlan, Job, JobManager, JobSpec, JobStatus
-from app.application.partitions import plan_partitions
+from app.application.partitions import (
+    create_partition_lines,
+    msr_delete_lines,
+    plan_partitions,
+    wipe_lines,
+)
 from app.application.real_runner import (
-    STEP_OK,
-    STEP_TITLES,
     RunnerError,
-    StepResult,
     WindowsDiskRunner,
     _CommandLog,
     build_real_runner,
@@ -34,6 +38,7 @@ from app.application.real_runner import (
 from app.application.service import SispService
 from app.application.workflow import WorkflowController
 from app.models import WorkerResult
+from tests.fakes import FakeDiskpartShell as FakeShell
 
 _GIB = 1024**3
 # 单测用小尺寸（C 30 GB）测算术：显式放宽后端下限（真实布局 C ≥ 60 GB）。
@@ -310,20 +315,18 @@ def test_prune_runner_logs_removes_only_expired_runner_logs(tmp_path):
 
 def test_diskpart_script_layout():
     """分区脚本分三段：清盘+转 GPT → 删 MSR → 建分区（各段独立校验）。"""
-    runner = WindowsDiskRunner()
-    log = _CommandLog(None)
     parts = plan_partitions(
         {"partition_info": {"efi_size_mb": 300, "c_size_gb": 30}},
         letters={"efi": "E", "windows": "F", "data": "G"},
     )
 
-    wipe = runner._wipe_script(disk_number=2, log=log)
+    wipe = wipe_lines(2)
     assert wipe == ["select disk 2", "clean", "convert gpt", "exit"]
 
-    delete = runner._msr_delete_script(disk_number=2, msr_partition=1, log=log)
+    delete = msr_delete_lines(2, 1)
     assert delete == ["select disk 2", "select partition 1", "delete partition override", "exit"]
 
-    layout = runner._diskpart_script(disk_number=2, parts=parts, log=log)
+    layout = create_partition_lines(2, parts)
     assert layout[0] == "select disk 2"
     assert "delete partition override" not in layout  # MSR 在上一段已删
     assert "create partition efi size=300" in layout
@@ -339,7 +342,6 @@ def test_diskpart_script_lets_last_data_partition_eat_remaining_space():
     diskpart 报空间不足”——所以界面的准备页面（selectionPayload）在把盘填满时
     就发 ``"auto"``。
     """
-    runner = WindowsDiskRunner()
     parts = plan_partitions(
         {
             "partition_info": {
@@ -353,7 +355,7 @@ def test_diskpart_script_lets_last_data_partition_eat_remaining_space():
         },
         letters={"efi": "E", "windows": "F", "data": "G", "data2": "H"},
     )
-    lines = runner._diskpart_script(disk_number=1, parts=parts, log=_CommandLog(None))
+    lines = create_partition_lines(1, parts)
 
     assert "create partition primary size=122880" in lines          # C 120 GB
     assert "create partition primary size=204800" in lines          # D 200 GB
@@ -366,12 +368,11 @@ def test_diskpart_script_lets_last_data_partition_eat_remaining_space():
 
 
 def test_diskpart_script_uses_explicit_data_size():
-    runner = WindowsDiskRunner()
     parts = plan_partitions(
         {"partition_info": {"efi_size_mb": 100, "c_size_gb": 10, "data_size_gb": 5}},
         letters={"efi": "E", "windows": "F", "data": "G"},
     )
-    lines = runner._diskpart_script(disk_number=1, parts=parts, log=_CommandLog(None))
+    lines = create_partition_lines(1, parts)
 
     assert "create partition primary size=5120" in lines
 
@@ -692,7 +693,7 @@ def _esp_payload(number=1):
 
 def test_option_flag_reads_bools_leniently():
     """release_efi_letter 是布尔开关：缺省/怪值都按默认，只有明确的假才是假。"""
-    from app.application.real_runner import _option_flag
+    from app.application.runner_utils import option_flag as _option_flag
 
     assert _option_flag({}, "release_efi_letter") is True
     assert _option_flag({"release_efi_letter": True}, "release_efi_letter") is True
@@ -705,84 +706,83 @@ def test_option_flag_reads_bools_leniently():
     assert _option_flag(None, "release_efi_letter") is True
 
 
+def _releaser(shell):
+    from app.application.phases.partition import EfiLetterReleaser
+
+    return EfiLetterReleaser(shell)
+
+
+def _touched(efi_partition=None, *, disk_touched=True):
+    from app.application.phases.base import PhaseOutcome
+
+    return PhaseOutcome(ok=True, disk_touched=disk_touched, efi_partition=efi_partition)
+
+
 def test_release_efi_letter_switch_off_keeps_letter():
     """关掉 releaseEfiLetter → 一条 remove 都不发，只在日志里说明。"""
-    runner = WindowsDiskRunner()
-    seen: list[list[str]] = []
     log = _CommandLog(None)
-    runner._run_diskpart = lambda lines, log_, timeout=600.0, **kwargs: (
-        seen.append(list(lines)) or (0, "ok")
-    )
+    shell = FakeShell()
 
-    runner._release_efi_letter_if_enabled(
+    _releaser(shell).release(
         disk_number=2,
         letter="E",
-        log=log,
+        outcome=_touched(1),
         options={"release_efi_letter": False},
-        tracker={"diskpart_ran": True, "efi_partition": 1},
+        log=log,
     )
 
-    assert seen == []
+    assert shell.released == []
     assert "已关闭 EFI 盘符释放" in log.summary()
 
 
 def test_release_efi_letter_switch_on_removes_letter():
-    runner = WindowsDiskRunner()
-    seen: list[list[str]] = []
     log = _CommandLog(None)
-    runner._run_diskpart = lambda lines, log_, timeout=600.0, **kwargs: (
-        seen.append(list(lines)) or (0, "ok")
-    )
-    runner._esp_partition_number = lambda disk, log_: 1  # type: ignore[method-assign]
+    shell = FakeShell()
 
-    runner._release_efi_letter_if_enabled(
+    _releaser(shell).release(
         disk_number=2,
         letter="E",
-        log=log,
+        outcome=_touched(1),
         options={"release_efi_letter": True},
-        tracker={"diskpart_ran": True, "efi_partition": 1},
+        log=log,
     )
 
-    assert seen == [["select disk 2", "select partition 1", "remove letter=E", "exit"]]
+    assert shell.released == [(2, 1, "E")]
 
 
 def test_release_efi_letter_switch_off_does_not_even_query():
     """关掉开关时连 ESP 分区号都不查（不碰盘，性能与安全都更好）。"""
-    runner = WindowsDiskRunner()
     log = _CommandLog(None)
 
-    def boom(*_a, **_k):
-        raise AssertionError("关掉开关时不该执行任何 diskpart")
+    class BoomShell(FakeShell):
+        def find_esp(self, disk_number):
+            raise AssertionError("关掉开关时不该查 ESP")
 
-    runner._run_diskpart = boom  # type: ignore[method-assign]
-    runner._esp_partition_number = boom  # type: ignore[method-assign]
+        def release_letter(self, disk_number, partition, letter):
+            raise AssertionError("关掉开关时不该执行 diskpart")
 
-    runner._release_efi_letter_if_enabled(
+    _releaser(BoomShell()).release(
         disk_number=2,
         letter="E",
-        log=log,
+        outcome=_touched(None),
         options={"release_efi_letter": False},
-        tracker={"diskpart_ran": True},
+        log=log,
     )
     assert "已关闭 EFI 盘符释放" in log.summary()
 
 
 def test_release_efi_letter_switch_skips_when_disk_untouched():
     """任务根本没动过盘（前置失败）→ 开关开着也不去释放。"""
-    runner = WindowsDiskRunner()
-    seen: list[list[str]] = []
-    runner._run_diskpart = lambda lines, log, timeout=600.0, **kwargs: (
-        seen.append(list(lines)) or (0, "ok")
-    )
+    shell = FakeShell()
 
-    runner._release_efi_letter_if_enabled(
+    _releaser(shell).release(
         disk_number=2,
         letter="E",
-        log=_CommandLog(None),
+        outcome=_touched(1, disk_touched=False),
         options={"release_efi_letter": True},
-        tracker={"diskpart_ran": False},
+        log=_CommandLog(None),
     )
-    assert seen == []
+    assert shell.released == []
 
 
 def test_release_efi_letter_uses_disk_and_partition_not_letter():
@@ -793,187 +793,220 @@ def test_release_efi_letter_uses_disk_and_partition_not_letter():
     所以“先按字母查归属”必然查空 → 跳过释放 → 幽灵盘符残留。改成定位 ESP 分区后，
     字母被谁占用都不影响：操作对象是确定的分区。
     """
-    runner = WindowsDiskRunner()
-    seen: list[list[str]] = []
+    shell = FakeShell()
 
-    def fake_diskpart(lines, log, timeout=600.0, **kwargs):
-        seen.append(list(lines))
-        return 0, "ok"
+    _releaser(shell).release(
+        disk_number=2,
+        letter="E",
+        outcome=_touched(1),
+        options={},
+        log=_CommandLog(None),
+    )
 
-    runner._run_diskpart = fake_diskpart  # type: ignore[method-assign]
-    runner._esp_partition_number = lambda disk, log: 1  # type: ignore[method-assign]
-    runner._release_efi_letter(2, "E", _CommandLog(None))
+    assert shell.released == [(2, 1, "E")]
 
-    assert seen == [
-        ["select disk 2", "select partition 1", "remove letter=E", "exit"]
+
+def test_diskpart_shell_release_script_uses_disk_and_partition():
+    """释放脚本本身：``select disk N`` + ``select partition k`` + ``remove letter=X``。"""
+    from app.application.command_log import CommandLog
+    from app.application.shell import DiskpartShell, ProcessShell
+
+    written: list[str] = []
+
+    def fake_run(command, timeout, *, env=None):
+        written.extend(pathlib.Path(command[2]).read_text(encoding="ascii").splitlines())
+        return 0, "ok", 0.1
+
+    shell = DiskpartShell(
+        log=CommandLog(None),
+        diskpart="diskpart.exe",
+        process=ProcessShell(log=CommandLog(None), runner=fake_run),
+    )
+    assert shell.release_letter(2, 1, "E") is True
+
+    assert [line for line in written if line] == [
+        "select disk 2",
+        "select partition 1",
+        "remove letter=E",
+        "exit",
     ]
 
 
 def test_release_efi_letter_reuses_partition_number_from_layout_check():
     """布局复核时已经知道 ESP 是第几个分区，收尾直接用，不再查一次。"""
-    runner = WindowsDiskRunner()
-    seen: list[list[str]] = []
-    runner._run_diskpart = lambda lines, log, timeout=600.0, **kwargs: (
-        seen.append(list(lines)) or (0, "ok")
+
+    class BoomShell(FakeShell):
+        def find_esp(self, disk_number):
+            raise AssertionError("不该再查分区表")
+
+    boom = BoomShell()
+    _releaser(boom).release(
+        disk_number=3,
+        letter="F",
+        outcome=_touched(4),
+        options={},
+        log=_CommandLog(None),
     )
 
-    def boom(disk, log):
-        raise AssertionError("不该再查分区表")
-
-    runner._esp_partition_number = boom  # type: ignore[method-assign]
-    runner._release_efi_letter(3, "F", _CommandLog(None), efi_partition=4)
-
-    assert seen == [["select disk 3", "select partition 4", "remove letter=F", "exit"]]
+    assert boom.released == [(3, 4, "F")]
 
 
 def test_release_efi_letter_skips_when_no_esp_found():
     """盘上没有 ESP（还没分区 / 分区表被改过）→ 不动手。"""
-    runner = WindowsDiskRunner()
-    seen: list[list[str]] = []
     log = _CommandLog(None)
-    runner._run_diskpart = lambda lines, log_, timeout=600.0, **kwargs: (
-        seen.append(list(lines)) or (0, "ok")
+    shell = FakeShell(esp=None)
+
+    _releaser(shell).release(
+        disk_number=2,
+        letter="E",
+        outcome=_touched(None),
+        options={},
+        log=log,
     )
-    runner._esp_partition_number = lambda disk, log_: None  # type: ignore[method-assign]
 
-    runner._release_efi_letter(2, "E", log)
-
-    assert seen == []
+    assert shell.released == []
     assert "找不到 ESP 分区" in log.summary()
 
 
 def test_release_efi_letter_skips_when_query_fails():
     """查不到 ESP 也不动手：宁可留幽灵盘符，也不误操作。"""
-    from app.application.real_runner import RunnerError
-
-    runner = WindowsDiskRunner()
-    seen: list[list[str]] = []
     log = _CommandLog(None)
-    runner._run_diskpart = lambda lines, log_, timeout=600.0, **kwargs: (
-        seen.append(list(lines)) or (0, "ok")
-    )
 
-    def boom(disk, log_):
+    def boom(disk_number):
         raise RunnerError("powershell 不可用")
 
-    runner._esp_partition_number = boom  # type: ignore[method-assign]
+    shell = FakeShell(esp=boom)
 
-    runner._release_efi_letter(2, "E", log)
+    _releaser(shell).release(
+        disk_number=2,
+        letter="E",
+        outcome=_touched(None),
+        options={},
+        log=log,
+    )
 
-    assert seen == []
+    assert shell.released == []
     assert "已跳过" in log.summary()
 
 
-def test_esp_partition_number_matches_gpt_type():
+def test_diskpart_shell_finds_esp_by_gpt_type(fake_process):
     """按 GPT 类型找 ESP，不依赖盘符（ESP 是隐藏卷，可能没有可读字母）。"""
-    runner = WindowsDiskRunner(powershell="powershell.exe")
-    runner._query_partitions = lambda disk, log: _esp_payload(4)  # type: ignore[method-assign]
-    assert runner._esp_partition_number(2, _CommandLog(None)) == 4
+    from app.application.command_log import CommandLog
+    from app.application.shell import DiskpartShell
 
-    runner._query_partitions = lambda disk, log: {  # type: ignore[method-assign]
+    def handler(command, timeout, env):
+        return 0, json.dumps(_esp_payload(4)), 0.1
+
+    shell = DiskpartShell(
+        log=CommandLog(None),
+        powershell="powershell.exe",
+        process=fake_process(handler=handler),
+    )
+    assert shell.find_esp(2) == 4
+
+
+def test_diskpart_shell_returns_none_without_esp(fake_process):
+    from app.application.command_log import CommandLog
+    from app.application.shell import DiskpartShell
+
+    payload = {
         "partition_style": "GPT",
         "partitions": [
-            {"number": 1, "type": "Basic", "gpt_type": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}"}
+            {
+                "number": 1,
+                "type": "Basic",
+                "gpt_type": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}",
+            }
         ],
     }
-    assert runner._esp_partition_number(2, _CommandLog(None)) is None
+
+    def handler(command, timeout, env):
+        return 0, json.dumps(payload), 0.1
+
+    shell = DiskpartShell(
+        log=CommandLog(None),
+        powershell="powershell.exe",
+        process=fake_process(handler=handler),
+    )
+    assert shell.find_esp(2) is None
 
 
 def test_release_efi_letter_skips_without_letter():
-    runner = WindowsDiskRunner()
-    seen: list[list[str]] = []
-    runner._run_diskpart = lambda lines, log, timeout=600.0, **kwargs: (seen.append(list(lines)) or (0, "ok"))
+    shell = FakeShell()
 
-    runner._release_efi_letter(2, None, _CommandLog(None))
+    _releaser(shell).release(
+        disk_number=2,
+        letter=None,
+        outcome=_touched(1),
+        options={},
+        log=_CommandLog(None),
+    )
 
-    assert seen == []
+    assert shell.released == []
 
 
-def test_runner_keeps_efi_letter_when_switch_off(tmp_path):
+def test_runner_keeps_efi_letter_when_switch_off(
+    tmp_path, make_runner, fake_shell, fake_process, make_snapshot
+) -> None:
     """同一个任务，release_efi_letter=False → 全流程一条 remove letter 都没有。"""
+    from app.application.partitions import plan_partitions
+
     image = tmp_path / "tiny.wim"
     image.write_bytes(b"x")
-    runner = WindowsDiskRunner(
-        diskpart="diskpart.exe",
-        dism="dism.exe",
-        bcdboot="bcdboot.exe",
-        powershell="powershell.exe",
-    )
-    scripts: list[list[str]] = []
-    runner._run_diskpart = lambda lines, log, timeout=600.0, **kwargs: (
-        scripts.append(list(lines)) or (0, "ok")
-    )
-    runner._find_msr_partition = lambda disk_number, log, **_: None  # type: ignore[method-assign]
-    runner._verify_partitions_after_create = (  # type: ignore[method-assign]
-        lambda disk, parts, log: (True, "ok", {"efi_partition": 1})
-    )
-    runner._apply_image = lambda image_path, index, target, log, **kwargs: (87, "bad image", 0.1)
+    payload = {
+        "partition_info": _PAYLOAD["partition_info"],
+        "image_info": {"image_path": str(image), "image_index": 1},
+    }
+    letters = {"efi": "E", "windows": "F", "data": "G"}
+    parts = plan_partitions(payload, letters=letters)
+    shell = fake_shell(query_handler=lambda disk: make_snapshot(parts), msr=None)
+    process = fake_process(handler=lambda command, timeout, env: (87, "bad image", 0.1))
+    runner = make_runner(shell=shell, process=process)
 
     spec = SimpleNamespace(
         disk_number=2,
-        config_payload={
-            "partition_info": {
-                "efi_size_mb": 100,
-                "c_size_gb": 3,
-                "data_size_gb": "auto",
-                "allow_small_partitions": True,
-            },
-            "image_info": {"image_path": str(image), "image_index": 1},
-        },
-        drive_letters={"efi": "E", "windows": "F", "data": "G"},
+        config_payload=payload,
+        drive_letters=letters,
         runner_options={"release_efi_letter": False},
     )
 
     result = runner.run(spec, threading.Event())
 
     assert result.success is False
-    assert not any("remove letter" in line for script in scripts for line in script)
+    assert shell.released == []
+    assert not any("remove letter" in line for script in shell.scripts for line in script)
 
 
-def test_runner_releases_efi_letter_even_when_image_fails(tmp_path):
+def test_runner_releases_efi_letter_even_when_image_fails(
+    tmp_path, make_runner, fake_shell, fake_process, make_snapshot
+) -> None:
+    from app.application.partitions import plan_partitions
+
     image = tmp_path / "tiny.wim"
     image.write_bytes(b"x")
-    runner = WindowsDiskRunner(
-        diskpart="diskpart.exe",
-        dism="dism.exe",
-        bcdboot="bcdboot.exe",
-        powershell="powershell.exe",
-    )
-    scripts: list[list[str]] = []
-
-    def fake_diskpart(lines, log, timeout=600.0, **kwargs):
-        scripts.append(list(lines))
-        return 0, "ok"
-
-    runner._run_diskpart = fake_diskpart  # type: ignore[method-assign]
-    runner._find_msr_partition = lambda disk_number, log, **_: None  # type: ignore[method-assign]
-    runner._verify_partitions_after_create = (  # type: ignore[method-assign]
-        lambda disk, parts, log: (True, "ok", {"efi_partition": 1})
-    )
-    runner._apply_image = lambda image_path, index, target, log, **kwargs: (87, "bad image", 0.1)
+    payload = {
+        "partition_info": _PAYLOAD["partition_info"],
+        "image_info": {"image_path": str(image), "image_index": 1},
+    }
+    letters = {"efi": "E", "windows": "F", "data": "G"}
+    parts = plan_partitions(payload, letters=letters)
+    shell = fake_shell(query_handler=lambda disk: make_snapshot(parts), msr=None)
+    process = fake_process(handler=lambda command, timeout, env: (87, "bad image", 0.1))
+    runner = make_runner(shell=shell, process=process)
 
     spec = SimpleNamespace(
         disk_number=2,
-        config_payload={
-            "partition_info": {
-                "efi_size_mb": 100,
-                "c_size_gb": 3,
-                "data_size_gb": "auto",
-                # 单测用小尺寸：显式放宽后端下限（C ≥ 60 GB）
-                "allow_small_partitions": True,
-            },
-            "image_info": {"image_path": str(image), "image_index": 1},
-        },
-        drive_letters={"efi": "E", "windows": "F", "data": "G"},
+        config_payload=payload,
+        drive_letters=letters,
     )
 
     result = runner.run(spec, threading.Event())
 
     assert result.success is False
     assert "应用镜像失败" in (result.error or "")
-    assert scripts[0][:2] == ["select disk 2", "clean"]
+    assert shell.scripts[0] == ["select disk 2", "clean", "convert gpt", "exit"]
     # 收尾按“磁盘 + 分区号”释放，不按字母选卷
-    assert ["select disk 2", "select partition 1", "remove letter=E", "exit"] in scripts
+    assert shell.released == [(2, 1, "E")]
 
 
 # ----------------------------------------------------------- MSR 删除（两段式）
@@ -985,32 +1018,12 @@ def _tiny_image(tmp_path):
     return image
 
 
-def _tiny_spec(image, data_size="auto"):
+def _tiny_spec(image, *, payload=None):
     return SimpleNamespace(
         disk_number=2,
-        config_payload={
-            "partition_info": {
-                "efi_size_mb": 100,
-                "c_size_gb": 3,
-                "data_size_gb": data_size,
-                "allow_small_partitions": True,
-            },
-            "image_info": {"image_path": str(image), "image_index": 1},
-        },
+        config_payload=payload or _payload(image),
         drive_letters={"efi": "E", "windows": "F", "data": "G"},
     )
-
-
-def _msr_runner(**stubs):
-    runner = WindowsDiskRunner(
-        diskpart="diskpart.exe",
-        dism="dism.exe",
-        bcdboot="bcdboot.exe",
-        powershell="powershell.exe",
-    )
-    for name, value in stubs.items():
-        setattr(runner, name, value)
-    return runner
 
 
 def _msr_payload(number=1):
@@ -1030,228 +1043,244 @@ def _msr_payload(number=1):
     }
 
 
-def test_find_msr_partition_reads_partition_number():
-    runner = _msr_runner(
-        _query_partitions=lambda disk, log: _msr_payload(3),
+def _sequence_process(fake_process, *payloads):
+    """按顺序吐出分区表 JSON 的 ProcessShell 替身（用于 find_partition 重试）。"""
+    queue = list(payloads)
+
+    def handler(command, timeout, env):
+        payload = queue.pop(0) if len(queue) > 1 else queue[0]
+        return 0, json.dumps(payload), 0.1
+
+    return fake_process(handler=handler)
+
+
+def _msr_shell(fake_process, *payloads):
+    from app.application.command_log import CommandLog
+    from app.application.shell import DiskpartShell
+
+    return DiskpartShell(
+        log=CommandLog(None),
+        powershell="powershell.exe",
+        process=_sequence_process(fake_process, *payloads),
     )
-    assert runner._find_msr_partition(2, _CommandLog(None)) == 3
 
 
-def test_find_msr_partition_returns_none_without_msr():
+def test_find_msr_partition_reads_partition_number(fake_process) -> None:
+    shell = _msr_shell(fake_process, _msr_payload(3))
+    assert shell.find_msr(2) == 3
+
+
+def test_find_msr_partition_returns_none_without_msr(fake_process) -> None:
     """有些盘 ``convert gpt`` 之后没有 MSR：不能瞎删，直接返回 None。"""
-    runner = _msr_runner(_query_partitions=lambda disk, log: _empty_disk())
-    assert runner._find_msr_partition(2, _CommandLog(None)) is None
+    payload = {"partition_style": "GPT", "partitions": [], "largest_free": 0}
+    shell = _msr_shell(fake_process, payload)
+    assert shell.find_msr(2) is None
 
 
-def test_find_msr_partition_retries_before_giving_up():
+def test_find_msr_partition_retries_before_giving_up(fake_process) -> None:
     """枚举慢：头两次查不到、第三次才出现 → 仍然要认出来（不能就此跳过删除）。"""
-    calls: list[int] = []
-
-    def flaky(disk, log):
-        calls.append(1)
-        return _msr_payload(1) if len(calls) >= 3 else _empty_disk()
-
-    runner = _msr_runner(_query_partitions=flaky)
-    assert runner._find_msr_partition(2, _CommandLog(None)) == 1
-    assert len(calls) == 3
+    empty = {"partition_style": "GPT", "partitions": [], "largest_free": 0}
+    shell = _msr_shell(fake_process, empty, empty, _msr_payload(1))
+    assert shell.find_msr(2) == 1
 
 
-def test_find_msr_partition_raises_when_query_fails():
+def test_find_msr_partition_raises_when_query_fails(fake_process) -> None:
     """查询失败要中止装机，而不是猜一个分区号去删。"""
+    from app.application.command_log import CommandLog
+    from app.application.shell import DiskpartShell
 
-    def boom(disk, log):
+    def handler(command, timeout, env):
         raise RunnerError("Get-Partition : 拒绝访问")
 
-    runner = _msr_runner(_query_partitions=boom)
+    shell = DiskpartShell(
+        log=CommandLog(None),
+        powershell="powershell.exe",
+        process=fake_process(handler=handler),
+    )
     with pytest.raises(RunnerError):
-        runner._find_msr_partition(2, _CommandLog(None))
+        shell.find_msr(2)
 
 
-def _ok_pipeline(**overrides):
-    """把 dism / bcdboot / verify 都换成“成功”，只留分区阶段的真实逻辑。"""
-    stubs = {
-        "_apply_image": lambda image_path, index, target, log, **kwargs: (0, "ok", 0.1),
-        "_write_boot": lambda letters, log, **kwargs: (0, "ok", 0.1),
-        "_verify": lambda disk_number, log, letters, **kwargs: StepResult(
-            key="verify", title=STEP_TITLES["verify"], status=STEP_OK, message="ok"
-        ),
+def _payload(image, **partition_overrides):
+    info = {"efi_size_mb": 100, "c_size_gb": 3, "data_size_gb": "auto",
+            "allow_small_partitions": True}
+    info.update(partition_overrides)
+    return {
+        "partition_info": info,
+        "image_info": {"image_path": str(image), "image_index": 1},
     }
-    stubs.update(overrides)
-    return stubs
 
 
-def test_run_steps_deletes_msr_then_verifies_before_creating_partitions(tmp_path):
-    """清盘 → 删 MSR（独立脚本）→ 复查 → 建分区 → 复核布局。
+def _parts(payload):
+    from app.application.partitions import plan_partitions
+
+    return plan_partitions(payload, letters={"efi": "E", "windows": "F", "data": "G"})
+
+
+def test_run_steps_deletes_msr_then_verifies_before_creating_partitions(
+    tmp_path, make_runner, fake_shell, fake_process, make_snapshot
+):
+    """清盘 → 删 MSR（独立脚本）→ 复查 → 建分区 → 分区验收。
 
     关键顺序：删除必须发生在建 EFI 之前，而且删完要再查一次。
     """
     image = _tiny_image(tmp_path)
-    scripts: list[list[str]] = []
-    queries: list[int] = []
+    payload = _payload(image)
+    parts = _parts(payload)
+    msr_calls: list[int] = []
 
-    def fake_diskpart(lines, log, timeout=600.0, **kwargs):
-        scripts.append(list(lines))
-        return 0, "ok"
+    def msr(disk_number):
+        msr_calls.append(disk_number)
+        return 1 if len(msr_calls) == 1 else None
 
-    def fake_query(disk_number, log):
-        queries.append(1)
-        return _msr_payload(1) if len(queries) == 1 else _empty_disk()
+    shell = fake_shell(msr=msr, query_handler=lambda disk: make_snapshot(parts))
+    runner = make_runner(shell=shell, process=fake_process())
 
-    runner = _msr_runner(
-        _run_diskpart=fake_diskpart,
-        _query_partitions=fake_query,
-        _verify_partitions_after_create=lambda disk, parts, log: (
-            True,
-            "ok",
-            {"efi_partition": 1},
-        ),
-        **_ok_pipeline(),
-    )
-
-    result = runner.run(_tiny_spec(image), threading.Event())
+    result = runner.run(_tiny_spec(image, payload=payload), threading.Event())
 
     assert result.success is True, result.error
-    # 三段 diskpart，顺序固定
-    assert scripts[0] == ["select disk 2", "clean", "convert gpt", "exit"]
-    assert scripts[1] == ["select disk 2", "select partition 1", "delete partition override", "exit"]
-    layout = scripts[2]
+    # 三段 diskpart，顺序固定（标题也钉住，便于日志排错）
+    assert shell.titles == [
+        "diskpart 脚本（清盘 + 转 GPT）",
+        "diskpart 脚本（删除 MSR）",
+        "diskpart 脚本（建分区）",
+    ]
+    assert shell.scripts[0] == ["select disk 2", "clean", "convert gpt", "exit"]
+    assert shell.scripts[1] == [
+        "select disk 2",
+        "select partition 1",
+        "delete partition override",
+        "exit",
+    ]
+    layout = shell.scripts[2]
     assert "delete partition override" not in layout
     assert layout.index("create partition efi size=100") == 1
-    # 找了 1 次（命中），删完复查用满 3 次重试才确认“没有 MSR 了”；
-    # 收尾释放盘符复用复核结果里的 ESP 分区号，不会再多查一次
-    assert len(queries) == 1 + 3
+    # 一次查 MSR + 一次复查；验收只查一次
+    assert msr_calls == [2, 2]
+    assert len(shell.queries) == 1
 
 
-def test_partition_verification_failure_never_reaches_image(tmp_path):
-    """分区阶段的验收不通过 → 立刻结束，绝不写入镜像（两个阶段是分开的）。"""
+def test_partition_verification_failure_never_reaches_image(
+    tmp_path, make_runner, fake_shell, fake_process, make_snapshot
+):
+    """分区验收不通过 → 立刻结束，绝不写入镜像（两个阶段是分开的）。"""
     image = _tiny_image(tmp_path)
-    called: list[str] = []
+    payload = _payload(image)
+    parts = _parts(payload)
 
-    runner = _msr_runner(
-        _run_diskpart=lambda lines, log, timeout=600.0, **kwargs: (0, "ok"),
-        _query_partitions=lambda disk, log: _empty_disk(),
-        _verify_partitions_after_create=lambda disk, parts, log: (
-            False,
-            "第 2 个分区（Windows）大小不符：计划 122880 MB，实际 102400 MB",
-            {"problems": ["大小不符"]},
-        ),
-        _apply_image=lambda *a, **k: (called.append("image") or (0, "ok", 0.1)),
-        _write_boot=lambda *a, **k: (called.append("boot") or (0, "ok", 0.1)),
-    )
+    def broken(disk):
+        snapshot = make_snapshot(parts)
+        snapshot["partitions"][1]["size_bytes"] -= 10 * 1024 ** 3
+        return snapshot
 
-    result = runner.run(_tiny_spec(image), threading.Event())
+    shell = fake_shell(msr=None, query_handler=broken)
+    process = fake_process()
+    runner = make_runner(shell=shell, process=process)
+
+    result = runner.run(_tiny_spec(image, payload=payload), threading.Event())
 
     assert result.success is False
-    assert "分区验证不通过" in (result.error or "")
+    assert "分区验收不通过" in (result.error or "")
     assert "大小不符" in (result.error or "")
-    assert called == [], f"分区没验过就不该动镜像/引导，实际调用了 {called}"
+    assert process.calls == [], f"分区没验过就不该动镜像/引导，实际调用了 {process.calls}"
+    # 分区三个步骤仍是 ok，只有验收失败——"建好了但没验过"要说清楚
+    assert [step.status for step in result.steps if step.key in ("efi", "windows", "data")] == [
+        "ok",
+        "ok",
+        "ok",
+    ]
+    assert next(step for step in result.steps if step.key == "layout").status == "failed"
 
 
-def test_partition_step_details_carry_verification(tmp_path):
-    """分区步骤要把验证结果（对照计划的结论）挂在 details 里，便于事后排查。"""
+def test_partition_step_details_carry_verification(
+    tmp_path, make_runner, fake_shell, fake_process, make_snapshot
+):
+    """「分区验收」是独立一步，细节（对照计划的结论）挂在它的 details 里。"""
     image = _tiny_image(tmp_path)
-    runner = _msr_runner(
-        _run_diskpart=lambda lines, log, timeout=600.0, **kwargs: (0, "ok"),
-        _query_partitions=lambda disk, log: _empty_disk(),
-        _verify_partitions_after_create=lambda disk, parts, log: (
-            True,
-            "GPT、3 个分区与计划一致：#1(E:)=100.00 MB/EFI、#2(F:)=120.00 GB/Windows",
-            {
-                "efi_partition": 1,
-                "problems": [],
-                "warnings": ["第 1 个分区（EFI）没有挂上计划盘符 E"],
-                "partitions": [],
-            },
-        ),
-        **_ok_pipeline(),
-    )
+    payload = _payload(image)
+    parts = _parts(payload)
+    shell = fake_shell(msr=None, query_handler=lambda disk: make_snapshot(parts))
+    runner = make_runner(shell=shell, process=fake_process())
 
-    result = runner.run(_tiny_spec(image), threading.Event())
+    result = runner.run(_tiny_spec(image, payload=payload), threading.Event())
 
-    assert result.success is True, result.error
-    data_step = next(step for step in result.steps if step.key == "data")
-    verification = data_step.details["verification"]
-    assert "与计划一致" in verification["message"]
-    assert verification["warnings"]
-    assert verification["problems"] == []
+    layout = next(step for step in result.steps if step.key == "layout")
+    assert layout.status == "ok"
+    assert "与计划一致" in layout.message
+    assert layout.details["problems"] == []
+    assert layout.details["efi_partition"] == 1
+    assert layout.details["partitions"]
+    # 进度键固定为 7 步（含 layout）
+    assert [step.key for step in result.steps] == [
+        "efi",
+        "windows",
+        "data",
+        "layout",
+        "image",
+        "boot",
+        "verify",
+    ]
 
 
-def test_run_steps_aborts_when_msr_survives_delete(tmp_path):
-    """删 MSR 的脚本退出码 0，但复查发现它还在 → 立刻中止，绝不建分区。"""
+def test_run_steps_aborts_when_msr_survives_delete(
+    tmp_path, make_runner, fake_shell, fake_process, make_snapshot
+):
+    """删完复查还查得到 MSR → 中止，绝不继续建分区。"""
     image = _tiny_image(tmp_path)
-    scripts: list[list[str]] = []
-    state = {"deleted": False}
+    payload = _payload(image)
+    parts = _parts(payload)
+    shell = fake_shell(msr=1, query_handler=lambda disk: make_snapshot(parts))
+    runner = make_runner(shell=shell, process=fake_process())
 
-    def fake_diskpart(lines, log, timeout=600.0, **kwargs):
-        scripts.append(list(lines))
-        if any("delete partition override" in line for line in lines):
-            state["deleted"] = True  # 假装成功，但盘上其实没删掉
-        return 0, "ok"
-
-    def fake_query(disk_number, log):
-        return _msr_payload(1)  # 永远查得到 → 说明删除没生效
-
-    runner = _msr_runner(
-        _run_diskpart=fake_diskpart,
-        _query_partitions=fake_query,
-        **_ok_pipeline(),
-    )
-
-    result = runner.run(_tiny_spec(image), threading.Event())
+    result = runner.run(_tiny_spec(image, payload=payload), threading.Event())
 
     assert result.success is False
-    assert "MSR" in (result.error or "")
-    assert "仍" in (result.error or "") or "失败" in (result.error or "")
-    # 只跑了清盘 + 删 MSR 两段，没有建分区
-    assert not any("create partition" in line for script in scripts for line in script)
+    assert "删除后仍然存在" in (result.error or "")
+    assert len(shell.scripts) == 2  # 清盘 + 删 MSR，没有建分区
 
 
-def test_run_steps_aborts_when_layout_check_fails(tmp_path):
-    """建完分区复核失败（比如多了一个分区）→ 在 dism 之前就停。"""
+def test_run_steps_aborts_when_layout_check_fails(
+    tmp_path, make_runner, fake_shell, fake_process, make_snapshot
+):
+    """分区数不对 → 分区验收失败，不进镜像。"""
     image = _tiny_image(tmp_path)
-    applied: list[str] = []
+    payload = _payload(image)
+    parts = _parts(payload)
 
-    runner = _msr_runner(
-        _run_diskpart=lambda lines, log, timeout=600.0, **kwargs: (0, "ok"),
-        _query_partitions=lambda disk, log: _empty_disk(),
-        _verify_partitions_after_create=lambda disk, parts, log: (False, "分区数与计划不符（期望 3 个，实际 4 个）", {}),
-        **_ok_pipeline(
-            _apply_image=lambda image_path, index, target, log, **kwargs: (
-                applied.append("image") or 0,
-                "ok",
-                0.1,
-            ),
-        ),
-    )
+    def one_partition(disk):
+        snapshot = make_snapshot(parts)
+        snapshot["partitions"] = snapshot["partitions"][:1]
+        return snapshot
 
-    result = runner.run(_tiny_spec(image), threading.Event())
+    shell = fake_shell(msr=None, query_handler=one_partition)
+    process = fake_process()
+    runner = make_runner(shell=shell, process=process)
+
+    result = runner.run(_tiny_spec(image, payload=payload), threading.Event())
 
     assert result.success is False
     assert "分区数与计划不符" in (result.error or "")
-    assert applied == []  # 没有进入 dism
+    assert process.calls == []
 
 
-def test_run_steps_aborts_when_msr_lookup_fails(tmp_path):
+def test_run_steps_aborts_when_msr_lookup_fails(
+    tmp_path, make_runner, fake_shell, fake_process
+):
     """查不到 MSR 就整步失败：绝不在没确认的情况下继续建分区。"""
     image = _tiny_image(tmp_path)
-    scripts: list[list[str]] = []
+    payload = _payload(image)
 
-    def fake_diskpart(lines, log, timeout=600.0, **kwargs):
-        scripts.append(list(lines))
-        return 0, "ok"
-
-    def boom(disk_number, log):
+    def boom(disk_number):
         raise RunnerError("查询 MSR 分区失败")
 
-    runner = _msr_runner(_run_diskpart=fake_diskpart, _find_msr_partition=boom)
+    shell = fake_shell(msr=boom)
+    runner = make_runner(shell=shell, process=fake_process())
 
-    result = runner.run(_tiny_spec(image), threading.Event())
+    result = runner.run(_tiny_spec(image, payload=payload), threading.Event())
 
     assert result.success is False
-    assert "MSR" in (result.error or "")
-    # 只跑了清盘那一段，没有继续建分区（另一条是收尾的释放盘符）
-    assert scripts[0] == ["select disk 2", "clean", "convert gpt", "exit"]
-    assert not any("create partition" in line for script in scripts for line in script)
+    assert "无法确认 MSR 分区" in (result.error or "")
+    assert len(shell.scripts) == 1  # 只跑了清盘
 
 
 def test_cancelled_job_reports_cancelled_even_if_executor_fails():
@@ -1268,7 +1297,8 @@ def test_cancelled_job_reports_cancelled_even_if_executor_fails():
     assert job.result is not None and "已取消" in (job.result.error or "")
 
 # ------------------------------------------------------ 进度事件（job.step）
-_STAGES = ("efi", "windows", "data", "image", "boot", "verify")
+# 真实写盘的 7 个步骤：分区组（含独立的「分区验收」）+ 系统组 + 校验组
+_STAGES = ("efi", "windows", "data", "layout", "image", "boot", "verify")
 
 
 def _step_manager() -> tuple[JobManager, Job, list[tuple[str, str]]]:
@@ -1296,7 +1326,7 @@ def _step_manager() -> tuple[JobManager, Job, list[tuple[str, str]]]:
 
 
 def test_progress_counts_only_real_stages():
-    """``diskpart_preview`` 这种演练步骤不能把进度顶到 7/6。"""
+    """``diskpart_preview`` 这种演练步骤不能把进度顶到 8/7。"""
     _, job, seen = _step_manager()
 
     assert [key for key, _ in seen] == list(_STAGES)
@@ -1345,119 +1375,101 @@ def test_step_events_are_broadcast_for_every_stage():
 def _whole_disk_spec(tmp_path):
     image = tmp_path / "tiny.wim"
     image.write_bytes(b"x")
-    return SimpleNamespace(
-        disk_number=1,
-        config_payload={
-            "partition_info": _PAYLOAD["partition_info"],
-            "image_info": {"image_path": str(image), "image_index": 1},
-        },
-        drive_letters={"efi": "E", "windows": "F", "data": "G"},
-    )
+    return _tiny_spec(image)
 
 
-def _empty_disk(*_args, **_kwargs):
-    """默认的分区查询结果：GPT、没有任何保留分区、也没有剩余空间。"""
-    return {"partition_style": "GPT", "partitions": [], "largest_free": 0}
+def _ok_shell(fake_shell, make_snapshot, payload):
+    parts = _parts(payload)
+    return fake_shell(msr=None, query_handler=lambda disk: make_snapshot(parts))
 
 
-def _stub_runner(monkeypatch, runner, *, spawn=None, diskpart=None, partitions=None, layout_ok=True):
-    released: list[bool] = []
-    monkeypatch.setattr(runner, "_release_efi_letter", lambda *a, **k: released.append(True))
-    monkeypatch.setattr(
-        runner, "_run_diskpart", diskpart or (lambda lines, log, **kwargs: (0, "diskpart ok"))
-    )
-    # 分区查询与“建完复核”都走 PowerShell：这两个测试只关心 dism/bcdboot/盘符，
-    # 所以默认给一个“正常 GPT 盘”，专项测试再单独覆盖它们的失败分支。
-    monkeypatch.setattr(runner, "_query_partitions", partitions or _empty_disk)
-    monkeypatch.setattr(
-        runner,
-        "_verify_partitions_after_create",
-        lambda disk, parts, log: (layout_ok, "ok" if layout_ok else "分区数与计划不符", {}),
-    )
-    if spawn is not None:
-        monkeypatch.setattr(runner, "_spawn", spawn)
-    return released
+def test_runner_reports_dism_failure(
+    tmp_path, make_runner, fake_shell, fake_process, make_snapshot
+) -> None:
+    spec = _whole_disk_spec(tmp_path)
+    shell = _ok_shell(fake_shell, make_snapshot, spec.config_payload)
 
+    def handler(command, timeout, env):
+        if str(command[0]).endswith("dism.exe"):
+            return 87, "dism 失败", 0.1
+        return 0, "ok", 0.1
 
-def test_runner_reports_dism_failure(tmp_path, monkeypatch) -> None:
-    runner = WindowsDiskRunner(diskpart="diskpart.exe", dism="dism.exe", bcdboot="bcdboot.exe")
+    runner = make_runner(shell=shell, process=fake_process(handler=handler))
 
-    def fake_spawn(command, timeout, log, *, env=None):
-        return (87, "dism 失败", 0.1) if str(command[0]).endswith("dism.exe") else (0, "ok", 0.1)
-
-    _stub_runner(monkeypatch, runner, spawn=fake_spawn)
-
-    result = runner.run(_whole_disk_spec(tmp_path), threading.Event())
+    result = runner.run(spec, threading.Event())
 
     assert result.success is False
     image_step = next(step for step in result.steps if step.key == "image")
     assert image_step.failed is True
     assert "87" in image_step.message
+    # 引导与校验都记为“没执行”，分区步骤仍是通过的
+    statuses = {step.key: step.status for step in result.steps}
+    assert statuses["efi"] == "ok" and statuses["layout"] == "ok"
+    assert statuses["boot"] == "skipped" and statuses["verify"] == "skipped"
+    assert "跳过引导" in next(step for step in result.steps if step.key == "boot").message
 
 
-def test_runner_reports_bcdboot_failure_and_releases_letter(tmp_path, monkeypatch) -> None:
-    runner = WindowsDiskRunner(diskpart="diskpart.exe", dism="dism.exe", bcdboot="bcdboot.exe")
+def test_runner_reports_bcdboot_failure_and_releases_letter(
+    tmp_path, make_runner, fake_shell, fake_process, make_snapshot
+) -> None:
+    spec = _whole_disk_spec(tmp_path)
+    shell = _ok_shell(fake_shell, make_snapshot, spec.config_payload)
 
-    def fake_spawn(command, timeout, log, *, env=None):
-        return (2, "BFSVC Error: Could not open the BCD template store.", 0.1) if str(
-            command[0]
-        ).endswith("bcdboot.exe") else (0, "ok", 0.1)
+    def handler(command, timeout, env):
+        if str(command[0]).endswith("bcdboot.exe"):
+            return 2, "BFSVC Error: Could not open the BCD template store.", 0.1
+        return 0, "ok", 0.1
 
-    released = _stub_runner(monkeypatch, runner, spawn=fake_spawn)
+    runner = make_runner(shell=shell, process=fake_process(handler=handler))
 
-    result = runner.run(_whole_disk_spec(tmp_path), threading.Event())
+    result = runner.run(spec, threading.Event())
 
     assert result.success is False
     boot = next(step for step in result.steps if step.key == "boot")
     assert boot.failed is True
     assert "2" in boot.message
-    assert released, "bcdboot 失败也必须释放 EFI 临时盘符"
+    # bcdboot 失败也必须释放 EFI 临时盘符
+    assert shell.released == [(2, 1, "E")]
+    assert next(step for step in result.steps if step.key == "verify").status == "skipped"
 
 
-def test_runner_reports_verify_rejection(tmp_path, monkeypatch) -> None:
-    from app.models import StepResult
+def test_runner_reports_verify_rejection(
+    tmp_path, make_runner, fake_shell, fake_process, fake_verify, make_snapshot
+) -> None:
+    spec = _whole_disk_spec(tmp_path)
+    shell = _ok_shell(fake_shell, make_snapshot, spec.config_payload)
+    verify = fake_verify(ok=False, message="EFI 分区里没有 bootmgfw.efi（bcdboot 没写进去）")
+    runner = make_runner(shell=shell, process=fake_process(), verify=verify)
 
-    runner = WindowsDiskRunner(diskpart="diskpart.exe", dism="dism.exe", bcdboot="bcdboot.exe")
-    _stub_runner(monkeypatch, runner, spawn=lambda *a, **k: (0, "ok", 0.1))
-    monkeypatch.setattr(
-        runner,
-        "_verify",
-        lambda disk_number, log, letters=None, **_: StepResult(
-            key="verify",
-            title="校验分区结果",
-            status="failed",
-            message="校验不符合预期：系统分区里没有 Windows 系统文件",
-        ),
-    )
-
-    result = runner.run(_whole_disk_spec(tmp_path), threading.Event())
+    result = runner.run(spec, threading.Event())
 
     assert result.success is False
-    assert "分区校验失败" in (result.error or "")
-    verify = next(step for step in result.steps if step.key == "verify")
-    assert verify.failed is True
+    assert "bootmgfw.efi" in (result.error or "")
+    assert next(step for step in result.steps if step.key == "verify").failed is True
 
 
-def test_runner_reports_diskpart_timeout(tmp_path, monkeypatch) -> None:
-    from app.application.real_runner import RunnerError
+def test_runner_reports_diskpart_timeout(
+    tmp_path, make_runner, fake_shell, fake_process
+) -> None:
+    spec = _whole_disk_spec(tmp_path)
 
-    runner = WindowsDiskRunner(diskpart="diskpart.exe", dism="dism.exe", bcdboot="bcdboot.exe")
-
-    def boom(lines, log, **kwargs):
+    def timeout_handler(lines, title, timeout):
         raise RunnerError("命令超时（600 秒）：diskpart.exe")
 
-    _stub_runner(monkeypatch, runner, diskpart=boom)
+    shell = fake_shell(diskpart_handler=timeout_handler)
+    runner = make_runner(shell=shell, process=fake_process())
 
-    result = runner.run(_whole_disk_spec(tmp_path), threading.Event())
+    result = runner.run(spec, threading.Event())
 
     assert result.success is False
-    efi = next(step for step in result.steps if step.key == "efi")
-    assert efi.failed is True
-    assert "超时" in efi.message
+    assert "超时" in (result.error or "")
+    assert result.steps[0].failed is True
 
 
-def test_runner_refuses_tiny_layout_before_touching_disk(tmp_path, monkeypatch) -> None:
-    """下限拦截必须在 ``_wipe_script`` 之前：盘一根毛都不能动。"""
+def test_runner_refuses_tiny_layout_before_touching_disk(
+    tmp_path, make_runner, fake_shell, fake_process
+) -> None:
+    """下限拦截必须在第一次 diskpart 之前：盘一根毛都不能动。"""
     image = tmp_path / "tiny.wim"
     image.write_bytes(b"x")
     spec = SimpleNamespace(
@@ -1469,22 +1481,13 @@ def test_runner_refuses_tiny_layout_before_touching_disk(tmp_path, monkeypatch) 
         },
         drive_letters={"efi": "E", "windows": "F", "data": "G"},
     )
-    runner = WindowsDiskRunner(
-        diskpart="diskpart.exe",
-        dism="dism.exe",
-        bcdboot="bcdboot.exe",
-        powershell="powershell.exe",
-    )
-    scripts: list[list[str]] = []
-
-    def record(lines, log, **kwargs):
-        scripts.append(list(lines))
-        return 0, "diskpart ok"
-
-    _stub_runner(monkeypatch, runner, diskpart=record)
+    shell = fake_shell()
+    runner = make_runner(shell=shell, process=fake_process())
 
     result = runner.run(spec, threading.Event())
 
     assert result.success is False
     assert "分区过小" in (result.error or "")
-    assert scripts == []  # 一段 diskpart 都没跑过
+    assert shell.scripts == []
+
+

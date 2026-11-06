@@ -36,12 +36,26 @@ def test_partition_module_is_gone() -> None:
 
 
 def test_backend_has_no_partition_tool_endpoints() -> None:
+    """后端不能有 B 那套"在现有系统盘上建/删/格式化分区"的接口。
+
+    例外：``/api/partition/preview`` 是**只读**的脚本预览（与执行器同源生成，
+    不执行任何命令），属于装机向导的一部分，不是 B 套能力。
+    """
     server = SERVER.read_text(encoding="utf-8")
     api = API.read_text(encoding="utf-8")
-    assert "/api/partition" not in server
-    assert "partition_plan" not in api
-    assert "partition_execute" not in api
-    assert "PartitionRunner" not in api
+    # 只剩只读预览
+    without_preview = server.replace("/api/partition/preview", "")
+    assert "/api/partition" not in without_preview
+    for forbidden in (
+        "partition_execute",
+        "partition_create",
+        "partition_delete",
+        "partition_format",
+        "partition_assign",
+        "PartitionRunner",
+    ):
+        assert forbidden not in api
+        assert forbidden not in server
 
 
 def test_frontend_has_no_partition_tool() -> None:
@@ -50,7 +64,11 @@ def test_frontend_has_no_partition_tool() -> None:
     api_js = (UI / "js" / "api.js").read_text(encoding="utf-8")
     assert 'data-act="partition"' not in index
     assert "openPartitionDialog" not in dialogs
-    assert "/api/partition" not in api_js
+    # 前端只允许只读预览（``partitionPreview``），不允许建/删/格式化分区
+    without_preview = api_js.replace("/api/partition/preview", "")
+    assert "/api/partition" not in without_preview
+    for forbidden in ("partitionCreate", "partitionDelete", "partitionFormat", "partitionAssign"):
+        assert forbidden not in api_js
 
 
 def test_letter_suggestion_helpers_are_gone() -> None:

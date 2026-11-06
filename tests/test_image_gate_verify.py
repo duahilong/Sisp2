@@ -12,7 +12,9 @@ from types import SimpleNamespace
 from typing import Any
 
 from app.application.contracts import DiskInfo
-from app.application.real_runner import WindowsDiskRunner, _verify_verdict
+from app.application.phases.base import PhaseContext
+from app.application.phases.verify import BootVerifyPhase
+from app.application.real_runner import _verify_verdict
 from app.application.workflow import WorkflowController, _image_problems
 from app.models import WorkerResult
 from app.preflight import CHECK_IMAGE_TYPE, run_preflight_checks
@@ -274,10 +276,12 @@ class _StubLog:
 
 def test_verify_script_receives_letters(monkeypatch):
     """verify 要靠 EFI/Windows 盘符去查文件，所以必须把它们传进 PowerShell 环境。"""
-    runner = WindowsDiskRunner(
-        diskpart="diskpart.exe", dism="dism.exe", bcdboot="bcdboot.exe",
-        powershell="powershell.exe",
-    )
+    import threading
+
+    from app.application.command_log import CommandLog
+    from app.application.partitions import plan_partitions
+    from app.application.shell import ProcessShell
+
     captured: dict[str, Any] = {}
 
     def fake_run(command, **kwargs):
@@ -288,10 +292,34 @@ def test_verify_script_receives_letters(monkeypatch):
             stderr=b"",
         )
 
-    monkeypatch.setattr("app.application.real_runner.subprocess.run", fake_run)
-    result = runner._verify(1, _StubLog(), {"efi": "F", "windows": "G"})
+    monkeypatch.setattr("app.application.shell.subprocess.run", fake_run)
+    payload = {
+        "partition_info": {
+            "efi_size_mb": 100,
+            "c_size_gb": 120,
+            "data_size_gb": "auto",
+            "allow_small_partitions": True,
+        }
+    }
+    letters = {"efi": "F", "windows": "G", "data": "H"}
+    parts = plan_partitions(payload, letters=letters)
+    shell = ProcessShell(
+        log=CommandLog(None), allow_real_disk=False, source="verify-test"
+    )
+    phase = BootVerifyPhase(shell, powershell="powershell.exe")
+    ctx = PhaseContext(
+        disk_number=1,
+        parts=parts,
+        letters=letters,
+        image_path=None,
+        image_index=1,
+        cancel=threading.Event(),
+        log=CommandLog(None),
+    )
+    outcome = phase.run(ctx)
 
-    assert result.status == "ok"
+    assert outcome.ok is True
+    assert outcome.results[-1].status == "ok"
     assert captured["env"]["VIX_EFI_LETTER"] == "F"
     assert captured["env"]["VIX_WINDOWS_LETTER"] == "G"
 

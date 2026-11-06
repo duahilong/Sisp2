@@ -15,7 +15,6 @@ from typing import Any
 
 import pytest
 
-from app.application.real_runner import WindowsDiskRunner
 from app.application.workflow import WorkflowController
 from app.models import WorkerResult
 from app.preflight import CHECK_SETTING_PATHS, CHECK_TOOLS, run_preflight_checks
@@ -165,131 +164,140 @@ def test_workflow_survives_broken_settings_provider() -> None:
 
 
 # ------------------------------------------------------------------ 执行器
-def _capture_runner() -> tuple[WindowsDiskRunner, list[list[str]]]:
-    runner = WindowsDiskRunner(
-        diskpart="diskpart.exe",
-        dism="dism.exe",
-        bcdboot="bcdboot.exe",
-        powershell="powershell.exe",
-    )
-    commands: list[list[str]] = []
+def _image_phase(commands: list[list[str]], **kwargs):
+    """用替身 ProcessShell 构造 ImagePhase，记录拼出来的命令。"""
+    from app.application.command_log import CommandLog
+    from app.application.phases.system import ImagePhase
+    from app.application.shell import ProcessShell
 
-    def fake_spawn(command, timeout, log, *, env=None):
+    def fake_run(command, timeout, *, env=None):
         commands.append(list(command))
         return 0, "ok", 0.1
 
-    runner._spawn = fake_spawn  # type: ignore[method-assign]
-    return runner, commands
+    shell = ProcessShell(log=CommandLog(None), runner=fake_run)
+    return ImagePhase(shell, dism="dism.exe")
+
+
+def _boot_phase(commands: list[list[str]]):
+    from app.application.command_log import CommandLog
+    from app.application.phases.system import BootPhase
+    from app.application.shell import ProcessShell
+
+    def fake_run(command, timeout, *, env=None):
+        commands.append(list(command))
+        return 0, "ok", 0.1
+
+    shell = ProcessShell(log=CommandLog(None), runner=fake_run)
+    return BootPhase(shell, bcdboot="bcdboot.exe")
+
+
+def _ctx(options=None, letters=None):
+    import threading
+
+    from app.application.command_log import CommandLog
+    from app.application.phases.base import PhaseContext
+
+    return PhaseContext(
+        disk_number=1,
+        parts=(),
+        letters=letters or {"efi": "E", "windows": "F", "data": "G"},
+        image_path=r"D:\images\win11.wim",
+        image_index=1,
+        cancel=threading.Event(),
+        log=CommandLog(None),
+        options=options or {},
+    )
 
 
 def test_apply_image_passes_unattend_and_drivers() -> None:
-    from app.application.real_runner import _CommandLog
-
-    runner, commands = _capture_runner()
-    code, _out, _elapsed = runner._apply_image(
-        r"D:\images\win11.wim",
-        2,
-        "F:\\",
-        _CommandLog(None),
-        options={"unattend_path": r"D:\answer.xml", "drivers_path": r"D:\drivers"},
-    )
-    assert code == 0
+    commands: list[list[str]] = []
+    phase = _image_phase(commands)
+    ctx = _ctx(options={"unattend_path": "D:/answer.xml", "drivers_path": "D:/drivers"})
+    outcome = phase.run(replace_image_index(ctx, 2))
+    assert outcome.ok is True
     command = commands[0]
-    assert "/Apply-Unattend:D:\\answer.xml" in command
-    assert "/Add-Driver:D:\\drivers" in command
+    assert "/Apply-Unattend:D:/answer.xml" in command
+    assert "/Add-Driver:D:/drivers" in command
     assert "/Recurse" in command
 
 
-def test_apply_image_without_options_is_unchanged() -> None:
-    from app.application.real_runner import _CommandLog
+def replace_image_index(ctx, index):
+    from dataclasses import replace
 
-    runner, commands = _capture_runner()
-    runner._apply_image(r"D:\images\win11.wim", 1, "F:\\", _CommandLog(None))
+    return replace(ctx, image_index=index)
+
+
+def test_apply_image_without_options_is_unchanged() -> None:
+    commands: list[list[str]] = []
+    phase = _image_phase(commands)
+    phase.run(_ctx())
     command = commands[0]
     assert not any("Unattend" in part for part in command)
     assert not any("Add-Driver" in part for part in command)
 
 
 def test_write_boot_uses_settings_boot_source() -> None:
-    from app.application.real_runner import _CommandLog
-
-    runner, commands = _capture_runner()
-    letters = {"efi": "E", "windows": "F", "data": "G"}
-    runner._write_boot(letters, _CommandLog(None), options={"boot_source": r"D:\boot"})
-    assert commands[0] == ["bcdboot.exe", r"D:\boot", "/s", "E:", "/f", "UEFI"]
+    commands: list[list[str]] = []
+    phase = _boot_phase(commands)
+    phase.run(_ctx(options={"boot_source": "D:/boot"}))
+    assert commands[0] == ["bcdboot.exe", "D:/boot", "/s", "E:", "/f", "UEFI"]
 
 
 def test_write_boot_defaults_to_windows_dir() -> None:
-    from app.application.real_runner import _CommandLog
-
-    runner, commands = _capture_runner()
-    letters = {"efi": "E", "windows": "F", "data": "G"}
-    runner._write_boot(letters, _CommandLog(None))
-    assert commands[0] == ["bcdboot.exe", "F:\\Windows", "/s", "E:", "/f", "UEFI"]
+    commands: list[list[str]] = []
+    phase = _boot_phase(commands)
+    phase.run(_ctx())
+    windows = "F:" + chr(92) + "Windows"
+    assert commands[0] == ["bcdboot.exe", windows, "/s", "E:", "/f", "UEFI"]
 
 
 def test_runtime_env_creates_temp_dir(tmp_path) -> None:
-    from app.application.real_runner import _CommandLog
+    from app.application.command_log import CommandLog
+    from app.application.runner_utils import runtime_env
 
     temp = tmp_path / "scratch"
-    env = WindowsDiskRunner._runtime_env({"temp_dir": str(temp)}, _CommandLog(None))
+    env = runtime_env({"temp_dir": str(temp)}, CommandLog(None))
     assert temp.is_dir()
     assert env["TMP"] == str(temp)
     assert env["TEMP"] == str(temp)
 
 
-def test_runner_accepts_runner_options_on_spec(tmp_path, monkeypatch) -> None:
+def test_runner_accepts_runner_options_on_spec(
+    tmp_path, make_runner, fake_shell, fake_process, make_snapshot
+) -> None:
     """整条链路：spec.runner_options 会传到 dism/bcdboot 的命令行。"""
+    from app.application.partitions import plan_partitions
+
     image = tmp_path / "tiny.wim"
     image.write_bytes(b"x")
-    runner = WindowsDiskRunner(
-        diskpart="diskpart.exe",
-        dism="dism.exe",
-        bcdboot="bcdboot.exe",
-        powershell="powershell.exe",
-    )
-    commands: list[list[str]] = []
-
-    def fake_run_diskpart(lines, log, timeout=600.0, **kwargs):
-        commands.append(list(lines))
-        return 0, "ok"
-
-    def fake_spawn(command, timeout, log, *, env=None):
-        commands.append(list(command))
-        return 0, "ok", 0.1
-
-    runner._run_diskpart = fake_run_diskpart  # type: ignore[method-assign]
-    runner._spawn = fake_spawn  # type: ignore[method-assign]
-    runner._verify = lambda disk_number, log, letters=None, **_: SimpleNamespace(failed=False)  # type: ignore[method-assign]
-    # 分区查询/建完复核走 PowerShell，这里不关心，给一个“正常 GPT、无 MSR”的答案
-    runner._query_partitions = lambda disk, log: {  # type: ignore[method-assign]
-        "partition_style": "GPT",
-        "partitions": [],
-        "largest_free": 0,
+    payload = {
+        "partition_info": {
+            "efi_size_mb": 100,
+            "c_size_gb": 3,
+            "data_size_gb": "auto",
+            # 单测用小尺寸：显式放宽后端下限（C ≥ 60 GB）
+            "allow_small_partitions": True,
+        },
+        "image_info": {"image_path": str(image), "image_index": 1},
     }
-    runner._verify_partitions_after_create = (  # type: ignore[method-assign]
-        lambda disk, parts, log: (True, "ok", {"efi_partition": 1})
+    letters = {"efi": "E", "windows": "F", "data": "G"}
+    parts = plan_partitions(payload, letters=letters)
+    shell = fake_shell(query_handler=lambda disk: make_snapshot(parts), msr=None)
+    process = fake_process()
+    runner = make_runner(
+        shell=shell, process=process, dism="dism.exe", bcdboot="bcdboot.exe"
     )
 
     spec = SimpleNamespace(
         disk_number=1,
-        config_payload={
-            "partition_info": {
-                "efi_size_mb": 100,
-                "c_size_gb": 3,
-                "data_size_gb": "auto",
-                # 单测用小尺寸：显式放宽后端下限（C ≥ 60 GB）
-                "allow_small_partitions": True,
-            },
-            "image_info": {"image_path": str(image), "image_index": 1},
-        },
-        drive_letters={"efi": "E", "windows": "F", "data": "G"},
-        runner_options={"unattend_path": r"D:\answer.xml"},
+        config_payload=payload,
+        drive_letters=letters,
+        runner_options={"unattend_path": "D:/answer.xml"},
     )
     result = runner.run(spec, threading.Event())
 
     assert result.success is True, result.error
-    assert any("/Apply-Unattend:D:\\answer.xml" in command for command in commands)
+    assert any("/Apply-Unattend:D:/answer.xml" in command for command in process.calls)
 
 
 @pytest.mark.parametrize("bad", ["", "   "])
@@ -310,25 +318,25 @@ def _noop(*_args: Any, **_kwargs: Any) -> WorkerResult:
 
 def test_diskpart_script_written_into_configured_temp_dir(tmp_path) -> None:
     """sysTemp 不只改子进程 TMP/TEMP：自己的 diskpart 脚本也要放进去。"""
-    runner = WindowsDiskRunner(
-        diskpart="diskpart.exe",
-        dism="dism.exe",
-        bcdboot="bcdboot.exe",
-        powershell="powershell.exe",
-    )
-    from app.application.real_runner import _CommandLog
+    from app.application.command_log import CommandLog
+    from app.application.shell import DiskpartShell, ProcessShell
 
-    log = _CommandLog(None)
     seen: dict[str, Any] = {}
 
-    def fake_spawn(command, timeout, log, *, env=None):
+    def fake_run(command, timeout, *, env=None):
         script = pathlib.Path(command[2])
         seen["parent"] = script.parent
         seen["existed"] = script.exists()
         return 0, "", 0.1
 
-    runner._spawn = fake_spawn  # type: ignore[assignment]
-    runner._run_diskpart(["exit"], log, temp_dir=str(tmp_path))
+    process = ProcessShell(log=CommandLog(None), runner=fake_run)
+    shell = DiskpartShell(
+        log=CommandLog(None),
+        diskpart="diskpart.exe",
+        temp_dir=str(tmp_path),
+        process=process,
+    )
+    shell.run_diskpart(["exit"])
 
     assert seen["parent"] == tmp_path
     assert seen["existed"] is True
