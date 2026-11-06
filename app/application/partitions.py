@@ -35,6 +35,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from app.application.contracts import format_size
+from app.application.runner_utils import to_int, to_text
 from app.drive_letters import letter_roles
 
 BYTES_PER_MB = 1024 * 1024
@@ -467,3 +468,238 @@ def diskpart_lines(parts: Sequence[PlannedPartition]) -> list[str]:
         if part.letter:
             lines.append(f"assign letter={part.letter}")
     return lines
+
+
+# ---------------------------------------------------------------- 脚本生成（纯）
+#
+# 三段 diskpart 脚本的**行生成**都在这里，而不是散在执行器里：
+# ``SispService.build_diskpart_preview()``（dry-run 预览）与真实执行器共用同一个
+# 生成器，改段数 / 加语句不可能只改一端——预览与真跑漂移是历史上真实存在过的坑。
+
+def wipe_lines(disk_number: int) -> list[str]:
+    """第 1 段：清盘并转 GPT。
+
+    ``convert gpt`` 会顺手在盘首建一个 16 MB 的 MSR（Windows 的行为，不是脚本里的
+    命令），所以这一段之后要查到它、单独删掉并复查（见 ``msr_delete_lines``）。
+    """
+    return [f"select disk {int(disk_number)}", "clean", "convert gpt", "exit"]
+
+
+def msr_delete_lines(disk_number: int, msr_partition: int | None) -> list[str]:
+    """第 2 段：只删 MSR，不顺手建分区。
+
+    单独一段是为了"删完立刻复查"：和建分区合在一条脚本里，删失败就只能看整条
+    脚本的退出码，定位不到哪一步，也没机会在清盘后马上收手。
+    ``msr_partition`` 必须来自对真实磁盘的查询；``None`` 表示不删任何东西。
+    """
+    return [f"select disk {int(disk_number)}", *strip_msr_lines(msr_partition), "exit"]
+
+
+def create_partition_lines(disk_number: int, parts: Sequence[PlannedPartition]) -> list[str]:
+    """第 3 段：建 EFI / C / D(+E)；最后一项不带 ``size=``（吃满剩余空间）。"""
+    return [f"select disk {int(disk_number)}", *diskpart_lines(parts), "exit"]
+
+
+def preview_segments(
+    disk_number: int,
+    parts: Sequence[PlannedPartition],
+) -> list[dict[str, Any]]:
+    """dry-run / 确认页用的分段预览（真实脚本就是这些 ``lines``）。
+
+    ``dynamic`` 为真的段在执行时才知道具体行（MSR 分区号要现场查），
+    预览里用 ``REM`` 占位并附一句 ``note``。
+    """
+    return [
+        {
+            "key": "wipe",
+            "title": "清盘 + 转 GPT",
+            "lines": wipe_lines(disk_number),
+            "dynamic": False,
+            "note": "convert gpt 会自动建 16 MB 的 MSR，下一步删掉它",
+        },
+        {
+            "key": "msr",
+            "title": "删除 convert gpt 自动生成的 MSR（删完立刻复查）",
+            "lines": [
+                f"select disk {int(disk_number)}",
+                "REM 实际执行时按 GPT 类型查出 MSR 分区号（查不到就跳过本段）",
+                "REM select partition <MSR 分区号>",
+                "REM delete partition override",
+                "exit",
+            ],
+            "dynamic": True,
+            "note": "查询失败会中止，绝不猜一个分区号去删",
+        },
+        {
+            "key": "create",
+            "title": "建分区（最后一项不带 size=，由 diskpart 吃掉剩余空间）",
+            "lines": create_partition_lines(disk_number, parts),
+            "dynamic": False,
+            "note": "",
+        },
+    ]
+
+
+def preview_text(disk_number: int, parts: Sequence[PlannedPartition]) -> str:
+    """把三段预览拼成一段可直接展示的文本（确认页 / dry-run 日志用）。"""
+    segments = preview_segments(disk_number, parts)
+    lines = ["REM === dry-run 预览：以下命令不会被执行 ==="]
+    for index, segment in enumerate(segments, start=1):
+        lines.append(f"REM === {index}/{len(segments)} {segment['title']} ===")
+        lines.extend(segment["lines"])
+        if segment["note"]:
+            lines.append(f"REM 说明：{segment['note']}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- 分区验收（纯）
+
+def is_reserved_partition(part: Mapping[str, Any]) -> bool:
+    """这个分区是不是 MSR / 保留分区。
+
+    ``convert gpt`` 会自动在盘首建一个 16 MB MSR，执行器删掉它之后会**立刻复查**，
+    分区验收里再查一次：多出来一个 Reserved 就说明删除没生效或者 MSR 又回来了。
+    """
+    gpt = str(part.get("gpt_type") or "").strip().lower().strip("{}")
+    if gpt == MSR_GPT:
+        return True
+    return str(part.get("type") or "").strip().lower() == "reserved"
+
+
+def partition_verdict(
+    payload: Mapping[str, Any],
+    parts: Sequence[PlannedPartition],
+) -> tuple[bool, str, dict[str, Any]]:
+    """对照**分区计划**逐项验证盘上的实际结果（分区验收的唯一判据）。
+
+    这一关只看“分区做对了没有”，不要求镜像/引导已经写进去，所以它在
+    ``dism``（最长 3 小时）之前就能把问题拦住。检查项与计划的对应关系：
+
+    ==================  ==========================================================
+    分区表与数量        GPT、分区数 == 计划数、没有 Reserved/MSR
+    顺序与类型          按 offset 排序后的第 i 个分区，GPT 类型必须是计划里的那个
+                        （EFI → ESP GUID，C/D/E → Basic Data）
+    容量                显式分区 |实际 − 计划| ≤ 1 MB；最后那个 auto 分区不能用显式
+                        值去比，但要够自己的下限
+    容量闭合            sum(实际分区) + GPT 首尾 2 MB == 盘容量（±2 MB）
+    盘符                计划里的盘符必须真的挂在这个分区上（C/D/E 硬校验；ESP 的
+                        临时字母在 Get-Partition 里看不到，用 WMI 关联查，查不到
+                        只记 warning）
+    卷标                EFI / Windows / Data / Data2 —— 与计划一致
+    文件系统            FAT32 / NTFS / exFAT —— 与计划一致
+    盘已吃满            LargestFreeExtent ≤ 2 MB（最后一个分区不带 size=）
+    ==================  ==========================================================
+
+    纯函数：输入是 PowerShell 查到的真实分区表 + 计划，方便用假 payload 测每一条
+    失败分支。返回 ``(ok, message, details)``，``details`` 里带 ``problems`` /
+    ``warnings`` / ``efi_partition``（供收尾释放盘符复用）。
+    """
+    actual = payload.get("partitions") or []
+    if isinstance(actual, Mapping):
+        actual = [actual]
+    actual = [part for part in actual if isinstance(part, Mapping)]
+    style = str(payload.get("partition_style") or "?").strip().upper()
+    disk_size = to_int(payload.get("disk_size_bytes")) or 0
+    largest_free = to_int(payload.get("largest_free")) or 0
+
+    problems: list[str] = []
+    warnings: list[str] = []
+
+    if style != "GPT":
+        problems.append(f"分区表不是 GPT（{style}）")
+
+    if len(actual) != len(parts):
+        problems.append(f"分区数与计划不符（期望 {len(parts)} 个，实际 {len(actual)} 个）")
+
+    reserved = [part for part in actual if is_reserved_partition(part)]
+    if reserved:
+        problems.append("盘上还有保留分区（MSR），预期布局是 EFI + C + D(+E)")
+
+    # 按物理顺序（offset）对照计划：第 i 个分区应当就是计划里的第 i 个
+    ordered = sorted(actual, key=lambda part: to_int(part.get("offset_bytes")) or 0)
+    for index, (got, want) in enumerate(zip(ordered, parts, strict=False), start=1):
+        where = f"第 {index} 个分区（{want.label}）"
+        expect_gpt = ESP_GPT if want.role == "efi" else BASIC_GPT
+        got_gpt = str(got.get("gpt_type") or "").strip("{}").lower()
+        if got_gpt and got_gpt != expect_gpt:
+            problems.append(f"{where}的 GPT 类型不对（{got_gpt or '空'}）")
+
+        got_mb = (to_int(got.get("size_bytes")) or 0) / BYTES_PER_MB
+        if want.size_mb is not None and abs(got_mb - want.size_mb) > 1:
+            problems.append(f"{where}大小不符：计划 {want.size_mb} MB，实际 {got_mb:.0f} MB")
+
+        # 盘符：ESP 的临时字母在 Get-Partition 里看不到（隐藏卷），
+        # WMI 关联能查到；两者都查不到才算问题（ESP 只告警，因为它收尾就释放）。
+        got_letter = to_text(got.get("drive_letter")) or to_text(got.get("mounted_letter"))
+        want_letter = to_text(want.letter)
+        if want_letter:
+            if not got_letter:
+                message = f"{where}没有挂上计划盘符 {want_letter}"
+                (warnings if want.role == "efi" else problems).append(message)
+            elif got_letter.strip().upper()[:1] != want_letter.strip().upper()[:1]:
+                problems.append(
+                    f"{where}盘符不符：计划 {want_letter}:，实际 {got_letter.upper()}:"
+                )
+
+        got_label = to_text(got.get("label"))
+        if got_label is not None and got_label.casefold() != want.label.casefold():
+            problems.append(f"{where}卷标不符：计划 {want.label}，实际 {got_label}")
+
+        got_fs = to_text(got.get("file_system"))
+        if got_fs is not None and got_fs.casefold() != want.file_system.casefold():
+            problems.append(f"{where}文件系统不符：计划 {want.file_system}，实际 {got_fs}")
+
+    # 最后一个分区是 auto（不带 size=）：核对它吃到了下限以上，且没有留下大块空闲
+    explicit_mb = sum(int(part.size_mb) for part in parts if part.size_mb is not None)
+    if disk_size > 0:
+        used_mb = sum((to_int(part.get("size_bytes")) or 0) for part in actual) / BYTES_PER_MB
+        slack_mb = disk_size / BYTES_PER_MB - used_mb
+        # GPT 首尾各 1 MB 是正常开销；超出 2 MB 说明中间留了未分配
+        if slack_mb > 2:
+            problems.append(f"盘上有 {slack_mb:.0f} MB 未分配（最后分区应当吃满）")
+        if abs(slack_mb) > 2 and used_mb > 0:
+            problems.append(
+                f"容量对不上：分区合计 {used_mb:.0f} MB，盘容量 {disk_size / BYTES_PER_MB:.0f} MB"
+            )
+        auto = [part for part in parts if part.size_mb is None]
+        if auto and used_mb > 0:
+            auto_mb = used_mb - explicit_mb
+            minimum_gb = MIN_DATA_GB if auto[-1].role == "data" else MIN_EXTRA_DATA_GB
+            if auto_mb < minimum_gb * 1024:
+                problems.append(
+                    f"{auto[-1].label} 只剩 {auto_mb / 1024:.1f} GB，低于下限 {minimum_gb} GB"
+                )
+    if largest_free > 2 * BYTES_PER_MB:
+        problems.append(f"盘上还有 {format_size(largest_free)} 未分配（最后分区应当吃满）")
+
+    summary = "、".join(
+        f"#{part.get('number')}"
+        f"{('(' + str(part.get('drive_letter') or part.get('mounted_letter')) + ':)' if (part.get('drive_letter') or part.get('mounted_letter')) else '')}"
+        f"={format_size(part.get('size_bytes'))}"
+        f"{('/' + str(part.get('label'))) if part.get('label') else ''}"
+        for part in ordered
+    )
+    esp = next(
+        (
+            to_int(part.get("number"))
+            for part in ordered
+            if str(part.get("gpt_type") or "").strip("{}").lower() == ESP_GPT
+        ),
+        None,
+    )
+    details: dict[str, Any] = {
+        "partition_style": style,
+        "partitions": actual,
+        "disk_size_bytes": disk_size,
+        "largest_free": largest_free,
+        "efi_partition": esp,
+        "problems": problems,
+        "warnings": warnings,
+        "check": "partition_phase",
+    }
+    if problems:
+        return False, "；".join(problems) + f"（实际：{summary or '无分区'}）", details
+    message = f"GPT、{len(actual)} 个分区与计划一致：{summary}"
+    if warnings:
+        message += "；" + "；".join(warnings)
+    return True, message, details

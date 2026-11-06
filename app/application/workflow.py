@@ -46,6 +46,7 @@ from app.application.partitions import (
 )
 from app.application.real_runner import build_real_runner
 from app.application.service import SispService
+from app.application.steps import phases_payload
 from app.models import WorkerResult
 from app.modules.image.service import IMAGE_SUFFIXES
 from app.orchestrator import build_worker_disk_identity
@@ -1121,6 +1122,8 @@ class WorkflowController:
             blockers=tuple(dict.fromkeys(blockers)),
             partition_plan=tuple(part.to_dict() for part in planned_parts),
             unallocated_bytes=unallocated_bytes(planned_parts, disk.size_bytes),
+            # 声明式编排：前端按分组渲染（分区组含独立的「分区验收」）。
+            phases=tuple(phases_payload()),
         )
         spec = JobSpec(
             disk_number=disk.disk_number,

@@ -45,9 +45,11 @@ from app.application.contracts import (
 )
 from app.application.partitions import (
     PartitionLayoutError,
-    diskpart_lines,
     plan_partitions,
+    preview_segments,
+    preview_text,
 )
+from app.application.steps import STEP_TITLES
 from app.models import STEP_SKIPPED, StepResult, WorkerResult
 from app.orchestrator import build_worker_disk_identity, identity_matches, is_strong_identity
 from app.preflight import load_config, resolve_config_path
@@ -610,6 +612,13 @@ class SispService:
                 details={"letter": letters.get("data"), "size_gb": self._data_size_gb(payload)},
             ),
             StepResult(
+                key="layout",
+                title=STEP_TITLES["layout"],
+                status=STEP_SKIPPED,
+                message="dry-run 未执行",
+                details={"check": "partition_phase"},
+            ),
+            StepResult(
                 key="image",
                 title="应用镜像",
                 status=STEP_SKIPPED,
@@ -625,7 +634,7 @@ class SispService:
             ),
             StepResult(
                 key="verify",
-                title="校验分区与引导",
+                title=STEP_TITLES["verify"],
                 status=STEP_SKIPPED,
                 message="dry-run 未执行",
                 details={},
@@ -690,40 +699,35 @@ class SispService:
         payload: Mapping[str, Any],
         letters: Mapping[str, str],
     ) -> str:
-        """生成 diskpart 脚本文本用于预览；**不会**被本模块执行。"""
+        """生成 diskpart 脚本文本用于预览；**不会**被本模块执行。
+
+        脚本来自 :func:`app.application.partitions.preview_segments`——与真实
+        执行器同一套生成器，所以"预览和真跑不一样"这类漂移在机制上不存在。
+        """
         image_info = payload.get("image_info")
         image_path = None
         if isinstance(image_info, Mapping):
             image_path = _text(image_info.get("image_path"))
-
-        lines = [
-            "REM === dry-run 预览：以下命令不会被执行 ===",
-            "REM === 1/3 清盘 + 转 GPT ===",
-            f"select disk {disk_number}",
-            "clean",
-            "convert gpt",
-            "exit",
-            "REM === 2/3 删除 convert gpt 自动生成的 MSR（删完立刻复查）===",
-            f"select disk {disk_number}",
-            "REM 实际执行时这里会按 GPT 类型查出 MSR 分区号（查不到就跳过）：",
-            "REM select partition <MSR 分区号>",
-            "REM delete partition override",
-            "exit",
-            "REM === 3/3 建分区（最后一项不带 size=，由 diskpart 吃掉剩余空间）===",
-            f"select disk {disk_number}",
-        ]
         try:
             parts = plan_partitions(payload, letters=letters)
         except PartitionLayoutError as exc:
             # 分区配置不合法也要能看完预览，而不是把演练步弄成异常。
-            lines.append(f"REM 分区配置不合法：{exc}")
-            lines.append("exit")
-            return "\n".join(lines)
-        lines.extend(diskpart_lines(parts))
-        lines.append("exit")
+            lines = ["REM === dry-run 预览：以下命令不会被执行 ===", f"REM 分区配置不合法：{exc}"]
+            return chr(10).join(lines)
+        script = preview_text(disk_number, parts)
         if image_path:
-            lines.append(f'REM 镜像：{image_path}（由应用层接管，不经 diskpart）')
-        return "\n".join(lines)
+            script += chr(10) + f"REM 镜像：{image_path}（由应用层接管，不经 diskpart）"
+        return script
+
+    def build_diskpart_segments(
+        self,
+        disk_number: int,
+        payload: Mapping[str, Any],
+        letters: Mapping[str, str],
+    ) -> list[dict[str, Any]]:
+        """分段预览（``POST /api/partition/preview`` 的 ``data.segments``）。"""
+        parts = plan_partitions(payload, letters=letters)
+        return preview_segments(disk_number, parts)
 
     # ------------------------------------------------------------------ 其他
     def config_path_or_default(self) -> Path | None:

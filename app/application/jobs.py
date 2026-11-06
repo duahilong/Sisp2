@@ -39,6 +39,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from app.application.steps import STEP_KEYS, group_progress
 from app.models import WorkerResult
 
 _LOGGER = logging.getLogger(__name__)
@@ -53,18 +54,17 @@ STEP_RUNNING = "running"
 
 
 def _step_keys() -> tuple[str, ...]:
-    """真实执行器的阶段键（``efi/windows/data/image/boot/verify``）。"""
-    try:
-        from app.application.real_runner import STEP_TITLES
+    """真实写盘的步骤键（``efi/windows/data/layout/image/boot/verify``）。
 
-        return tuple(STEP_TITLES)
-    except Exception:  # noqa: BLE001 - 进度显示不能拖死任务
-        return ()
+    从 :mod:`app.application.steps` 取：步骤契约是纯数据，进度层不再反向
+    import 执行器（以前 ``jobs`` 依赖 ``real_runner.STEP_TITLES``）。
+    """
+    return STEP_KEYS
 
 
 def _step_total() -> int:
-    """一次真实写盘的总步数（六步）；真实执行器不可用时退回 6。"""
-    return len(_step_keys()) or 6
+    """一次真实写盘的总步数（七步，含独立的「分区验收」）。"""
+    return len(STEP_KEYS)
 
 
 def _now() -> str:
@@ -114,6 +114,9 @@ class ExecutionPlan:
     partition_plan: tuple[dict[str, Any], ...] = ()
     # 按计划建完之后剩下的未分配空间；界面提示“容量会闲置”。
     unallocated_bytes: int = 0
+    # 声明式编排（``steps.phases_payload()``）：前端按它渲染分组进度，
+    # 分区组（含「分区验收」）与系统组在界面上是两段，不再硬编码步骤表。
+    phases: tuple[dict[str, Any], ...] = ()
 
     @property
     def executable(self) -> bool:
@@ -136,6 +139,7 @@ class ExecutionPlan:
             "blockers": list(self.blockers),
             "partition_plan": [dict(item) for item in self.partition_plan],
             "unallocated_bytes": self.unallocated_bytes,
+            "phases": [dict(item) for item in self.phases],
             "executable": self.executable,
         }
 
@@ -454,8 +458,8 @@ class JobManager:
     def _make_reporter(self, job: Job) -> Callable[..., None]:
         """构造 ``on_step`` 回调：更新 ``Job.progress`` 并广播 ``job.step``。
 
-        只有真实写盘的六个阶段算进度；像 ``diskpart_preview`` 这种演练期
-        附加步骤照样发事件，但不进 ``completed``，否则进度条会显示成 7/6。
+        只有真实写盘的七个阶段算进度（含独立的「分区验收」）；像
+        ``diskpart_preview`` 这种演练期附加步骤照样发事件，但不进 ``completed``。
         """
         total = _step_total()
         stages = set(_step_keys())
@@ -479,6 +483,9 @@ class JobManager:
                     "current": current,
                     "percent": min(percent, 100),
                     "message": message,
+                    # 声明式分组进度：前端按"硬盘分区 / 写入系统 / 装机校验"三段渲染，
+                    # 分区失败时后面两段可以直接标成"未执行"。
+                    "groups": group_progress(completed, current),
                 }
                 job.updated_at = _now()
                 snapshot = dict(job.progress)
