@@ -733,9 +733,9 @@ class _FakeService:
         return SimpleNamespace(passed=True, message="配置可解析", error_code=0)
 
 
-def _controller(tmp_path, image_name: str = "win11.wim") -> WorkflowController:
+def _controller(tmp_path, image_name: str = "win11.GHO") -> WorkflowController:
     image = tmp_path / image_name
-    image.write_bytes(b"wim")
+    image.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
 
     def preflight(config_path=None, dry_run=False):
         return {
@@ -755,7 +755,6 @@ def _controller(tmp_path, image_name: str = "win11.wim") -> WorkflowController:
         service=_FakeService([_disk(1)]),
         dry_run=True,
         preflight_runner=preflight,
-        image_indexes=lambda path: [1],
     )
 
 
@@ -851,8 +850,8 @@ def test_prepare_without_extra_partition_keeps_three_letters(tmp_path) -> None:
 # ------------------------------------------------------------------ 分区大小下限
 def _no_flag_controller(tmp_path) -> WorkflowController:
     """不带 ``allow_small_partitions`` 的控制器：C 20 GB 必须在计划阶段被拒。"""
-    image = tmp_path / "win11.wim"
-    image.write_bytes(b"wim")
+    image = tmp_path / "win11.GHO"
+    image.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
 
     def preflight(config_path=None, dry_run=False):
         return {
@@ -867,7 +866,6 @@ def _no_flag_controller(tmp_path) -> WorkflowController:
         service=_FakeService([_disk(1)]),
         dry_run=True,
         preflight_runner=preflight,
-        image_indexes=lambda path: [1],
     )
 
 

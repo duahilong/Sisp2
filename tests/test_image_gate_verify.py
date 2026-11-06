@@ -36,20 +36,25 @@ _OK_VERIFY_PAYLOAD: dict[str, Any] = {
 
 
 # --------------------------------------------------------- ① 镜像可应用性闸门
-def test_image_problems_accepts_applicable_image(tmp_path):
-    wim = tmp_path / "win11.wim"
-    wim.write_bytes(b"wim")
-    assert _image_problems({"image_info": {"image_path": str(wim)}}) == []
+def _gho(tmp_path, name: str = "win11.GHO"):
+    gho = tmp_path / name
+    gho.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
+    return gho
+
+
+def test_image_problems_accepts_valid_gho(tmp_path):
+    gho = _gho(tmp_path)
+    assert _image_problems({"image_info": {"image_path": str(gho)}}) == []
 
 
 def test_image_problems_rejects_iso_with_actionable_message(tmp_path):
-    """ISO 是“能读索引、不能 apply”的典型：必须在计划阶段挡住，而不是清盘后报错。"""
+    """ISO 是“能打开、不能还原”的典型：必须在计划阶段挡住，而不是清盘后报错。"""
     iso = tmp_path / "win11.iso"
     iso.write_bytes(b"iso")
     problems = _image_problems({"image_info": {"image_path": str(iso)}})
     assert problems
     assert "ISO" in problems[0]
-    assert "install.wim" in problems[0]
+    assert "GHO" in problems[0]
 
 
 def test_image_problems_rejects_unknown_suffix(tmp_path):
@@ -60,47 +65,37 @@ def test_image_problems_rejects_unknown_suffix(tmp_path):
     assert "不支持" in problems[0]
 
 
+def test_image_problems_rejects_legacy_dism_formats(tmp_path):
+    """WIM/ESD/SWM 走的是已经移除的 dism 路线，必须在计划期就说清楚。"""
+    for name in ("a.wim", "b.esd", "c.swm"):
+        target = tmp_path / name
+        target.write_bytes(b"x")
+        problems = _image_problems({"image_info": {"image_path": str(target)}})
+        assert problems and "dism 路线已移除" in problems[0]
+
+
 def test_image_problems_reports_missing_file(tmp_path):
-    problems = _image_problems({"image_info": {"image_path": str(tmp_path / "gone.wim")}})
+    problems = _image_problems({"image_info": {"image_path": str(tmp_path / "gone.GHO")}})
     assert problems
     assert "不存在" in problems[0]
 
 
-def test_image_problems_checks_requested_index(tmp_path):
-    wim = tmp_path / "win11.wim"
-    wim.write_bytes(b"wim")
+def test_image_problems_rejects_wrong_magic(tmp_path):
+    """后缀对、文件头不对：不是 Ghost 镜像，计划期就该拦住。"""
+    fake = tmp_path / "fake.GHO"
+    fake.write_bytes(b"PK")
+    problems = _image_problems({"image_info": {"image_path": str(fake)}})
+    assert problems
+    assert "文件头" in problems[0] or "不是 Ghost 镜像" in problems[0]
 
+
+def test_image_problems_reports_missing_ghost_engine(tmp_path):
+    gho = _gho(tmp_path)
     problems = _image_problems(
-        {"image_info": {"image_path": str(wim), "image_index": 9}}, lambda path: [1, 2]
+        {"image_info": {"image_path": str(gho)}}, ghost_available=False
     )
     assert problems
-    assert "索引 9" in problems[0]
-
-    ok = _image_problems(
-        {"image_info": {"image_path": str(wim), "image_index": 2}}, lambda path: [1, 2]
-    )
-    assert ok == []
-
-
-def test_image_problems_defaults_to_index_one(tmp_path):
-    """执行器缺省用索引 1，所以没写索引时也要校验 1 存不存在。"""
-    wim = tmp_path / "win11.wim"
-    wim.write_bytes(b"wim")
-    problems = _image_problems({"image_info": {"image_path": str(wim)}}, lambda path: [3])
-    assert problems
-    assert "索引 1" in problems[0]
-
-
-def test_image_problems_surfaces_reader_failure(tmp_path):
-    wim = tmp_path / "win11.wim"
-    wim.write_bytes(b"wim")
-
-    def boom(path: str) -> list[int]:
-        raise RuntimeError("dism 挂了")
-
-    problems = _image_problems({"image_info": {"image_path": str(wim)}}, boom)
-    assert problems
-    assert "无法读取" in problems[0]
+    assert "Ghost 可执行文件" in problems[0]
 
 
 def _disk(number: int = 1) -> DiskInfo:
@@ -162,7 +157,6 @@ def _controller(image_path: str) -> WorkflowController:
         service=_FakeService([_disk(1)]),
         dry_run=True,
         preflight_runner=preflight,
-        image_indexes=lambda path: [1],
     )
 
 
@@ -182,8 +176,7 @@ def test_prepare_blocks_iso_image_and_disables_start(tmp_path):
 
 
 def test_prepare_keeps_applicable_image_executable(tmp_path):
-    wim = tmp_path / "win11.wim"
-    wim.write_bytes(b"wim")
+    wim = _gho(tmp_path)
     controller = _controller(str(wim))
     controller.start(None, dry_run=True)
 
@@ -210,8 +203,7 @@ def test_preflight_flags_iso_image(tmp_path):
 
 
 def test_preflight_accepts_applicable_image(tmp_path):
-    wim = tmp_path / "win11.wim"
-    wim.write_bytes(b"wim")
+    wim = _gho(tmp_path)
     report = run_preflight_checks(
         dry_run=True,
         admin_checker=lambda: True,
@@ -375,7 +367,6 @@ def _settings_controller(settings: dict, image_path: str) -> WorkflowController:
         dry_run=True,
         preflight_runner=preflight,
         settings_provider=lambda: dict(settings),
-        image_indexes=lambda path: [1],
     )
 
 
@@ -387,8 +378,7 @@ def test_prepare_reflects_live_settings_image(tmp_path):
     """
     iso = tmp_path / "win11.iso"
     iso.write_bytes(b"iso")
-    good = tmp_path / "win11.wim"
-    good.write_bytes(b"wim")
+    good = _gho(tmp_path)
 
     settings: dict[str, Any] = {"sysWim": str(iso), "imageDefaultIndex": 1}
     controller = _settings_controller(settings, str(iso))
@@ -407,10 +397,8 @@ def test_prepare_reflects_live_settings_image(tmp_path):
 
 def test_per_disk_overrides_beat_settings_defaults(tmp_path):
     """向导第 2/3 步的逐盘输入必须压过设置里的默认值（否则用户填了也被改回去）。"""
-    wim = tmp_path / "win11.wim"
-    wim.write_bytes(b"wim")
-    other = tmp_path / "other.wim"
-    other.write_bytes(b"wim")
+    wim = _gho(tmp_path)
+    other = _gho(tmp_path, "other.GHO")
 
     settings: dict[str, Any] = {
         "sysWim": str(wim),
@@ -431,12 +419,11 @@ def test_per_disk_overrides_beat_settings_defaults(tmp_path):
     assert prepared.spec.config_payload["image_info"]["image_path"] == str(other)
 
 
-def test_image_path_is_normalized_for_dism(tmp_path):
-    """设置里写 ``D:/x/test.wim`` 也能用：dism 只认反斜杠，所以载荷里要归一化。"""
+def test_image_path_is_normalized_for_ghost(tmp_path):
+    """设置里写 ``D:/x/test.GHO`` 也要被规范化成展开后的绝对路径。"""
     from pathlib import Path as _Path
 
-    wim = tmp_path / "win11.wim"
-    wim.write_bytes(b"wim")
+    wim = _gho(tmp_path)
     slashed = str(wim).replace("\\", "/")
     assert "/" in slashed or _Path(wim).drive  # 单字符路径在 Linux 上无分隔符，跳过
 

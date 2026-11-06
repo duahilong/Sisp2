@@ -121,16 +121,16 @@ def test_probe_state_machine(tmp_path: Path) -> None:
     json_path = store.path
 
     # 未设置 → na
-    assert store.probe("extDism").state == "na"
+    assert store.probe("extGhost").state == "na"
     # 系统自带 → builtin
     assert store.probe("extDiskpart").state == "builtin"
 
-    store.update({"extDism": str(exe), "logDir": str(folder)})
-    assert store.probe("extDism").state == "ok"
+    store.update({"extGhost": str(exe), "logDir": str(folder)})
+    assert store.probe("extGhost").state == "ok"
     assert store.probe("logDir").state == "ok"
 
-    store.update({"extDism": str(tmp_path / "missing.exe")})
-    result = store.probe("extDism")
+    store.update({"extGhost": str(tmp_path / "missing.exe")})
+    result = store.probe("extGhost")
     assert result.state == "miss"
     assert "不存在" in result.message
 
@@ -141,7 +141,7 @@ def test_probe_state_machine(tmp_path: Path) -> None:
 
 def test_probe_all_covers_every_path_key(store: SettingsStore) -> None:
     probed = store.probe_all()
-    assert "extDism" in probed
+    assert "extGhost" in probed
     assert "sysTemp" in probed
     assert probed["sysTemp"]["state"] == "na"
 

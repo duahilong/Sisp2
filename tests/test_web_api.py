@@ -33,8 +33,8 @@ from app.gui_web.server import create_app
 from app.models import WorkerResult
 from app.modules.settings.service import build_store
 
-_FAKE_IMAGE_PATH = Path(tempfile.gettempdir()) / "sisp-test-web-api.wim"
-_FAKE_IMAGE_PATH.write_bytes(b"wim")
+_FAKE_IMAGE_PATH = Path(tempfile.gettempdir()) / "sisp-test-web-api.GHO"
+_FAKE_IMAGE_PATH.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
 
 _GIB = 1024**3
 # 单测用小尺寸（C 30 GB）测算术：显式放宽后端下限（真实布局 C ≥ 60 GB）。
@@ -45,8 +45,8 @@ _PAYLOAD: dict[str, Any] = {
         "data_size_gb": "auto",
         "allow_small_partitions": True,
     },
-    # 计划会按 payload 重算镜像可用性（类型 + 存在性 + 索引），所以这里用
-    # 一个真实存在的 .wim 占位文件；索引读取器在 _build_client 里注入。
+    # 计划会按 payload 重算镜像可用性（后缀 + 存在性 + Ghost 文件头），
+    # 所以这里用一个真实存在的 .GHO 占位文件。
     "image_info": {"image_path": str(_FAKE_IMAGE_PATH), "image_index": 1},
 }
 
@@ -107,7 +107,6 @@ def _build_client(
         service=_FakeService([_disk(1), _disk(2)]),
         dry_run=True,
         preflight_runner=_preflight,
-        image_indexes=lambda path: [1],
     )
     wf.start(None, dry_run=True)
     store = build_store(tmp_path / "settings.json")
@@ -266,7 +265,7 @@ def test_settings_roundtrip(client: TestClient) -> None:
     assert reset["sysDefaultGb"] == 120
 
     probed = _unwrap(client.post("/api/settings/probe_all"))
-    assert "extDism" in probed
+    assert "extGhost" in probed
 
 
 # ---------------------------------------------------------------- SSE

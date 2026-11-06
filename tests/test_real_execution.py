@@ -7,7 +7,7 @@
    控制器上挂的执行器因此被绕过；
 3. 真实模式要求注入 ``real_runner``，而仓库里从来没有人注入。
 
-这些测试全部用替身执行器，不碰 diskpart/dism。
+这些测试全部用替身执行器，不碰 diskpart/ghost。
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ _PAYLOAD: dict[str, Any] = {
         "data_size_gb": "auto",
         "allow_small_partitions": True,
     },
-    "image_info": {"image_path": r"D:\images\win11.wim", "image_index": 1},
+    "image_info": {"image_path": r"D:\images	est.GHO", "image_index": 1},
 }
 
 
@@ -170,12 +170,12 @@ def test_image_blocker_helper_is_pure(tmp_path):
     """``_image_blocker`` 只看 payload 里的镜像路径，不碰磁盘。"""
     from app.application.workflow import _image_blocker
 
-    exists = tmp_path / "ok.wim"
-    exists.write_bytes(b"wim")
+    exists = tmp_path / "ok.GHO"
+    exists.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
     assert _image_blocker(None) is None
     assert _image_blocker({"image_info": {}}) is None
     assert _image_blocker({"image_info": {"image_path": str(exists)}}) is None
-    missing = _image_blocker({"image_info": {"image_path": str(tmp_path / "no.wim")}})
+    missing = _image_blocker({"image_info": {"image_path": str(tmp_path / "no.GHO")}})
     assert missing and "镜像文件不存在" in missing
 
 
@@ -185,8 +185,8 @@ def test_per_disk_image_override_recomputes_image_blocker(tmp_path):
     会话级预检只在 ``start()`` 里按配置文件算一次；如果计划直接沿用那份阻断项，
     用户在第 3 步选了一个真实存在的镜像也永远开始不了——第 4 步会一直挂着阻断。
     """
-    good = tmp_path / "ok.wim"
-    good.write_bytes(b"wim")
+    good = tmp_path / "ok.GHO"
+    good.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
 
     def preflight(config_path=None):
         return {
@@ -194,12 +194,12 @@ def test_per_disk_image_override_recomputes_image_blocker(tmp_path):
                 {
                     "name": "镜像文件存在性检查",
                     "passed": False,
-                    "message": r"镜像文件不存在: D:\images\missing.wim",
+                    "message": r"镜像文件不存在: D:\images\missing.GHO",
                 }
             ],
             "config_payload": {
                 "partition_info": {"c_size_gb": 30, "allow_small_partitions": True},
-                "image_info": {"image_path": r"D:\images\missing.wim"},
+                "image_info": {"image_path": r"D:\images\missing.GHO"},
             },
         }
 
@@ -207,7 +207,6 @@ def test_per_disk_image_override_recomputes_image_blocker(tmp_path):
         service=_FakeService([_disk(1)]),
         dry_run=True,
         preflight_runner=preflight,
-        image_indexes=lambda path: [1],
     )
     controller.start(None, dry_run=True)
 
@@ -380,14 +379,14 @@ def test_diskpart_script_uses_explicit_data_size():
 def test_runner_reports_missing_image_without_touching_disks(tmp_path):
     runner = WindowsDiskRunner(
         diskpart=r"C:\nope\diskpart.exe",
-        dism=r"C:\nope\dism.exe",
+        ghost=r"C:\nope\ghost64.exe",
         bcdboot=r"C:\nope\bcdboot.exe",
     )
     spec = SimpleNamespace(
         disk_number=1,
         config_payload={
             "partition_info": _PAYLOAD["partition_info"],
-            "image_info": {"image_path": str(tmp_path / "missing.wim"), "image_index": 1},
+            "image_info": {"image_path": str(tmp_path / "missing.GHO"), "image_index": 1},
         },
         drive_letters={"efi": "E", "windows": "F", "data": "G"},
     )
@@ -400,11 +399,11 @@ def test_runner_reports_missing_image_without_touching_disks(tmp_path):
 
 
 def test_runner_fails_cleanly_when_diskpart_cannot_start(tmp_path):
-    image = tmp_path / "tiny.wim"
+    image = tmp_path / "tiny.GHO"
     image.write_bytes(b"not a real wim")
     runner = WindowsDiskRunner(
         diskpart=r"C:\nope\diskpart.exe",
-        dism=r"C:\nope\dism.exe",
+        ghost=r"C:\nope\ghost64.exe",
         bcdboot=r"C:\nope\bcdboot.exe",
     )
     spec = SimpleNamespace(
@@ -425,7 +424,7 @@ def test_runner_fails_cleanly_when_diskpart_cannot_start(tmp_path):
 
 
 def test_runner_rejects_incomplete_letters(tmp_path):
-    image = tmp_path / "tiny.wim"
+    image = tmp_path / "tiny.GHO"
     image.write_bytes(b"x")
     runner = WindowsDiskRunner()
     spec = SimpleNamespace(
@@ -444,7 +443,7 @@ def test_runner_rejects_incomplete_letters(tmp_path):
 
 
 def test_runner_honours_pre_cancelled_event(tmp_path):
-    image = tmp_path / "tiny.wim"
+    image = tmp_path / "tiny.GHO"
     image.write_bytes(b"x")
     runner = WindowsDiskRunner()
     spec = SimpleNamespace(
@@ -637,19 +636,19 @@ def test_partition_defaults_apply_when_config_has_no_partition_info():
 def test_tool_paths_reach_default_real_runner():
     controller = WorkflowController(
         dry_run=False,
-        tool_paths={"diskpart": r"C:\tools\diskpart.exe", "dism": r"C:\tools\dism.exe", "": ""},
+        tool_paths={"diskpart": r"C:\tools\diskpart.exe", "ghost": r"C:\tools\ghost64.exe", "": ""},
     )
 
     runner = controller.service._real_runner
 
     assert runner.diskpart == r"C:\tools\diskpart.exe"
-    assert runner.dism == r"C:\tools\dism.exe"
+    assert runner.ghost == r"C:\tools\ghost64.exe"
 
 
 def test_build_real_runner_accepts_tool_paths():
-    runner = build_real_runner(diskpart=r"C:\d\diskpart.exe", dism=r"C:\d\dism.exe")
+    runner = build_real_runner(diskpart=r"C:\d\diskpart.exe", ghost=r"C:\d\ghost64.exe")
 
-    assert (runner.diskpart, runner.dism) == (r"C:\d\diskpart.exe", r"C:\d\dism.exe")
+    assert (runner.diskpart, runner.ghost) == (r"C:\d\diskpart.exe", r"C:\d\ghost64.exe")
 
 
 def test_prepare_does_not_accumulate_implicit_allowlist():
@@ -813,7 +812,7 @@ def test_diskpart_shell_release_script_uses_disk_and_partition():
 
     written: list[str] = []
 
-    def fake_run(command, timeout, *, env=None):
+    def fake_run(command, timeout, *, env=None, cwd=None):
         written.extend(pathlib.Path(command[2]).read_text(encoding="ascii").splitlines())
         return 0, "ok", 0.1
 
@@ -951,7 +950,7 @@ def test_runner_keeps_efi_letter_when_switch_off(
     """同一个任务，release_efi_letter=False → 全流程一条 remove letter 都没有。"""
     from app.application.partitions import plan_partitions
 
-    image = tmp_path / "tiny.wim"
+    image = tmp_path / "tiny.GHO"
     image.write_bytes(b"x")
     payload = {
         "partition_info": _PAYLOAD["partition_info"],
@@ -982,7 +981,7 @@ def test_runner_releases_efi_letter_even_when_image_fails(
 ) -> None:
     from app.application.partitions import plan_partitions
 
-    image = tmp_path / "tiny.wim"
+    image = tmp_path / "tiny.GHO"
     image.write_bytes(b"x")
     payload = {
         "partition_info": _PAYLOAD["partition_info"],
@@ -1013,7 +1012,7 @@ def test_runner_releases_efi_letter_even_when_image_fails(
 
 
 def _tiny_image(tmp_path):
-    image = tmp_path / "tiny.wim"
+    image = tmp_path / "tiny.GHO"
     image.write_bytes(b"x")
     return image
 
@@ -1371,9 +1370,9 @@ def test_step_events_are_broadcast_for_every_stage():
     assert job.to_dict()["progress"]["percent"] == 100
 
 
-# ------------------------------------------------- 执行器失败分支（dism/bcdboot/verify/超时）
+# ------------------------------------------------- 执行器失败分支（Ghost/bcdboot/verify/超时）
 def _whole_disk_spec(tmp_path):
-    image = tmp_path / "tiny.wim"
+    image = tmp_path / "tiny.GHO"
     image.write_bytes(b"x")
     return _tiny_spec(image)
 
@@ -1383,15 +1382,15 @@ def _ok_shell(fake_shell, make_snapshot, payload):
     return fake_shell(msr=None, query_handler=lambda disk: make_snapshot(parts))
 
 
-def test_runner_reports_dism_failure(
+def test_runner_reports_ghost_failure(
     tmp_path, make_runner, fake_shell, fake_process, make_snapshot
 ) -> None:
     spec = _whole_disk_spec(tmp_path)
     shell = _ok_shell(fake_shell, make_snapshot, spec.config_payload)
 
     def handler(command, timeout, env):
-        if str(command[0]).endswith("dism.exe"):
-            return 87, "dism 失败", 0.1
+        if str(command[0]).endswith("ghost64.exe"):
+            return 87, "Ghost 失败", 0.1
         return 0, "ok", 0.1
 
     runner = make_runner(shell=shell, process=fake_process(handler=handler))
@@ -1470,7 +1469,7 @@ def test_runner_refuses_tiny_layout_before_touching_disk(
     tmp_path, make_runner, fake_shell, fake_process
 ) -> None:
     """下限拦截必须在第一次 diskpart 之前：盘一根毛都不能动。"""
-    image = tmp_path / "tiny.wim"
+    image = tmp_path / "tiny.GHO"
     image.write_bytes(b"x")
     spec = SimpleNamespace(
         disk_number=2,

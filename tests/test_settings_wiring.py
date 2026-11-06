@@ -61,13 +61,13 @@ def test_preflight_accepts_existing_configured_tool(tmp_path) -> None:
     assert "7-Zip" in item["message"]
 
 
-def test_preflight_reports_missing_system_wim(tmp_path) -> None:
+def test_preflight_reports_missing_system_image(tmp_path) -> None:
     item = _check(
-        _preflight({"sysWim": str(tmp_path / "install.wim")}, tmp_path),
+        _preflight({"sysWim": str(tmp_path / "install.GHO")}, tmp_path),
         CHECK_SETTING_PATHS,
     )
     assert item["passed"] is False
-    assert "系统 WIM 文件" in item["message"]
+    assert "系统 GHO 镜像" in item["message"]
 
 
 def test_preflight_creates_temp_dir_and_passes(tmp_path) -> None:
@@ -115,16 +115,12 @@ def test_workflow_maps_settings_to_runner_options() -> None:
         preflight_runner=lambda path: {"results": [], "config_payload": {}},
         settings_provider=lambda: {
             "sysTemp": r"D:\temp",
-            "sysUnattend": r"D:\answer.xml",
-            "sysDrivers": r"D:\drivers",
             "sysBoot": r"D:\boot",
             "unrelated": "ignored",
         },
     )
     assert wf._runner_options() == {
         "temp_dir": r"D:\temp",
-        "unattend_path": r"D:\answer.xml",
-        "drivers_path": r"D:\drivers",
         "boot_source": r"D:\boot",
         # 布尔开关总是下发（False 也要传下去，否则关不掉释放行为）
         "release_efi_letter": True,
@@ -165,17 +161,17 @@ def test_workflow_survives_broken_settings_provider() -> None:
 
 # ------------------------------------------------------------------ 执行器
 def _image_phase(commands: list[list[str]], **kwargs):
-    """用替身 ProcessShell 构造 ImagePhase，记录拼出来的命令。"""
+    """用替身 ProcessShell 构造 GhostImagePhase，记录拼出来的命令。"""
     from app.application.command_log import CommandLog
-    from app.application.phases.system import ImagePhase
+    from app.application.phases.ghost import GhostImagePhase
     from app.application.shell import ProcessShell
 
-    def fake_run(command, timeout, *, env=None):
+    def fake_run(command, timeout, *, env=None, cwd=None):
         commands.append(list(command))
         return 0, "ok", 0.1
 
     shell = ProcessShell(log=CommandLog(None), runner=fake_run)
-    return ImagePhase(shell, dism="dism.exe")
+    return GhostImagePhase(shell, ghost="ghost64.exe", cwd=kwargs.get("cwd"))
 
 
 def _boot_phase(commands: list[list[str]]):
@@ -183,7 +179,7 @@ def _boot_phase(commands: list[list[str]]):
     from app.application.phases.system import BootPhase
     from app.application.shell import ProcessShell
 
-    def fake_run(command, timeout, *, env=None):
+    def fake_run(command, timeout, *, env=None, cwd=None):
         commands.append(list(command))
         return 0, "ok", 0.1
 
@@ -195,13 +191,22 @@ def _ctx(options=None, letters=None):
     import threading
 
     from app.application.command_log import CommandLog
+    from app.application.partitions import plan_partitions
     from app.application.phases.base import PhaseContext
 
+    payload = {
+        "partition_info": {
+            "efi_size_mb": 100,
+            "c_size_gb": 3,
+            "data_size_gb": "auto",
+            "allow_small_partitions": True,
+        }
+    }
     return PhaseContext(
         disk_number=1,
-        parts=(),
+        parts=plan_partitions(payload, letters={"efi": "E", "windows": "F", "data": "G"}),
         letters=letters or {"efi": "E", "windows": "F", "data": "G"},
-        image_path=r"D:\images\win11.wim",
+        image_path=r"D:\images	est.GHO",
         image_index=1,
         cancel=threading.Event(),
         log=CommandLog(None),
@@ -209,31 +214,17 @@ def _ctx(options=None, letters=None):
     )
 
 
-def test_apply_image_passes_unattend_and_drivers() -> None:
+def test_apply_image_uses_ghost_clone() -> None:
     commands: list[list[str]] = []
     phase = _image_phase(commands)
-    ctx = _ctx(options={"unattend_path": "D:/answer.xml", "drivers_path": "D:/drivers"})
-    outcome = phase.run(replace_image_index(ctx, 2))
+    outcome = phase.run(_ctx())
     assert outcome.ok is True
     command = commands[0]
-    assert "/Apply-Unattend:D:/answer.xml" in command
-    assert "/Add-Driver:D:/drivers" in command
-    assert "/Recurse" in command
-
-
-def replace_image_index(ctx, index):
-    from dataclasses import replace
-
-    return replace(ctx, image_index=index)
-
-
-def test_apply_image_without_options_is_unchanged() -> None:
-    commands: list[list[str]] = []
-    phase = _image_phase(commands)
-    phase.run(_ctx())
-    command = commands[0]
-    assert not any("Unattend" in part for part in command)
-    assert not any("Add-Driver" in part for part in command)
+    assert command[0] == "ghost64.exe"
+    assert "mode=pload" in command[1]
+    assert "dst=2:2" in command[1]
+    assert "-sure" in command and "-batch" in command and "-ntexact" in command
+    assert not any(part.startswith("-rb") for part in command)
 
 
 def test_write_boot_uses_settings_boot_source() -> None:
@@ -265,10 +256,10 @@ def test_runtime_env_creates_temp_dir(tmp_path) -> None:
 def test_runner_accepts_runner_options_on_spec(
     tmp_path, make_runner, fake_shell, fake_process, make_snapshot
 ) -> None:
-    """整条链路：spec.runner_options 会传到 dism/bcdboot 的命令行。"""
+    """整条链路：runner_options 会传到 bcdboot 的命令行，镜像是 Ghost 命令。"""
     from app.application.partitions import plan_partitions
 
-    image = tmp_path / "tiny.wim"
+    image = tmp_path / "tiny.GHO"
     image.write_bytes(b"x")
     payload = {
         "partition_info": {
@@ -285,19 +276,20 @@ def test_runner_accepts_runner_options_on_spec(
     shell = fake_shell(query_handler=lambda disk: make_snapshot(parts), msr=None)
     process = fake_process()
     runner = make_runner(
-        shell=shell, process=process, dism="dism.exe", bcdboot="bcdboot.exe"
+        shell=shell, process=process, ghost="ghost64.exe", bcdboot="bcdboot.exe"
     )
 
     spec = SimpleNamespace(
         disk_number=1,
         config_payload=payload,
         drive_letters=letters,
-        runner_options={"unattend_path": "D:/answer.xml"},
+        runner_options={"boot_source": "D:/boot"},
     )
     result = runner.run(spec, threading.Event())
 
     assert result.success is True, result.error
-    assert any("/Apply-Unattend:D:/answer.xml" in command for command in process.calls)
+    assert any("mode=pload" in " ".join(command) for command in process.calls)
+    assert any("D:/boot" in command for command in process.calls)
 
 
 @pytest.mark.parametrize("bad", ["", "   "])
@@ -323,7 +315,7 @@ def test_diskpart_script_written_into_configured_temp_dir(tmp_path) -> None:
 
     seen: dict[str, Any] = {}
 
-    def fake_run(command, timeout, *, env=None):
+    def fake_run(command, timeout, *, env=None, cwd=None):
         script = pathlib.Path(command[2])
         seen["parent"] = script.parent
         seen["existed"] = script.exists()
@@ -404,10 +396,10 @@ def test_settings_excluded_names_hide_disks_at_start() -> None:
 
 
 def test_default_system_image_from_settings() -> None:
-    wf = _controller({"sysWim": r"D:\\sisp-test\\test.wim", "imageDefaultIndex": 3})
+    wf = _controller({"sysWim": r"D:\\sisp-test\\test.GHO", "imageDefaultIndex": 3})
     wf.start(None, dry_run=True)
     payload = wf.session.config_payload
-    assert payload["image_info"]["image_path"] == str(Path(r"D:\\sisp-test\\test.wim"))
+    assert payload["image_info"]["image_path"] == str(Path(r"D:\\sisp-test\\test.GHO"))
     assert payload["image_info"]["image_index"] == 3
 
 
@@ -418,26 +410,26 @@ def test_settings_image_overrides_config_when_config_not_explicit() -> None:
     用户在设置页填了真镜像也会一直挂着「镜像文件不存在」的阻断。
     """
     wf = _controller(
-        {"sysWim": r"D:\\sisp-test\\test.wim", "imageDefaultIndex": 1},
-        payload={"image_info": {"image_path": r"D:\\images\\win11.wim", "image_index": 3}},
+        {"sysWim": r"D:\\sisp-test\\test.GHO", "imageDefaultIndex": 1},
+        payload={"image_info": {"image_path": r"D:\\images\\config.GHO", "image_index": 3}},
     )
     wf.start(None, dry_run=True)
     info = wf.session.config_payload["image_info"]
-    assert info["image_path"] == str(Path(r"D:\\sisp-test\\test.wim"))
+    assert info["image_path"] == str(Path(r"D:\\sisp-test\\test.GHO"))
     assert info["image_index"] == 1
 
 
 def test_config_image_wins_when_config_explicit() -> None:
     wf = _controller(
-        {"sysWim": r"D:\\sisp-test\\test.wim"},
-        payload={"image_info": {"image_path": r"D:\\images\\from-config.wim"}},
+        {"sysWim": r"D:\\sisp-test\\test.GHO"},
+        payload={"image_info": {"image_path": r"D:\\images\\from-config.GHO"}},
     )
     wf.start("preset.json", dry_run=True)
-    assert wf.session.config_payload["image_info"]["image_path"] == r"D:\\images\\from-config.wim"
+    assert wf.session.config_payload["image_info"]["image_path"] == r"D:\\images\\from-config.GHO"
 
 
-def test_image_default_index_zero_keeps_dism_default() -> None:
-    wf = _controller({"sysWim": r"D:\images\win11.wim", "imageDefaultIndex": 0})
+def test_image_default_index_zero_keeps_ghost_default() -> None:
+    wf = _controller({"sysWim": r"D:\images	est.GHO", "imageDefaultIndex": 0})
     wf.start(None, dry_run=True)
     assert "image_index" not in wf.session.config_payload["image_info"]
 
@@ -451,23 +443,23 @@ def _image_check(report: dict[str, Any]) -> dict[str, Any] | None:
 
 def test_preflight_image_check_prefers_settings_syswim(tmp_path) -> None:
     """无 -j 时，预检要检查界面设置里的镜像，而不是配置里的占位路径。"""
-    wim = tmp_path / "real.wim"
-    wim.write_bytes(b"wim")
+    wim = tmp_path / "real.GHO"
+    wim.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
     report = _preflight({"sysWim": str(wim)}, tmp_path)
     image = _image_check(report)
     assert image is not None and image["passed"] is True, image
-    assert "real.wim" in image["message"]
+    assert "real.GHO" in image["message"]
 
 
 def test_preflight_image_check_uses_config_when_explicit(tmp_path) -> None:
     """显式 -j 时预检看配置里的镜像路径（配置优先），设置只作兜底。"""
     from app.preflight import run_preflight_checks
 
-    settings_wim = tmp_path / "settings.wim"
-    settings_wim.write_bytes(b"wim")
+    settings_wim = tmp_path / "settings.GHO"
+    settings_wim.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
     config = tmp_path / "preset.json"
     config.write_text(
-        json.dumps({"image_info": {"image_path": str(tmp_path / "missing.wim")}}),
+        json.dumps({"image_info": {"image_path": str(tmp_path / "missing.GHO")}}),
         encoding="utf-8",
     )
     report = run_preflight_checks(
@@ -480,4 +472,4 @@ def test_preflight_image_check_uses_config_when_explicit(tmp_path) -> None:
     )
     image = _image_check(report)
     assert image is not None and image["passed"] is False, image
-    assert "missing.wim" in image["message"]
+    assert "missing.GHO" in image["message"]

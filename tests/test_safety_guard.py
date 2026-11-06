@@ -233,43 +233,38 @@ def test_dism_write_verbs_stay_dangerous() -> None:
     assert is_dangerous_command(["dism.exe", "/Online", "/Cleanup-Image", "/RestoreHealth"]) is True
 
 
-# ------------------------------------------------- 新接入护栏的两个模块
+# ------------------------------------------------- 新接入护栏的模块
 
-def test_image_probe_default_runner_passes_authorization(monkeypatch) -> None:
-    """默认执行器把实例的授权状态原样传给 ``_spawn``，不自己默认成 True。"""
-    from app.modules.image import service as image_service
-
-    captured: list[tuple[list[str], bool]] = []
-
-    def fake_spawn(command, timeout, *, allow_real_disk=False):
-        captured.append((list(command), allow_real_disk))
-        return 0, "Index : 1\nName : Win11\n"
-
-    monkeypatch.setattr(image_service, "_spawn", fake_spawn)
-    probe = image_service.ImageProbe(dism="dism.exe", allow_real_disk=True)
-    indexes = probe.read_indexes("D:\\a.wim")
-    assert indexes[0]["index"] == 1
-    assert "/Get-WimInfo" in captured[0][0][2]
-    assert captured[0][1] is True
+GHOST_APPLY = [
+    "ghost64.exe",
+    "-clone,mode=pload,src=D:/a.GHO:1,dst=3:2",
+    "-sure",
+    "-batch",
+    "-ntexact",
+]
 
 
-def test_image_probe_blocks_mount_without_authorization() -> None:
-    from app.modules.image.service import ImageProbe
-
-    probe = ImageProbe(dism="dism.exe", powershell="powershell.exe")
-    assert probe.allow_real_disk is False
-    with pytest.raises(RealDiskBlocked):
-        probe._mount_iso("D:\\win11.iso")
+def test_ghost_apply_is_dangerous() -> None:
+    assert is_dangerous_command(GHOST_APPLY) is True
+    assert is_dangerous_command(["ghost64.exe", "-ver"]) is False
 
 
-def test_image_probe_mount_requires_authorization_even_when_authorized() -> None:
-    """授权了也还得看环境：测试进程里仍然拦（第一道闸是实例授权，第二道是环境）。"""
-    from app.modules.image.service import ImageProbe
-
-    probe = ImageProbe(dism="dism.exe", powershell="powershell.exe", allow_real_disk=True)
+def test_ghost_apply_blocked_without_authorization() -> None:
+    """未经授权的 Ghost 还原必须拦下（不 spawn 进程）。"""
     with pytest.raises(RealDiskBlocked) as excinfo:
-        probe._mount_iso("D:\\win11.iso")
+        ensure_command_allowed(GHOST_APPLY, allow_real_disk=False, source="test")
+    assert "未获得真实写盘授权" in str(excinfo.value)
+
+
+def test_ghost_apply_blocked_even_when_authorized_in_tests() -> None:
+    """授权了也还得看环境：测试进程里仍然拦（第一道闸是实例授权，第二道是环境）。"""
+    with pytest.raises(RealDiskBlocked) as excinfo:
+        ensure_command_allowed(GHOST_APPLY, allow_real_disk=True, source="test")
     assert BLOCK_ENV in str(excinfo.value)
+
+
+def test_ghost_version_probe_is_allowed() -> None:
+    ensure_command_allowed(["ghost64.exe", "-ver"], allow_real_disk=False, source="test")
 
 
 def test_run_powershell_allows_read_only_scan(monkeypatch) -> None:

@@ -2,7 +2,7 @@
 
 这些用例守护三件事：
 
-1. **分区阶段独立可测**：只给 ``DiskpartShell`` 替身就能跑，不需要 dism/bcdboot；
+1. **分区阶段独立可测**：只给 ``DiskpartShell`` 替身就能跑，不需要 Ghost/bcdboot；
 2. **停止条件只在编排层**：分区验收不过 → 系统组一次系统命令都不发；
 3. **预览与真跑同源**：``/api/partition/preview`` 的脚本就是真实执行器会跑的行。
 """
@@ -24,8 +24,9 @@ from app.application.partitions import (
     wipe_lines,
 )
 from app.application.phases.base import PhaseContext, PhaseOutcome, PhaseResult
+from app.application.phases.ghost import GhostImagePhase
 from app.application.phases.partition import PartitionPhase
-from app.application.phases.system import BootPhase, ImagePhase, SystemPhase
+from app.application.phases.system import BootPhase, SystemPhase
 from app.application.pipeline import JobPipeline
 from app.application.steps import (
     GROUP_OF,
@@ -43,7 +44,7 @@ PAYLOAD = {
         "data_size_gb": "auto",
         "allow_small_partitions": True,
     },
-    "image_info": {"image_path": "D:/images/win11.wim", "image_index": 1},
+    "image_info": {"image_path": "D:/images/test.GHO", "image_index": 1},
 }
 LETTERS = {"efi": "E", "windows": "F", "data": "G"}
 
@@ -53,9 +54,9 @@ def _parts(payload=None, letters=None):
 
 
 def _ctx(tmp_path, *, parts=None, letters=None, options=None, cancel=False, on_step=None):
-    image = tmp_path / "tiny.wim"
+    image = tmp_path / "tiny.GHO"
     if not image.exists():
-        image.write_bytes(b"x")
+        image.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
     return PhaseContext(
         disk_number=1,
         parts=parts or _parts(),
@@ -97,7 +98,7 @@ def test_group_progress_ignores_extra_steps():
 
 # ---------------------------------------------------------------- 分区阶段独立
 def test_partition_phase_runs_with_only_diskpart_shell(tmp_path):
-    """分区阶段只依赖 DiskpartShell：不需要 dism/bcdboot 也能跑完。"""
+    """分区阶段只依赖 DiskpartShell：不需要 Ghost/bcdboot 也能跑完。"""
     parts = _parts()
     shell = FakeDiskpartShell(msr=None, query_handler=lambda disk: build_snapshot(parts))
     phase = PartitionPhase(shell)
@@ -142,10 +143,10 @@ def _code_identifiers(source: str) -> set[str]:
 
 
 def test_partition_phase_source_does_not_know_system_stage():
-    """源码级护栏：分区阶段不许出现 dism / bcdboot（解耦不是靠注释维持的）。"""
+    """源码级护栏：分区阶段不许出现 ghost / bcdboot / diskpart 之外的东西。"""
     source = Path("app/application/phases/partition.py").read_text(encoding="utf-8")
     identifiers = {name.lower() for name in _code_identifiers(source)}
-    for forbidden in ("dism", "bcdboot"):
+    for forbidden in ("ghost", "bcdboot"):
         assert not any(forbidden in name for name in identifiers), (
             f"分区阶段代码里不该引用 {forbidden}"
         )
@@ -300,13 +301,15 @@ def test_system_phase_runs_with_only_process_shell(tmp_path):
     parts = _parts()
     process = FakeProcess()
     system = SystemPhase(
-        ImagePhase(process, dism="dism.exe"), BootPhase(process, bcdboot="bcdboot.exe")
+        GhostImagePhase(process, ghost="ghost64.exe"),
+        BootPhase(process, bcdboot="bcdboot.exe"),
     )
     outcome = system.run(_ctx(tmp_path, parts=parts))
 
     assert outcome.ok is True
     assert [result.key for result in outcome.results] == ["image", "boot"]
-    assert process.calls[0][2] == "/Apply-Image"
+    assert process.calls[0][0].endswith("ghost64.exe")
+    assert "-clone,mode=pload" in process.calls[0][1]
     assert process.calls[1][0].endswith("bcdboot.exe")
 
 
@@ -438,7 +441,7 @@ def test_precheck_missing_tools_reports_all_steps(tmp_path):
     )
     ctx, events = _recording_ctx(tmp_path)
 
-    result = pipeline.precheck(ctx, missing_tools=("dism.exe",))
+    result = pipeline.precheck(ctx, missing_tools=("ghost64.exe",))
 
     assert result is not None
     assert len(result.results) == len(STEP_KEYS)
@@ -455,8 +458,8 @@ def test_real_runner_fills_job_progress(tmp_path):
     from app.application.jobs import ExecutionPlan, JobManager, JobSpec, JobStatus
     from app.application.real_runner import WindowsDiskRunner
 
-    image = tmp_path / "tiny.wim"
-    image.write_bytes(b"x")
+    image = tmp_path / "tiny.GHO"
+    image.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
     payload = {
         "partition_info": dict(PAYLOAD["partition_info"]),
         "image_info": {"image_path": str(image), "image_index": 1},

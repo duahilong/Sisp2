@@ -23,18 +23,27 @@ class FakeProcess:
     """``ProcessShell`` 替身：记录命令，按 handler 返回结果。
 
     ``handler(command, timeout, env) -> (code, output, elapsed)``；
-    默认全部成功。dism / bcdboot / 校验脚本都走这里。
+    默认全部成功。Ghost / bcdboot / 校验脚本都走这里。
     """
 
     def __init__(self, handler: Any = None) -> None:
         self.calls: list[list[str]] = []
         self.envs: list[dict[str, str]] = []
+        self.cwds: list[str | None] = []
         self._handler = handler
 
-    def run(self, command: Sequence[str], timeout: float, *, env: Any = None):
+    def run(
+        self,
+        command: Sequence[str],
+        timeout: float,
+        *,
+        env: Any = None,
+        cwd: Any = None,
+    ):
         self.calls.append(list(command))
         env = dict(env or {})
         self.envs.append(env)
+        self.cwds.append(cwd)
         if self._handler is not None:
             return self._handler(list(command), timeout, env)
         return 0, "ok", 0.1
