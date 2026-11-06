@@ -6,8 +6,8 @@
 3. 缓冲 ``JobEvent``，供 SSE 首帧与 ``/api/events/poll`` 按游标补发；
 4. 转发界面设置（``SettingsStore``）与原生文件选择框。
 
-本层由 ``app/gui_web/server.py`` 调用，不直接接触 pywebview；只有
-``pick_path`` 在桌面窗口模式下会惰性导入 pywebview 弹出原生选择框。
+本层由 ``app/gui_web/server.py`` 调用，不直接接触 pywebview；文件选择框经
+``app.gui_web.native_dialog``（本进程弹 WinForms 对话框，跨进程拿不到窗口）。
 禁止在此层写任何磁盘、PowerShell 或业务判断逻辑；
 也不 import 除 ``workflow`` 之外的模块，避免把重依赖带进界面进程。
 
@@ -487,46 +487,27 @@ class WebApi:
             return err("E_SETTINGS", str(exc))
 
     def pick_path(self, key: str = "", kind: str = "file") -> dict[str, Any]:
-        """打开原生选择框；取消返回 ``{"cancelled": True}``。"""
-        try:
-            import webview  # 只在需要弹框时才 import
-        except Exception as exc:  # noqa: BLE001
-            return err("E_NO_WEBVIEW", f"当前进程没有 pywebview：{exc}")
+        """打开原生选择框；取消返回 ``{"cancelled": True}``。
 
-        try:
-            windows = getattr(webview, "windows", None) or []
-            window = windows[0] if windows else None
-            if window is None:
-                return err("E_NO_WINDOW", "窗口尚未创建")
+        不能用 pywebview 的 ``window.create_file_dialog``：桌面模式下窗口在父
+        进程，本 API 跑在 UAC 拉起的提权子进程里，子进程的 ``webview.windows``
+        恒为空列表，只会得到 ``E_NO_WINDOW 窗口尚未创建``（点「浏览…」什么也不
+        弹）。所以选择框交给本进程用 WinForms 弹（见
+        :mod:`app.gui_web.native_dialog`，与 pywebview 内部用的是同一套对话框）。
+        """
+        from app.gui_web import native_dialog
 
-            dialog_module = getattr(webview, "FileDialog", None)
-            if dialog_module is not None:
-                if kind == "dir":
-                    dialog = dialog_module.FOLDER
-                elif kind == "save":
-                    dialog = dialog_module.SAVE
-                else:
-                    dialog = dialog_module.OPEN
-            else:
-                legacy = {"dir": "FOLDER_DIALOG", "save": "SAVE_DIALOG"}
-                dialog = getattr(webview, legacy.get(kind, "OPEN_DIALOG"))
-
-            kwargs: dict[str, Any] = {"allow_multiple": False}
-            if kind == "save":
-                # 保存框需要一个默认文件名；旧版 pywebview 不认这个参数
-                kwargs["save_filename"] = "sisp2-settings.json"
+        current = ""
+        if key:
             try:
-                selection = window.create_file_dialog(dialog, **kwargs)
-            except TypeError:
-                kwargs.pop("save_filename", None)
-                selection = window.create_file_dialog(dialog, **kwargs)
+                current = str((self._settings.get() or {}).get(key) or "")
+            except Exception:  # noqa: BLE001 - 读不到当前值不影响弹框
+                current = ""
+        try:
+            chosen = native_dialog.pick_path(kind, initial=current)
         except Exception as exc:  # noqa: BLE001
             return err("E_PICK", str(exc))
 
-        chosen = ""
-        if selection:
-            first = selection[0] if isinstance(selection, (list, tuple)) else selection
-            chosen = str(first or "")
         if not chosen:
             return ok({"cancelled": True})
 

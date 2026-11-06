@@ -272,6 +272,52 @@ def test_settings_roundtrip(client: TestClient) -> None:
     assert "extGhost" in probed
 
 
+def test_dialog_pick_uses_native_picker(client: TestClient, monkeypatch) -> None:
+    """选择框必须走本进程的 WinForms 弹框。
+
+    回归用例：以前这里调 ``webview.windows[0].create_file_dialog``，而桌面模式下
+    窗口在父进程、API 在提权子进程，子进程永远拿不到窗口，界面点「浏览…」只
+    能得到「窗口尚未创建」。
+    """
+    from app.gui_web import native_dialog
+
+    seen: dict[str, Any] = {}
+
+    def fake_pick(kind: str = "file", **kwargs: Any) -> str:
+        seen["kind"] = kind
+        seen.update(kwargs)
+        return "D:\\images\\Win11.GHO"
+
+    monkeypatch.setattr(native_dialog, "pick_path", fake_pick)
+    data = _unwrap(client.post("/api/dialog/pick", json={"key": "sysWim", "kind": "file"}))
+    assert data == {"path": "D:\\images\\Win11.GHO", "cancelled": False}
+    assert seen["kind"] == "file"
+    # 当前值当起始位置传给对话框
+    assert "initial" in seen
+    # 选中后立即落盘到设置
+    assert _unwrap(client.get("/api/settings"))["settings"]["sysWim"] == "D:\\images\\Win11.GHO"
+
+
+def test_dialog_pick_cancel_reports_cancelled(client: TestClient, monkeypatch) -> None:
+    from app.gui_web import native_dialog
+
+    monkeypatch.setattr(native_dialog, "pick_path", lambda *a, **kw: None)
+    assert _unwrap(client.post("/api/dialog/pick", json={"kind": "dir"})) == {"cancelled": True}
+
+
+def test_dialog_pick_reports_picker_failure(client: TestClient, monkeypatch) -> None:
+    from app.gui_web import native_dialog
+
+    def boom(*_args: Any, **_kwargs: Any) -> str:
+        raise RuntimeError("找不到 powershell.exe，无法弹出选择框")
+
+    monkeypatch.setattr(native_dialog, "pick_path", boom)
+    body = client.post("/api/dialog/pick", json={"kind": "dir"}).json()
+    assert body["ok"] is False
+    assert body["error"]["code"] == "E_PICK"
+    assert "powershell" in body["error"]["message"]
+
+
 # ---------------------------------------------------------------- SSE
 @contextlib.contextmanager
 def _live_server(app: Any):
