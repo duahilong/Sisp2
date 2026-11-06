@@ -65,13 +65,18 @@ python -m pytest tests/ -q
 ```
 
 测试主要依赖替身与注入实现，目标是验证逻辑而非真实设备写盘；`app/safety_guard.py` 会在
-执行前拦下 diskpart/format/bcdboot/dism 等写盘命令（详见[测试指南](Docs/测试指南.md)）。Web API 测试需要 `httpx`；SSE 测试会在后台线程启动真实 uvicorn（随机空闲端口），因此需要 `uvicorn`。不要在真实磁盘环境中尝试写盘测试。
+执行前拦下 diskpart/format/bcdboot/写盘 cmdlet 等危险命令（`dism /Get-*` 这类只读查询除外，详见[测试指南](Docs/测试指南.md)）。Web API 测试需要 `httpx`；SSE 测试会在后台线程启动真实 uvicorn（随机空闲端口），因此需要 `uvicorn`。不要在真实磁盘环境中尝试写盘测试。
 
 ## 设计原型
 
 [`design/`](design/) 目录包含 `disk-tools-app.html` 与 `disk-tools-prototype.html` 两个可点击 HTML 界面原型，用于设计参考；原型不连接本项目后端，也不执行磁盘操作。正式运行界面位于 `app/gui_web/ui/index.html`。
 
 ## 文档索引
+
+共 8 篇：**6 篇主文档**（架构、配置、Web/部署、安全、测试、打包）、1 份事故报告、
+1 份历史测试快照。`Docs/` 下的文件名全部是中文；旧英文名（`architecture.md` /
+`security.md` / `web-api.md` / `testing.md` / `packaging.md` / `configuration.md`）已不存。
+快照类文档只作对照，**当前行为以代码和主文档为准**。
 
 | 文档 | 内容 |
 | --- | --- |
