@@ -105,7 +105,6 @@ class ExecutionPlan:
     size_display: str = ""
     identity: dict[str, Any] = field(default_factory=dict)
     drive_letters: dict[str, str] = field(default_factory=dict)
-    config_path: str | None = None
     dry_run: bool = False
     warnings: tuple[str, ...] = ()
     checks: tuple[Any, ...] = ()
@@ -129,7 +128,6 @@ class ExecutionPlan:
             "size_display": self.size_display,
             "identity": dict(self.identity),
             "drive_letters": dict(self.drive_letters),
-            "config_path": self.config_path,
             "dry_run": self.dry_run,
             "warnings": list(self.warnings),
             "checks": [
@@ -149,7 +147,8 @@ class JobSpec:
     """交给执行器的输入；必须可 JSON 序列化，便于落盘与重放。"""
 
     disk_number: int
-    config_payload: dict[str, Any] = field(default_factory=dict)
+    # 这次装机要用的全部参数（形状见 ``app.application.payload.TaskPayload``）。
+    task_payload: dict[str, Any] = field(default_factory=dict)
     expected_identity: dict[str, Any] = field(default_factory=dict)
     drive_letters: dict[str, str] = field(default_factory=dict)
     dry_run: bool = False
@@ -160,7 +159,7 @@ class JobSpec:
     def to_dict(self) -> dict[str, Any]:
         return {
             "disk_number": self.disk_number,
-            "config_payload": dict(self.config_payload),
+            "task_payload": dict(self.task_payload),
             "expected_identity": dict(self.expected_identity),
             "drive_letters": dict(self.drive_letters),
             "dry_run": self.dry_run,

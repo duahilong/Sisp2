@@ -70,7 +70,8 @@ from app.models import STEP_FAILED, STEP_OK, STEP_SKIPPED, StepResult, WorkerRes
 
 _LOGGER = logging.getLogger(__name__)
 
-_FS_TOKENS = {"ntfs": "ntfs", "exfat": "exfat", "fat32": "fat32"}
+# 数据分区只允许 NTFS（见 ``partitions.DATA_FS_CHOICES``）；EFI 固定 FAT32。
+_FS_TOKENS = {"ntfs": "ntfs"}
 
 # 兼容旧名字（外部脚本与测试在用）。
 _partition_verdict = partition_verdict
@@ -80,7 +81,9 @@ _verify_verdict = verify_verdict
 def data_fs_token(payload: Mapping[str, Any]) -> str:
     """数据分区文件系统：``partition_info.data_fs`` → diskpart 参数。
 
-    非法/缺失时退回 ``ntfs``（与历史行为一致），绝不把用户输入直接拼进脚本。
+    现在已经没有第二种可选值：数据分区恒为 NTFS。仍然过一遍白名单、
+    而不是直接返回常量，是为了守住“用户输入不参与拼脚本”这条线——旧任务文件
+    或第三方调用者送进来的 ``data_fs`` 只会被忽略，不会变成格式参数。
     """
     info = payload.get("partition_info") if isinstance(payload, Mapping) else None
     raw = str((info or {}).get("data_fs") or "NTFS").strip().lower()
@@ -214,7 +217,7 @@ class WindowsDiskRunner:
     ) -> WorkerResult:
         cancel_event = cancel_event or threading.Event()
         disk_number = to_int(getattr(spec, "disk_number", None)) or 0
-        payload = dict(getattr(spec, "config_payload", None) or {})
+        payload = dict(getattr(spec, "task_payload", None) or {})
         letters = {
             str(key): str(value).strip().upper()[:1]
             for key, value in dict(getattr(spec, "drive_letters", None) or {}).items()

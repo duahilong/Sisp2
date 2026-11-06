@@ -10,7 +10,7 @@ python -m app.gui_web.main --serve          # 前台服务
 python -m app.gui_web.main --serve --port 8765
 ```
 
-参数：`-j/--config`、`--dry-run`、`--elevate`、`--debug`、`--serve`、`--port`（默认 8765）、`--host`（默认 `127.0.0.1`）、`--settings`、`--width`、`--height`。桌面模式需要 pywebview；`--serve` 不依赖它。两种模式都加载同一个本机 HTTP 服务。
+参数：`--dry-run`、`--elevate`、`--debug`、`--serve`、`--port`（默认 8765）、`--host`（默认 `127.0.0.1`）、`--settings`、`--width`、`--height`。（`-j/--config` 已移除。）桌面模式需要 pywebview；`--serve` 不依赖它。两种模式都加载同一个本机 HTTP 服务。
 
 桌面模式的进程模型：**窗口进程不提权**（exe 清单 `asInvoker`），它会用 UAC 拉起
 `Sisp2.exe --backend --serve --host 127.0.0.1 --port <N> --parent-pid <界面 pid>`
@@ -31,9 +31,8 @@ python -m app.gui_web.main --serve --port 8765
 | `GET /static/*` | 托管 `ui/css`、`ui/js`（无构建步骤，直接送 ES 模块） |
 | `GET /health` | 健康探针 |
 | `GET /api/info` | 版本、平台、会话 dry-run |
-| `POST /api/session` | `{config_path, dry_run}`；重启会话并清空 WebApi 事件缓冲 |
+| `POST /api/session` | `{dry_run?}`；重启会话并清空 WebApi 事件缓冲 |
 | `GET /api/disks` | 重扫硬盘 |
-| `POST /api/config/check` | `{config_path}` |
 | `POST /api/prepare` | `{selection, dry_run}`；selection 为盘号数组或盘号到覆盖对象的映射（每盘覆盖支持 `c_size`、`data_size`、`data_partitions`、`win_gho`、`image_index`）；省略 selection 表示「本次扫描里所有可选定的盘」，显式传空数组仍然报错（`E_PREPARE`） |
 | `POST /api/submit` | 登记等待确认任务 |
 | `POST /api/confirm` | `{job_ids, confirm_text?}`；`typeToConfirm` 开启时 `confirm_text` 必须是盘号或磁盘型号 |

@@ -4,7 +4,7 @@
 算术、dry-run 生成脚本预览），加一个数据分区要同时改三处，很容易漂移。这里把
 布局收敛成一个纯函数，执行器 / 预检 / 预览 / 界面摘要都消费同一份结果：
 
-    EFI（FAT32） → Windows（NTFS） → Data（NTFS/exFAT） → Data2（可选，NTFS/exFAT）
+    EFI（FAT32） → Windows（NTFS） → Data（NTFS） → Data2（可选，NTFS）
 
 约定：
 
@@ -18,8 +18,8 @@
   所以最后一项永远不会容量不足。界面把最后一项的输入框做成只读的预估，
   不再发显式数字；
 - 显式项（EFI、C、以及有 E 时的 D）仍然可能顶到盘尾，容量校验把这些算清楚；
-- 文件系统统一成规范写法（``NTFS`` / ``exFAT`` / ``FAT32``），拼脚本时再转成
-  diskpart 的小写 token；
+- 文件系统统一成规范写法（``NTFS`` / ``FAT32``），拼脚本时再转成
+  diskpart 的小写 token；数据分区只允许 NTFS（见 ``DATA_FS_CHOICES``）。
 - 容量算术留 ``LAYOUT_SLACK_MB``（GPT 盘首/盘尾各 1 MB，再加 1 MB 冗余）。
   实测（40 GB 盘、diskpart 10.0.19041）：显式分区合计 = 盘容量 − 1 MB 时
   最后一个 ``create`` 失败（``exit=-2147024809``），= 容量 − 2 MB 时成功且
@@ -35,6 +35,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from app.application.contracts import format_size
+from app.application.payload import PartitionLayoutError, require_layout_keys
 from app.application.runner_utils import to_int, to_text
 from app.drive_letters import letter_roles
 
@@ -82,14 +83,19 @@ BASIC_GPT = "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7"
 # 时最后一个 create 失败。这里取 3 MB，给 4Kn / 非整数 MB 容量留 1 MB 冗余。
 LAYOUT_SLACK_MB = 3
 
-# 额外数据分区只给这两个：diskpart 对 >32 GB 的 FAT32 会直接失败。
-DATA_FS_CHOICES = ("NTFS", "exFAT")
+# 额外数据分区只给 NTFS：
+# - FAT32 在 >32 GB 的盘上 diskpart 直接失败，从来没进过候选；
+# - exFAT 曾经可选，但它对装机盘没有实际收益（没有 NTFS 的权限/日志/压缩），
+#   反而让「格式化参数」多出一个必须跟着设置页走的分叉点。
+# 类型本体定义在 ``app.application.payload``（那里需要它来避免循环导入），
+# 这里重新导入，保持 ``from app.application.partitions import PartitionLayoutError`` 可用。
+DATA_FS_CHOICES = ("NTFS",)
 
+# 规范写法表。**故意保留 exFAT 的映射**：这样传进来的 exFAT 会被规范成
+# 「exFAT」而不是静默地被 fallback 换成 NTFS，然后被 DATA_FS_CHOICES 拦下并
+# 报一句可读的错误。「不支持的格式要么明确报错，要么必须是用户要的结果」，
+# 静默改写成另一种文件系统是最坏的一种。
 _FS_CANON = {"ntfs": "NTFS", "exfat": "exFAT", "fat32": "FAT32"}
-
-
-class PartitionLayoutError(ValueError):
-    """布局不合法：缺大小、分区太多、文件系统不支持……消息直接给界面用。"""
 
 
 @dataclass(frozen=True)
@@ -187,6 +193,16 @@ def _canonical_fs(value: Any, *, fallback: str = "NTFS") -> str:
     return _FS_CANON.get(text.lower(), fallback)
 
 
+def _data_fs(value: Any) -> str:
+    """数据分区的文件系统：规范写法 + 只允许 ``DATA_FS_CHOICES`` 里的值。"""
+    name = _canonical_fs(value)
+    if name not in DATA_FS_CHOICES:
+        raise PartitionLayoutError(
+            f"数据分区的文件系统不支持：{name}（可选 {' / '.join(DATA_FS_CHOICES)}）"
+        )
+    return name
+
+
 def _letter_of(letters: Mapping[str, str] | None, role: str) -> str | None:
     if not letters:
         return None
@@ -265,6 +281,7 @@ def plan_partitions(
 
     ``letters`` 给出时顺带把盘符写进结果，方便执行器和界面共用同一份计划。
     """
+    require_layout_keys(payload)
     info = partition_info(payload)
 
     raw_efi = _positive_number(info.get("efi_size_mb"))
@@ -294,7 +311,7 @@ def plan_partitions(
             PlannedPartition(
                 role="data",
                 label="Data",
-                file_system=_canonical_fs(info.get("data_fs")),
+                file_system=_data_fs(info.get("data_fs")),
                 size_mb=data_mb,
             )
         )

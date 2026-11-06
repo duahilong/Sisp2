@@ -10,7 +10,9 @@
 1. 每个 ``ui/js/*.js`` 都能通过 ``node --check``（语法）；
 2. ``index.html`` 里所有 ``/static/...`` 引用都指向真实文件；
 3. 每个 ``import ... from './x.js'`` 的目标文件存在；
-4. ``derive.js`` 的纯函数在给定输入下输出正确（用 node 真跑一遍）。
+4. 具名导入的每个名字在目标模块里**确实被导出**（ES 模块链接期错误会让整个
+   模块图不实例化，界面只剩静态 HTML）；
+5. ``derive.js`` 的纯函数在给定输入下输出正确（用 node 真跑一遍）。
 
 返回码：0 全部通过，1 有失败项。失败明细打到 stdout。
 """
@@ -31,6 +33,17 @@ JS = UI / "js"
 
 _IMPORT_RE = re.compile(r"""from\s+['"]\./([\w.-]+\.js)['"]""")
 _ATTR_RE = re.compile(r"""(?:href|src)="(/static/[^"]+)\"""")
+
+# 具名导入：``import { a, b as c } from './x.js'``（允许换行）
+_NAMED_IMPORT_RE = re.compile(
+    r"""import\s*\{([^}]*)\}\s*from\s*['"]\./([\w.-]+\.js)['"]""", re.S
+)
+# 导出形式：声明式（函数/类/常量）+ 列表式（``export { a, b as c }``）+ 通配
+_EXPORT_DECL_RE = re.compile(
+    r"""export\s+(?:async\s+)?(?:function|class|const|let|var)\s+([\w$]+)"""
+)
+_EXPORT_LIST_RE = re.compile(r"""export\s*\{([^}]*)\}""", re.S)
+_EXPORT_STAR_RE = re.compile(r"""export\s*\*""")
 
 DERIVE_SCRIPT = """
 import { fmtSize, fsClass, segments, checkSizes, checkLayout, unallocatedBytes, partShortName, fitLayout, reserveGb, autoPartitionRole, phaseGroups, progressByPhase, skippedByFailure, layoutVerdict } from './derive.js';
@@ -220,6 +233,51 @@ def check_imports() -> list[str]:
     return failures
 
 
+def _exported_names(source: str) -> set[str] | None:
+    """模块导出的名字集合；有 ``export *`` 时返回 None（无法静态判定，不检查）。"""
+    if _EXPORT_STAR_RE.search(source):
+        return None
+    names = set(_EXPORT_DECL_RE.findall(source))
+    for group in _EXPORT_LIST_RE.findall(source):
+        for item in group.split(","):
+            # ``a as b`` 导出的是 b
+            token = item.split(" as ")[-1].strip()
+            if token:
+                names.add(token)
+    return names
+
+
+def check_named_exports() -> list[str]:
+    """具名导入必须在目标模块里有对应导出。
+
+    浏览器遇到缺失的具名导出会直接报 “does not provide an export named X”，
+    整个模块图都不实例化——界面停在静态 HTML 上，白屏或只剩骨架。
+    这类错误 ``node --check`` 查不出来（它只看单个文件的语法），必须做跨文件核对。
+    曾经的实例：重构删掉了 view-install.js 的 ``loadImages`` 实现，
+    但 main.js 的 import 没删，打包后的界面彻底不可用。
+    """
+    failures: list[str] = []
+    cache: dict[str, set[str] | None] = {}
+    for path in sorted(JS.glob("*.js")):
+        text = path.read_text(encoding="utf-8")
+        for names, target in _NAMED_IMPORT_RE.findall(text):
+            if target not in cache:
+                target_path = JS / target
+                cache[target] = (
+                    _exported_names(target_path.read_text(encoding="utf-8"))
+                    if target_path.is_file()
+                    else set()
+                )
+            exported = cache[target]
+            if exported is None:
+                continue
+            for item in names.split(","):
+                wanted = item.split(" as ")[0].strip()
+                if wanted and wanted not in exported:
+                    failures.append(f"{path.name} 从 {target} 导入了未导出的名字: {wanted}")
+    return failures
+
+
 def check_html_assets() -> list[str]:
     index = UI / "index.html"
     if not index.is_file():
@@ -282,6 +340,7 @@ def main() -> int:
     failures: list[str] = []
     failures += check_syntax(node)
     failures += check_imports()
+    failures += check_named_exports()
     failures += check_html_assets()
 
     tmp = Path(tempfile.mkdtemp(prefix="sisp-ui-check-"))
@@ -297,7 +356,7 @@ def main() -> int:
         for item in failures:
             print(f"  - {item}")
         return 1
-    print(f"前端检查通过：{len(list(JS.glob('*.js')))} 个模块，资源引用与 derive.js 行为正常")
+    print(f"前端检查通过：{len(list(JS.glob('*.js')))} 个模块，导入/导出、资源引用与 derive.js 行为正常")
     return 0
 
 

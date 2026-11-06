@@ -38,16 +38,20 @@ _FAKE_IMAGE_PATH.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
 
 _GIB = 1024**3
 # 单测用小尺寸（C 30 GB）测算术：显式放宽后端下限（真实布局 C ≥ 60 GB）。
-_PAYLOAD: dict[str, Any] = {
-    "partition_info": {
-        "efi_size_mb": 300,
-        "c_size_gb": 30,
-        "data_size_gb": "auto",
-        "allow_small_partitions": True,
-    },
+# 任务载荷现在只有两个来源：设置页（构造时的 ``partition_defaults`` 快照 +
+# 每次现读的 ``settings_provider``）。这里就按这两条路注入，不再有“预检顺带
+# 返回一份 config_payload”的旁路。
+_SETTINGS: dict[str, Any] = {
     # 计划会按 payload 重算镜像可用性（后缀 + 存在性 + Ghost 文件头），
     # 所以这里用一个真实存在的 .GHO 占位文件。
-    "image_info": {"image_path": str(_FAKE_IMAGE_PATH), "image_index": 1},
+    "sysWim": str(_FAKE_IMAGE_PATH),
+    "imageDefaultIndex": 1,
+}
+_PARTITION_DEFAULTS: dict[str, Any] = {
+    "efi_size_mb": 300,
+    "c_size_gb": 30,
+    "data_size_gb": None,  # None = 吃掉剩余空间（等价于设置里的 "auto"）
+    "allow_small_partitions": True,
 }
 
 
@@ -89,14 +93,11 @@ class _FakeService:
     def execute_spec(self, spec, cancel_event):
         return WorkerResult.dry_run_plan(int(getattr(spec, "disk_number", 0) or 0))
 
-    def check_config(self, config_path=None):
-        return SimpleNamespace(passed=True, message="配置可解析", error_code=0)
 
 
-def _preflight(config_path=None) -> dict[str, Any]:
+def _preflight(*, dry_run: bool = False) -> dict[str, Any]:
     return {
         "results": [{"name": "运行前检查", "passed": True, "message": "ok"}],
-        "config_payload": _PAYLOAD,
     }
 
 
@@ -107,8 +108,10 @@ def _build_client(
         service=_FakeService([_disk(1), _disk(2)]),
         dry_run=True,
         preflight_runner=_preflight,
+        partition_defaults=_PARTITION_DEFAULTS,
+        settings_provider=lambda: dict(_SETTINGS),
     )
-    wf.start(None, dry_run=True)
+    wf.start(dry_run=True)
     store = build_store(tmp_path / "settings.json")
     api = WebApi(wf, settings=store, log_dir=log_dir)
     app = create_app(api, wf, host_check=host_check)
@@ -157,7 +160,7 @@ def test_host_check_allows_loopback(tmp_path: Path) -> None:
 
 # ---------------------------------------------------------------- 会话与磁盘
 def test_session_and_disks(client: TestClient) -> None:
-    session = _unwrap(client.post("/api/session", json={"config_path": None, "dry_run": True}))
+    session = _unwrap(client.post("/api/session", json={"dry_run": True}))
     assert len(session["disks"]) == 2
     assert session["dry_run"] is True
 
@@ -169,15 +172,16 @@ def test_session_cannot_upgrade_forced_dry_run(tmp_path: Path) -> None:
     """控制器以 dry-run 启动后，API 传 dry_run=false 也不能升级为真实模式。"""
     client, wf = _build_client(tmp_path)
 
-    session = _unwrap(client.post("/api/session", json={"config_path": None, "dry_run": False}))
+    session = _unwrap(client.post("/api/session", json={"dry_run": False}))
 
     assert session["dry_run"] is True
     assert wf.service.dry_run is True
 
 
-def test_check_config(client: TestClient) -> None:
-    data = _unwrap(client.post("/api/config/check", json={"config_path": None}))
-    assert data["passed"] is True
+def test_config_check_endpoint_is_gone(client: TestClient) -> None:
+    """业务配置那一层移除后，重新校验配置的接口也一并删掉。"""
+    response = client.post("/api/config/check", json={})
+    assert response.status_code in (404, 405)
 
 
 # ---------------------------------------------------------------- 任务全流程
@@ -236,7 +240,7 @@ def test_prepare_accepts_per_disk_override_mapping(client: TestClient) -> None:
         )
     )
     assert len(prepared) == 1
-    info = prepared[0]["spec"]["config_payload"]["partition_info"]
+    info = prepared[0]["spec"]["task_payload"]["partition_info"]
     assert info["c_size_gb"] == 20
     assert info["data_size_gb"] == 30
     assert prepared[0]["spec"]["disk_number"] == 1

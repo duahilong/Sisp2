@@ -277,8 +277,8 @@ export function extraLetter(index) {
 
 /** 分区大小校验（与后端 ``plan_partitions`` / ``check_layout`` 同口径）。
  *
- * ``efiMb`` 是 EFI 分区大小：它来自配置文件（``partition_info.efi_size_mb``，
- * 常见 100/300 MB），界面拿不到，所以按 100 MB 估一个下限；真实的
+ * ``efiMb`` 是 EFI 分区大小：它来自设置页默认值（``efiDefaultMb``，兜底
+ * 100 MB），界面拿不到，所以按 100 MB 估一个下限；真实的
  * EFI 大小在第 4 步的执行计划里能读到，超了后端也会把阻断项写回来。
  *
  * **最后一个数据分区永远不带 ``size=``**（由 diskpart 吃掉剩余空间），所以：

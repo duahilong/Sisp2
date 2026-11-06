@@ -22,7 +22,6 @@ from app.gui_web import main as gui
 def _args(**kwargs) -> Namespace:
     """``main()`` 的默认参数快照，按需覆盖。"""
     base = {
-        "config": None,
         "dry_run": False,
         "settings": None,
         "debug": False,
@@ -42,14 +41,15 @@ def _args(**kwargs) -> Namespace:
 def test_backend_argv_marks_child_and_forwards_options() -> None:
     """后端子进程必须带上 ``--backend``、父 pid 和界面里选好的全部参数。"""
     argv = gui.backend_argv(
-        _args(config="D:/cfg/win11.json", dry_run=True, settings="D:/cfg/settings.json", debug=True),
+        _args(dry_run=True, settings="D:/cfg/settings.json", debug=True),
         8901,
         4242,
     )
     assert argv[:2] == ["--backend", "--serve"]
     assert argv[argv.index("--parent-pid") + 1] == "4242"
     assert argv[argv.index("--port") + 1] == "8901"
-    assert argv[argv.index("-j") + 1] == "D:/cfg/win11.json"
+    # 业务配置那一层已移除：子命令里不能再出现 -j/--config
+    assert "-j" not in argv and "--config" not in argv
     assert "--dry-run" in argv
     assert argv[argv.index("--settings") + 1] == "D:/cfg/settings.json"
     assert "--debug" in argv

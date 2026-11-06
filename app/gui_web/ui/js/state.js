@@ -187,14 +187,14 @@ export function targetOf(diskNumber) {
 
 /** 第 2 步能拿到的 EFI 分区大小（MB）。
  *
- * 优先用执行计划的真实值（第 4 步会回填 ``config_payload.partition_info``），
+ * 优先用执行计划的真实值（第 4 步会回填 ``task_payload.partition_info``），
  * 其次用设置里的 ``efiDefaultMb``，都没有才用默认 100 MB。
  * 它决定给 EFI/对齐预留多少余量，所以值不准只会多一点或少一点“未分配”，
  * 不会让计划变得不合法（后端 `_check_partition_fit` 会再验一次）。
  */
 export function reserveEfiMb() {
-  const item = (state.plans || []).find((plan) => plan.spec && plan.spec.config_payload);
-  const info = item && item.spec.config_payload.partition_info;
+  const item = (state.plans || []).find((plan) => plan.spec && plan.spec.task_payload);
+  const info = item && item.spec.task_payload.partition_info;
   const fromPlan = Number(info && info.efi_size_mb);
   if (fromPlan > 0) return fromPlan;
   const fromSettings = Number(state.settings && state.settings.efiDefaultMb);
@@ -255,15 +255,15 @@ export function targetError(target) {
   );
 }
 
-/** 数据分区（D 与 E）统一使用的文件系统。
+/** 数据分区（D 与 E）统一使用的文件系统：恒为 NTFS。
  *
- * 跟随设置里的 `defaultFs`，但只允许 NTFS / exFAT（后端拒绝额外分区的 FAT32，
- * 大容量 FAT32 在 diskpart 里本来就格不了），其它值一律回落 NTFS。
- * 界面上不给 E 改文件系统，保证它和 D 一致——也避免用户把一个分区搞成 FAT32。
+ * 曾经跟随设置里的 `defaultFs`（NTFS / exFAT）。exFAT 已从产品里去掉：
+ * 它对装机盘没有实际收益（没有 NTFS 的权限/日志/压缩），却让“格式化参数”
+ * 多出一处必须和设置页同步的分叉点。这里保留函数名，是为了让调用点
+ * （`view-install.js` 的显示、`selectionPayload()` 的 `file_system`）不必改动。
  */
 export function dataFs() {
-  const raw = String((state.settings && state.settings.defaultFs) || 'NTFS').trim().toUpperCase();
-  return raw === 'EXFAT' ? 'exFAT' : 'NTFS';
+  return 'NTFS';
 }
 
 /** 加一个数据分区（E）。平分剩余容量；放不下两张下限时返回 false。 */

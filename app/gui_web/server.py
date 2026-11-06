@@ -110,19 +110,12 @@ def create_app(
     # ------------------------------------------------------------- 会话与磁盘
     @app.post("/api/session")
     def start_session(body: dict[str, Any] | None = None) -> dict[str, Any]:
-        body = body or {}
-        raw = body.get("dry_run")
-        return api.start_session(
-            body.get("config_path"), None if raw is None else bool(raw)
-        )
+        raw = (body or {}).get("dry_run")
+        return api.start_session(None if raw is None else bool(raw))
 
     @app.get("/api/disks")
     def refresh_disks() -> dict[str, Any]:
         return api.refresh_disks()
-
-    @app.post("/api/config/check")
-    def check_config(body: dict[str, Any] | None = None) -> dict[str, Any]:
-        return api.check_config((body or {}).get("config_path"))
 
     # ------------------------------------------------------------- 计划与任务
     @app.post("/api/prepare")

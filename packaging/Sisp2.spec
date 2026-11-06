@@ -5,8 +5,8 @@
 
 打包内容包括：
 
-- 界面文件 ``app/gui_web/ui/index.html``、业务配置模板 ``json/win11.example.json``
-  作为 datas 打进包内，运行时由 ``app/resources.py`` 解析；
+- 界面文件 ``app/gui_web/ui/index.html`` 及其 css/js 作为 datas 打进包内，
+  运行时由 ``app/resources.py`` 解析；
 - ``uvicorn`` 的 loop / protocol / lifespan 实现是动态导入的，必须整包收进来；
 - pywebview 的平台后端（WinForms + WebView2）也是惰性导入。
 
@@ -30,7 +30,6 @@ DATAS = [
     # 界面是 ES 模块：样式和脚本都必须进包，否则 exe 里只剩一个空壳。
     (os.path.join(UI_ROOT, "css"), os.path.join(UI_DEST, "css")),
     (os.path.join(UI_ROOT, "js"), os.path.join(UI_DEST, "js")),
-    (os.path.join(ROOT, "json", "win11.example.json"), "json"),
 ]
 
 # uvicorn 按字符串名加载实现（loops/protocols/lifespan），静态分析看不到

@@ -23,7 +23,6 @@ import platform
 import sys
 import threading
 import time
-from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -123,11 +122,7 @@ class WebApi:
         })
 
     # ------------------------------------------------------------------ 会话
-    def start_session(
-        self,
-        config_path: str | None = None,
-        dry_run: bool | None = None,
-    ) -> dict[str, Any]:
+    def start_session(self, dry_run: bool | None = None) -> dict[str, Any]:
         """启动会话。
 
         ``dry_run`` 省略（``None``）表示“保持进程当前的模式”——GUI 的模式在
@@ -135,9 +130,7 @@ class WebApi:
         界面不该在每次刷新会话时把它改回真实写盘。
         """
         try:
-            session = self._wf.start(
-                config_path, dry_run=None if dry_run is None else bool(dry_run)
-            )
+            session = self._wf.start(dry_run=None if dry_run is None else bool(dry_run))
         except Exception as exc:  # noqa: BLE001 - 任何异常都要变成信封返回给界面
             return err("E_START", str(exc))
         with self._lock:
@@ -282,7 +275,7 @@ class WebApi:
                 from app.application.partitions import plan_partitions, preview_segments
 
                 parts = plan_partitions(
-                    item.spec.config_payload, letters=item.spec.drive_letters
+                    item.spec.task_payload, letters=item.spec.drive_letters
                 )
                 segments = preview_segments(number, parts)
             except Exception as exc:  # noqa: BLE001 - 布局非法也要能回一句人话
@@ -378,20 +371,13 @@ class WebApi:
     def _excluded_names(self) -> list[str]:
         """当前生效的“禁止操作”的硬盘型号名单。
 
-        两个来源并存：设置页的 ``excludedDiskNames``（用户在界面上维护）与会话
-        业务配置里的 ``excluded_disk_names``（``-j`` 指定的配置文件）。取并集、
+        唯一来源是设置页的 ``excludedDiskNames``（业务配置文件那一层已移除）。
         去重、丢空项；大小写不在这里处理，``_protection_reasons`` 自己 casefold。
         """
-        session = getattr(self._wf, "session", None)
-        payload = getattr(session, "config_payload", None) if session is not None else None
-        sources = (
-            self._settings.get().get("excludedDiskNames"),
-            payload.get("excluded_disk_names") if isinstance(payload, Mapping) else None,
-        )
+        source = self._settings.get().get("excludedDiskNames")
         names: list[str] = []
-        for source in sources:
-            if isinstance(source, (list, tuple)):
-                names.extend(str(item).strip() for item in source if str(item).strip())
+        if isinstance(source, (list, tuple)):
+            names.extend(str(item).strip() for item in source if str(item).strip())
         return list(dict.fromkeys(names))
 
     def _gate(self, disk_number: int, identity: dict[str, Any]) -> Any:
@@ -399,7 +385,7 @@ class WebApi:
 
         ``excluded_names`` 必须带上：``require_disk_writable`` 的第 5 道判定只认
         入参里的名单，不读全局状态；漏传等于让“排除名单”在分区与修复引导两条
-        旁路上完全失效（整盘安装走的是 ``spec.config_payload``，不受影响）。
+        旁路上完全失效（整盘安装走的是 ``spec.task_payload``，不受影响）。
         """
         service = self._wf.service
         gate = getattr(service, "require_disk_writable", None)
@@ -566,23 +552,6 @@ class WebApi:
             return ok({"path": str(path)})
         except Exception as exc:  # noqa: BLE001
             return err("E_SETTINGS", str(exc))
-
-    # ------------------------------------------------------------------ 配置
-    def check_config(self, config_path: str | None = None) -> dict[str, Any]:
-        try:
-            checker = getattr(self._wf, "check_config", None)
-            if checker is not None:
-                result = checker(config_path)
-            else:
-                # 后端尚未打上 workflow 补丁时的回退路径
-                result = self._wf.service.check_config(config_path)
-        except Exception as exc:  # noqa: BLE001
-            return err("E_CONFIG", str(exc))
-        return ok({
-            "passed": bool(result.passed),
-            "message": str(result.message or ""),
-            "error_code": int(result.error_code or 0),
-        })
 
     def app_info(self) -> dict[str, Any]:
         session = self._wf.session

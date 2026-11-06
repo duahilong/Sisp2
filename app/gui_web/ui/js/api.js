@@ -57,7 +57,6 @@ export const api = {
   startSession: (options = {}) => post('/api/session', options),
   disks: () => get('/api/disks'),
   refreshDisks: () => get('/api/disks'),
-  checkConfig: (configPath) => post('/api/config/check', { config_path: configPath }),
 
   // 计划与任务
   prepare: (selection, dryRun) => post('/api/prepare', { selection, dry_run: dryRun }),

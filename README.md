@@ -37,13 +37,15 @@ python packaging/build.py
 # → dist/Sisp2.exe（图形界面，约 18 MB）
 ```
 
-exe 的参数与源码运行一致（`--dry-run` / `--serve` / `--config` / `--settings` 等）；首次运行会在 exe 同目录把 `json/win11.example.json` 复制成可编辑的 `json/win11.json`，设置仍保存在 `%APPDATA%\Sisp`。细节（提权、日志位置、体积、未签名等限制）见[打包说明](Docs/打包与分发.md)。
+exe 的参数与源码运行一致（`--dry-run` / `--serve` / `--settings` 等）；设置保存在 `%APPDATA%\Sisp`，没有额外的配置文件要维护。细节（提权、日志位置、体积、未签名等限制）见[打包说明](Docs/打包与分发.md)。
 
 ## 配置
 
-日常配置都在界面「设置」里（EFI/系统/数据分区大小、文件系统、默认镜像与版本、禁止操作的硬盘型号、外部工具路径、安全开关）。业务 JSON 是可选的预设文件：仓库跟踪模板 `json/win11.example.json`，首次运行复制成 `json/win11.json`（已 gitignore）；也可以用 `-j`/`--config` 或 `SISP_CONFIG` 指定。无 `-j` 时界面设置优先，显式指定时业务 JSON 优先。详见[配置说明](Docs/配置说明.md)。
+**全部配置都在界面「设置」里**：EFI/系统/数据分区大小、默认镜像位置与版本、禁止操作的硬盘型号、外部工具路径、安全开关。数据分区的文件系统固定为 NTFS（不可选）。
 
-界面设置与业务配置分离，默认保存于 `%APPDATA%\Sisp\settings.json`（无 `APPDATA` 时为用户目录下 `.config/Sisp/settings.json`）；GUI 可用 `--settings` 指定位置。表内字段均已接入运行时，每个字段的真实行为、生效时机以及仍需说明的边界（例如 `language` 只影响页面 `lang`、外部工具类路径只参与预检）列于[配置说明](Docs/配置说明.md)。
+设置默认保存于 `%APPDATA%\Sisp\settings.json`（无 `APPDATA` 时为用户目录下 `.config/Sisp/settings.json`）；GUI 可用 `--settings` 指定位置。
+
+> 旧版本的「业务 JSON 配置文件」（`json/win11.json`、`-j/--config`、`SISP_CONFIG`）已整条移除。同一个参数以前有两处来源、优先级还取决于是否显式传了 `-j`，实测出现过「界面里看着 60 GB、实际按 30 GB 拒绝」的困惑。现在只有一处来源：设置页。每个字段的真实行为与生效时机见[配置说明](Docs/配置说明.md)。
 
 ## 当前安全行为与限制
 
@@ -53,7 +55,7 @@ exe 的参数与源码运行一致（`--dry-run` / `--serve` / `--config` / `--s
 - 界面默认开启 `typeToConfirm`（真实执行须手输盘号或型号）与 `confirmBeforeStart`（须勾选已核对目标磁盘）；两者可在设置里关闭，关闭后只剩白名单与身份校验。
 - Web 默认 loopback。Host 校验仅校验 Host 名称、不是身份认证；改为非 loopback 监听时没有鉴权，网络可达的写盘接口具有高风险。
 - SSE 重放依赖进程内有限缓冲；队列满会丢弃新事件，缓冲淘汰也会使旧事件无法补发，不能保证完整事件历史。
-- 预检仅在拿到镜像路径（业务配置或设置里的默认镜像）时检查文件是否存在；都没有路径时预检不报，真实执行器仍会拒绝缺少镜像路径。
+- 预检仅在设置里填了镜像路径（`sysWim`）时检查文件是否存在；没填时预检不报，真实执行器仍会拒绝缺少镜像路径。
 
 详见[安全边界](Docs/安全边界.md)。
 

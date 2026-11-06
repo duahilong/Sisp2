@@ -134,29 +134,25 @@ class _FakeService:
     def execute_spec(self, spec, cancel_event):
         return WorkerResult.dry_run_plan(int(getattr(spec, "disk_number", 0) or 0))
 
-    def check_config(self, config_path=None):
-        return SimpleNamespace(passed=True, message="配置可解析", error_code=0)
 
 
 def _controller(image_path: str) -> WorkflowController:
-    def preflight(config_path=None, dry_run=False):
-        return {
-            "results": [{"name": "运行前检查", "passed": True, "message": "ok"}],
-            "config_payload": {
-                "partition_info": {
-                    "efi_size_mb": 300,
-                    "c_size_gb": 10,
-                    # 单测用小尺寸测算术：后端下限（C ≥ 60 GB）显式放宽
-                    "allow_small_partitions": True,
-                },
-                "image_info": {"image_path": image_path, "image_index": 1},
-            },
-        }
+    """载荷来源只有两条：构造时的分区默认值快照 + 现读的设置（镜像路径）。"""
+
+    def preflight(*, dry_run: bool = False) -> dict[str, Any]:
+        return {"results": [{"name": "运行前检查", "passed": True, "message": "ok"}]}
 
     return WorkflowController(
         service=_FakeService([_disk(1)]),
         dry_run=True,
         preflight_runner=preflight,
+        partition_defaults={
+            "efi_size_mb": 300,
+            "c_size_gb": 10,
+            # 单测用小尺寸测算术：后端下限（C ≥ 60 GB）显式放宽
+            "allow_small_partitions": True,
+        },
+        settings_provider=lambda: {"sysWim": image_path, "imageDefaultIndex": 1},
     )
 
 
@@ -164,7 +160,7 @@ def test_prepare_blocks_iso_image_and_disables_start(tmp_path):
     iso = tmp_path / "win11.iso"
     iso.write_bytes(b"iso")
     controller = _controller(str(iso))
-    controller.start(None, dry_run=True)
+    controller.start(dry_run=True)
 
     prepared = controller.prepare([1])[0]
 
@@ -178,7 +174,7 @@ def test_prepare_blocks_iso_image_and_disables_start(tmp_path):
 def test_prepare_keeps_applicable_image_executable(tmp_path):
     wim = _gho(tmp_path)
     controller = _controller(str(wim))
-    controller.start(None, dry_run=True)
+    controller.start(dry_run=True)
 
     prepared = controller.prepare([1])[0]
 
@@ -347,25 +343,21 @@ def test_preflight_iso_check_maps_to_image_type_key(tmp_path):
 
 
 # ------------------------------------- 优先级：设置 vs 配置 vs 向导逐盘覆盖
-def _settings_controller(settings: dict, image_path: str) -> WorkflowController:
-    def preflight(config_path=None, dry_run=False):
-        return {
-            "results": [{"name": "运行前检查", "passed": True, "message": "ok"}],
-            "config_payload": {
-                # 业务配置里的占位镜像：界面设置优先时应该被压掉
-                "partition_info": {
-                    "efi_size_mb": 100,
-                    "c_size_gb": 30,
-                    "allow_small_partitions": True,
-                },
-                "image_info": {"image_path": image_path, "image_index": 1},
-            },
-        }
+def _settings_controller(settings: dict, image_path: str = "") -> WorkflowController:
+    """``settings`` 是活字典：测试会中途改它，验证“改完不必重启”。"""
+
+    def preflight(*, dry_run: bool = False) -> dict[str, Any]:
+        return {"results": [{"name": "运行前检查", "passed": True, "message": "ok"}]}
 
     return WorkflowController(
         service=_FakeService([_disk(1)]),
         dry_run=True,
         preflight_runner=preflight,
+        partition_defaults={
+            "efi_size_mb": 100,
+            "c_size_gb": 30,
+            "allow_small_partitions": True,
+        },
         settings_provider=lambda: dict(settings),
     )
 
@@ -382,7 +374,7 @@ def test_prepare_reflects_live_settings_image(tmp_path):
 
     settings: dict[str, Any] = {"sysWim": str(iso), "imageDefaultIndex": 1}
     controller = _settings_controller(settings, str(iso))
-    controller.start(None, dry_run=True)
+    controller.start(dry_run=True)
 
     blocked = controller.prepare([1])[0]
     assert blocked.plan.executable is False
@@ -392,7 +384,7 @@ def test_prepare_reflects_live_settings_image(tmp_path):
     fixed = controller.prepare([1])[0]
     assert fixed.plan.executable is True
     assert not any("镜像" in blocker for blocker in fixed.plan.blockers)
-    assert fixed.spec.config_payload["image_info"]["image_path"] == str(good)
+    assert fixed.spec.task_payload["image_info"]["image_path"] == str(good)
 
 
 def test_per_disk_overrides_beat_settings_defaults(tmp_path):
@@ -406,17 +398,16 @@ def test_per_disk_overrides_beat_settings_defaults(tmp_path):
         "efiDefaultMb": 100,
         "sysDefaultGb": 100,
         "dataDefaultGb": 200,
-        "defaultFs": "NTFS",
     }
     controller = _settings_controller(settings, str(wim))
-    controller.start(None, dry_run=True)
+    controller.start(dry_run=True)
 
     prepared = controller.prepare({1: {"c_size": 30, "data_size": 20, "win_gho": str(other)}})[0]
-    info = prepared.spec.config_payload["partition_info"]
+    info = prepared.spec.task_payload["partition_info"]
 
     assert info["c_size_gb"] == 30
     assert info["data_size_gb"] == 20
-    assert prepared.spec.config_payload["image_info"]["image_path"] == str(other)
+    assert prepared.spec.task_payload["image_info"]["image_path"] == str(other)
 
 
 def test_image_path_is_normalized_for_ghost(tmp_path):
@@ -428,7 +419,7 @@ def test_image_path_is_normalized_for_ghost(tmp_path):
     assert "/" in slashed or _Path(wim).drive  # 单字符路径在 Linux 上无分隔符，跳过
 
     controller = _settings_controller({"sysWim": slashed, "imageDefaultIndex": 1}, slashed)
-    controller.start(None, dry_run=True)
+    controller.start(dry_run=True)
     prepared = controller.prepare([1])[0]
 
-    assert prepared.spec.config_payload["image_info"]["image_path"] == str(wim)
+    assert prepared.spec.task_payload["image_info"]["image_path"] == str(wim)

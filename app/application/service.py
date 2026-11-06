@@ -38,7 +38,6 @@ from pathlib import Path
 from typing import Any
 
 from app.application.contracts import (
-    ConfigCheckResult,
     DiskInfo,
     SelectionPlan,
     format_size,
@@ -52,7 +51,6 @@ from app.application.partitions import (
 from app.application.steps import STEP_TITLES
 from app.models import STEP_SKIPPED, StepResult, WorkerResult
 from app.orchestrator import build_worker_disk_identity, identity_matches, is_strong_identity
-from app.preflight import load_config, resolve_config_path
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -181,7 +179,6 @@ class SispService:
         *,
         dry_run: bool = True,
         allowed_disk_numbers: Iterable[int] | None = None,
-        config_path: str | os.PathLike[str] | None = None,
         real_runner: Callable[[Any, threading.Event], WorkerResult] | None = None,
         disk_scanner: Callable[[], list[dict[str, Any]]] | None = None,
         powershell: str | None = None,
@@ -200,7 +197,6 @@ class SispService:
             if allowed_disk_numbers is not None
             else frozenset()
         )
-        self.config_path = str(config_path) if config_path else None
         self._real_runner = real_runner
         self._disk_scanner = disk_scanner
         self._powershell = powershell
@@ -317,18 +313,6 @@ class SispService:
                     break
         return list(dict.fromkeys(reasons))
 
-    # ------------------------------------------------------------------ 配置
-    def check_config(self, config_path: str | os.PathLike[str] | None = None) -> ConfigCheckResult:
-        """重新校验配置文件；不改变任何会话状态。"""
-        target = config_path or self.config_path
-        loaded = load_config(target)
-        return ConfigCheckResult(
-            passed=loaded.passed,
-            payload=loaded.payload,
-            error_code=loaded.error_code,
-            message=loaded.message,
-        )
-
     # ------------------------------------------------------------------ 计划
     def build_selection_plan(
         self,
@@ -336,7 +320,6 @@ class SispService:
         summaries: Sequence[Mapping[str, Any]],
         selected: Sequence[int],
         *,
-        config_path: str | os.PathLike[str] | None = None,
         log_dir: str | None = None,
         result_dir: str | None = None,
         resource_resolver: Callable[[Any], int | None] | None = None,
@@ -349,7 +332,7 @@ class SispService:
         ``extra_counts`` 是 ``{硬盘编号: 额外数据分区数}``（每盘 0 或 1），
         决定这块盘要分配 3 个还是 4 个盘符。
         """
-        _ = (config_path, log_dir, result_dir)  # 目前只透传，不落盘
+        _ = (log_dir, result_dir)  # 目前只透传，不落盘
 
         disk_numbers = [int(number) for number in selected]
         if not disk_numbers:
@@ -517,7 +500,7 @@ class SispService:
         self._gate_target(
             int(getattr(spec, "disk_number", 0) or 0),
             dict(getattr(spec, "expected_identity", None) or {}),
-            dict(getattr(spec, "config_payload", None) or {}),
+            dict(getattr(spec, "task_payload", None) or {}),
         )
 
     def _gate_target(
@@ -586,7 +569,7 @@ class SispService:
             return WorkerResult.failure(disk_number, "任务已取消", dry_run=True)
 
         letters = dict(getattr(spec, "drive_letters", None) or {})
-        payload = dict(getattr(spec, "config_payload", None) or {})
+        payload = dict(getattr(spec, "task_payload", None) or {})
         script = self.build_diskpart_preview(disk_number, payload, letters)
 
         steps = (
@@ -729,6 +712,3 @@ class SispService:
         parts = plan_partitions(payload, letters=letters)
         return preview_segments(disk_number, parts)
 
-    # ------------------------------------------------------------------ 其他
-    def config_path_or_default(self) -> Path | None:
-        return resolve_config_path(self.config_path)

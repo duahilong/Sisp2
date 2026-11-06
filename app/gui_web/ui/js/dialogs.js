@@ -172,7 +172,6 @@ export function openAboutDialog() {
         <tr><td class="k">版本</td><td>${esc(info.version || '—')}</td></tr>
         <tr><td class="k">Python</td><td>${esc(info.python || '—')}</td></tr>
         <tr><td class="k">模式</td><td>${info.dry_run ? '演练模式' : '真实写盘'}</td></tr>
-        <tr><td class="k">配置文件</td><td class="set-mono">${esc((state.session && state.session.config_path) || '—')}</td></tr>
         <tr><td class="k">日志目录</td><td class="set-mono">${esc((state.settings && state.settings.logDir) || '用户目录下的 Sisp 日志目录')}</td></tr>
       </table></div>
       <div class="set-d" style="margin-top:10px">本程序直接调用 Windows 自带的 diskpart / bcdboot，以及你指定的 Ghost。真实写盘前请确认已备份数据，并以管理员身份运行。</div>`,

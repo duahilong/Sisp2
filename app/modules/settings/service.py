@@ -1,6 +1,6 @@
 """界面设置抽屉对应的独立设置模块。
 
-目标：把“软件参数”从业务配置（``json/win11.json``）里彻底拆出来。
+目标：所有可调参数都收敛到这里（业务 JSON 配置文件那一层已移除）。
 
 - 业务配置：装系统要用的镜像、GHO、软件目录，由运维/高手维护，随配置文件走；
 - 界面设置：语言、主题、默认分区大小、外部程序路径、临时目录、安全开关，
@@ -47,7 +47,6 @@ DEFAULTS: dict[str, Any] = {
     "sysDefaultGb": 120,
     "efiDefaultMb": 100,
     "dataDefaultGb": "auto",
-    "defaultFs": "NTFS",
     # GHO 内部的分区块序号（0 = 用 Ghost 默认的 1）
     "imageDefaultIndex": 0,
     # 外部程序（空 = 用系统自带或 PATH 里的）
@@ -116,7 +115,6 @@ _ENUM_KEYS: dict[str, tuple[str, ...]] = {
     "density": ("compact", "comfortable"),
     "logLevel": ("debug", "info", "warn", "error"),
     "startView": ("main", "install", "settings"),
-    "defaultFs": ("NTFS", "exFAT"),
 }
 
 _INT_RANGES: dict[str, tuple[int, int]] = {
@@ -406,8 +404,9 @@ class SettingsStore:
             "efi_size_mb": efi_mb,
             "c_size_gb": sys_gb,
             "data_size_gb": data_size,
-            # 数据分区的文件系统：diskpart ``format quick fs=`` 直接用它。
-            "data_fs": str(self._data.get("defaultFs") or "NTFS"),
+            # 数据分区的文件系统不再可配：恒为 NTFS（见 partitions.DATA_FS_CHOICES）。
+            # 这里显式写出来，让下游拿到的载荷形状不随“设置里有没有这一项”变化。
+            "data_fs": "NTFS",
         }
 
     def to_dict(self) -> dict[str, Any]:

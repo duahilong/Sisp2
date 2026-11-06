@@ -258,7 +258,7 @@ def test_removing_extra_partition_gives_space_back_to_data(tmp_path: Path) -> No
         "const GB = 1024 ** 3;\n"
         "state.disks = [{ disk_number: 1, size_bytes: Math.round(477 * GB), model: 'X',\n"
         "  partition_style: 'GPT', partitions: [] }];\n"
-        "state.settings = { sysDefaultGb: 150, dataDefaultGb: 'auto', defaultFs: 'NTFS' };\n"
+        "state.settings = { sysDefaultGb: 150, dataDefaultGb: 'auto' };\n"
         "resetWizard();\n"
         "addTarget(1);\n"
         "const target = targetOf(1);\n"
@@ -307,7 +307,7 @@ def test_manual_sys_size_moves_the_auto_partition(tmp_path: Path) -> None:
             "state.disks = [{ disk_number: 1, size_bytes: Math.round(477 * GB), model: 'X',",
             "  partition_style: 'GPT', partitions: [] }];",
             "state.settings = { sysDefaultGb: 200, dataDefaultGb: 'auto',",
-            "  defaultFs: 'NTFS', efiDefaultMb: 100 };",
+            "  efiDefaultMb: 100 };",
             "resetWizard();",
             "addTarget(1);",
             "const target = targetOf(1);",
@@ -363,7 +363,7 @@ def test_size_error_uses_configured_efi_size(tmp_path: Path) -> None:
             "state.disks = [{ disk_number: 1, size_bytes: 100 * GB, model: 'X',",
             "  partition_style: 'GPT', partitions: [] }];",
             "state.settings = { sysDefaultGb: 60, dataDefaultGb: 'auto',",
-            "  defaultFs: 'NTFS', efiDefaultMb: 300 };",
+            "  efiDefaultMb: 300 };",
             "resetWizard();",
             "addTarget(1);",
             "const target = targetOf(1);",
@@ -407,7 +407,7 @@ def test_last_data_partition_is_always_sent_as_auto(tmp_path: Path) -> None:
         "const GB = 1024 ** 3;\n"
         "state.disks = [{ disk_number: 1, size_bytes: Math.round(477 * GB), model: 'X',\n"
         "  partition_style: 'GPT', partitions: [] }];\n"
-        "state.settings = { sysDefaultGb: 120, dataDefaultGb: 'auto', defaultFs: 'NTFS' };\n"
+        "state.settings = { sysDefaultGb: 120, dataDefaultGb: 'auto' };\n"
         "resetWizard();\n"
         "addTarget(1);\n"
         "const filled = selectionPayload()['1'];\n"

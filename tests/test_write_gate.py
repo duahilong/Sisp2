@@ -103,7 +103,7 @@ def _spec(number: int = 1, *, unique_id: str | None = "unique-1", serial: str | 
     return SimpleNamespace(
         disk_number=number,
         dry_run=False,
-        config_payload={"excluded_disk_names": [], "partition_info": {"c_size_gb": 30}},
+        task_payload={"partition_info": {"c_size_gb": 30}},
         expected_identity={
             "disk_number": number,
             "unique_id": unique_id,
@@ -150,33 +150,37 @@ _FAKE_IMAGE_PATH.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
 _FAKE_IMAGE = str(_FAKE_IMAGE_PATH)
 
 
-def _preflight(config_path=None, dry_run=False) -> dict[str, Any]:
-    return {
-        "results": [{"name": "运行前检查", "passed": True, "message": "ok"}],
-        "config_payload": {
-            "partition_info": {
-                "efi_size_mb": 100,
-                "c_size_gb": 10,
-                "data_size_gb": "auto",
-                # 单测用小尺寸：显式放宽后端下限（C ≥ 60 GB）
-                "allow_small_partitions": True,
-            },
-            "image_info": {"image_path": _FAKE_IMAGE, "image_index": 1},
-            "excluded_disk_names": [],
-        },
-    }
+_DEFAULT_PARTITIONS: dict[str, Any] = {
+    "efi_size_mb": 100,
+    "c_size_gb": 10,
+    "data_size_gb": None,  # None = 吃掉剩余空间（等价于设置里的 "auto"）
+    # 单测用小尺寸：显式放宽后端下限（C ≥ 60 GB）
+    "allow_small_partitions": True,
+}
+_DEFAULT_SETTINGS: dict[str, Any] = {"sysWim": _FAKE_IMAGE, "imageDefaultIndex": 1}
+
+
+def _preflight(*, dry_run: bool = False) -> dict[str, Any]:
+    return {"results": [{"name": "运行前检查", "passed": True, "message": "ok"}]}
+
+
+def _wire(**kwargs: Any) -> WorkflowController:
+    """按照“分区默认值快照 + 设置”装配控制器（业务配置那一层已移除）。"""
+    kwargs.setdefault("partition_defaults", dict(_DEFAULT_PARTITIONS))
+    kwargs.setdefault("settings_provider", lambda: dict(_DEFAULT_SETTINGS))
+    return WorkflowController(**kwargs)
 
 
 def _controller(type_to_confirm: bool) -> tuple[WorkflowController, list[str]]:
     service = _service(_summary(), allowed_disk_numbers=[1])
-    wf = WorkflowController(
+    wf = _wire(
         service=service,
         dry_run=False,
         preflight_runner=_preflight,
         type_to_confirm=type_to_confirm,
         worker_interval=0.0,
     )
-    wf.start(None, dry_run=False)
+    wf.start(dry_run=False)
     prepared = wf.prepare([1], dry_run=False)
     jobs = wf.submit(prepared, require_confirmation=True)
     return wf, [job.id for job in jobs]
@@ -222,7 +226,7 @@ def test_settings_provider_updates_protection_live() -> None:
         "typeToConfirm": True,
     }
     service = _service(_summary(0, is_system=True), allowed_disk_numbers=[0])
-    wf = WorkflowController(
+    wf = _wire(
         service=service,
         dry_run=False,
         settings_provider=lambda: dict(settings),
@@ -245,7 +249,7 @@ def test_settings_provider_updates_protection_live() -> None:
 def test_confirm_follows_live_type_to_confirm_setting() -> None:
     settings: dict[str, Any] = {"typeToConfirm": True}
     service = _service(_summary(), allowed_disk_numbers=[1])
-    wf = WorkflowController(
+    wf = _wire(
         service=service,
         dry_run=False,
         preflight_runner=_preflight,
@@ -253,7 +257,7 @@ def test_confirm_follows_live_type_to_confirm_setting() -> None:
         worker_interval=0.0,
         settings_provider=lambda: dict(settings),
     )
-    wf.start(None, dry_run=False)
+    wf.start(dry_run=False)
     jobs = wf.submit(wf.prepare([1], dry_run=False), require_confirmation=True)
     job_ids = [job.id for job in jobs]
 
@@ -269,13 +273,13 @@ def test_refresh_disks_applies_live_protection_setting() -> None:
     """点「重新扫描」时也要读最新设置，不能等重启。"""
     settings: dict[str, Any] = {"protectSystemDisk": True}
     service = _service(_summary(0, is_system=True), allowed_disk_numbers=[0])
-    wf = WorkflowController(
+    wf = _wire(
         service=service,
         dry_run=False,
         preflight_runner=_preflight,
         settings_provider=lambda: dict(settings),
     )
-    session = wf.start(None, dry_run=True)
+    session = wf.start(dry_run=True)
     assert session.disks[0].is_selectable is False
 
     settings["protectSystemDisk"] = False
@@ -287,13 +291,13 @@ def test_refresh_disks_applies_live_protection_setting() -> None:
 def _controller_multi(disks: list[dict[str, Any]], **kwargs: Any) -> WorkflowController:
     """多盘控制器：验证“不传 selection”时按可选性自动挑盘。"""
     service = SispService(disk_scanner=lambda: list(disks), dry_run=False, **kwargs)
-    wf = WorkflowController(
+    wf = _wire(
         service=service,
         dry_run=False,
         preflight_runner=_preflight,
         worker_interval=0.0,
     )
-    wf.start(None, dry_run=False)
+    wf.start(dry_run=False)
     return wf
 
 
@@ -320,7 +324,6 @@ def test_prepare_without_selection_fails_when_all_protected() -> None:
 # ------------------------------------------------------- 排除名单（分区/引导旁路）
 def _gate_api(
     disks: list[dict[str, Any]],
-    payload: dict[str, Any] | None = None,
     settings_patch: dict[str, Any] | None = None,
     tmp_path: Path | None = None,
 ):
@@ -328,19 +331,16 @@ def _gate_api(
     from app.gui_web.api import WebApi
     from app.modules.settings.service import build_store
 
-    def preflight(config_path=None, **kwargs):
-        return {
-            "results": [{"name": "运行前检查", "passed": True, "message": "ok"}],
-            "config_payload": payload if payload is not None else {},
-        }
+    def preflight(*, dry_run: bool = False) -> dict[str, Any]:
+        return {"results": [{"name": "运行前检查", "passed": True, "message": "ok"}]}
 
     service = SispService(
         disk_scanner=lambda: list(disks), dry_run=False, allowed_disk_numbers=[1]
     )
-    wf = WorkflowController(
+    wf = _wire(
         service=service, dry_run=False, preflight_runner=preflight, worker_interval=0.0
     )
-    wf.start(None, dry_run=False)
+    wf.start(dry_run=False)
     store = build_store((tmp_path or Path.cwd()) / "settings.json")
     if settings_patch:
         store.update(settings_patch)
@@ -350,16 +350,16 @@ def _gate_api(
 _IDENTITY = {"unique_id": "unique-1", "serial_number": "SN-1", "model": "test disk"}
 
 
-def test_gate_rejects_disk_matching_config_excluded_names(tmp_path: Path) -> None:
-    """写盘闸门必须吃配置里的 excluded_disk_names。
+def test_gate_rejects_disk_matching_excluded_names(tmp_path: Path) -> None:
+    """写盘闸门必须吃设置页里的 excludedDiskNames。
 
     这条旁路曾经完全不生效：网页里的 gate 只传两个参数，
     ``excluded_names`` 默认成空列表，于是排除名单在“修复引导”这条路上
-    形同虚设（整盘安装走 spec.config_payload，一直是生效的）。
+    形同虚设（整盘安装走 spec.task_payload，一直是生效的）。
     """
     api = _gate_api(
         [_summary(model="Samsung SSD 980 PRO 1TB")],
-        payload={"excluded_disk_names": ["980 PRO"]},
+        settings_patch={"excludedDiskNames": ["980 PRO"]},
         tmp_path=tmp_path,
     )
     with pytest.raises(PermissionError) as excinfo:
@@ -371,7 +371,7 @@ def test_gate_allows_disk_not_matching_excluded_names(tmp_path: Path) -> None:
     """名单写了但型号不匹配时必须放行，不能误伤。"""
     api = _gate_api(
         [_summary(model="test disk")],
-        payload={"excluded_disk_names": ["Some Other SSD"]},
+        settings_patch={"excludedDiskNames": ["Some Other SSD"]},
         tmp_path=tmp_path,
     )
     summary = api._gate(1, dict(_IDENTITY))
@@ -382,7 +382,7 @@ def test_gate_without_excluded_names_still_checks_other_rules(tmp_path: Path) ->
     """名单为空不代表闸门不工作：系统盘仍然要被拒。"""
     api = _gate_api(
         [_summary(is_system=True)],
-        payload={"excluded_disk_names": []},
+        settings_patch={"excludedDiskNames": []},
         tmp_path=tmp_path,
     )
     with pytest.raises(PermissionError) as excinfo:
@@ -449,14 +449,14 @@ def _gui_controller(*, type_to_confirm: bool = True) -> WorkflowController:
         dry_run=False,
         real_runner=lambda spec, event: WorkerResult.dry_run_plan(1),
     )
-    controller = WorkflowController(
+    controller = _wire(
         service=service,
         dry_run=False,
         preflight_runner=_preflight,
         type_to_confirm=type_to_confirm,
         worker_interval=0.0,
     )
-    controller.start(None, dry_run=False)
+    controller.start(dry_run=False)
     return controller
 
 
@@ -468,7 +468,7 @@ def test_confirm_regrants_allowlist_after_session_restart() -> None:
     controller = _gui_controller()
     jobs = controller.submit(controller.prepare([1], dry_run=False), require_confirmation=True)
 
-    controller.start(None, dry_run=False)  # 模拟页面刷新
+    controller.start(dry_run=False)  # 模拟页面刷新
     assert controller.service.allowed_disk_numbers == frozenset()
 
     controller.confirm([jobs[0].id], confirm_text="1")
@@ -482,7 +482,7 @@ def test_confirm_without_text_does_not_grant_allowlist() -> None:
     """确认文本不对就不该产生授权（否则等于把闸门绕过）。"""
     controller = _gui_controller()
     jobs = controller.submit(controller.prepare([1], dry_run=False), require_confirmation=True)
-    controller.start(None, dry_run=False)
+    controller.start(dry_run=False)
 
     with pytest.raises(WorkflowError):
         controller.confirm([jobs[0].id])

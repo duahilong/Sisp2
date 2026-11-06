@@ -361,12 +361,17 @@ def test_default_layout_uses_explicit_data_size() -> None:
     assert "create partition primary size=5120" in diskpart_lines(parts)
 
 
-def test_default_layout_keeps_data_fs_from_settings() -> None:
-    parts = plan_partitions(
-        {"partition_info": {"c_size_gb": 30, "data_size_gb": 10, "data_fs": "exfat"}}
-    )
-    assert parts[-1].file_system == "exFAT"
-    assert "format quick fs=exfat label=Data" in diskpart_lines(parts)
+def test_default_layout_data_fs_is_always_ntfs() -> None:
+    """数据分区固定 NTFS：连显式写 data_fs=exFAT 都要被拒。"""
+    parts = plan_partitions({"partition_info": {"c_size_gb": 30, "data_size_gb": 10}})
+    assert parts[-1].file_system == "NTFS"
+    assert "format quick fs=ntfs label=Data" in diskpart_lines(parts)
+
+    with pytest.raises(PartitionLayoutError) as info:
+        plan_partitions(
+            {"partition_info": {"c_size_gb": 30, "data_size_gb": 10, "data_fs": "exfat"}}
+        )
+    assert "文件系统不支持" in str(info.value)
 
 
 def test_efi_size_is_clamped_to_minimum() -> None:
@@ -391,7 +396,7 @@ def test_extra_partition_appends_data2() -> None:
                 "c_size_gb": 120,
                 "data_partitions": [
                     {"size_gb": 400, "file_system": "ntfs"},
-                    {"size_gb": 500, "file_system": "exfat"},
+                    {"size_gb": 500, "file_system": "ntfs"},
                 ],
             }
         },
@@ -403,12 +408,12 @@ def test_extra_partition_appends_data2() -> None:
     assert [part.letter for part in parts] == ["E", "F", "G", "H"]
     assert parts[2].size_mb == 400 * 1024
     assert parts[3].size_mb == 500 * 1024
-    assert parts[3].file_system == "exFAT"
+    assert parts[3].file_system == "NTFS"
 
     lines = diskpart_lines(parts)
     assert "create partition primary size=409600" in lines
     assert "create partition primary size=512000" in lines
-    assert "format quick fs=exfat label=Data2" in lines
+    assert "format quick fs=ntfs label=Data2" in lines
     assert "assign letter=H" in lines
 
 
@@ -729,38 +734,32 @@ class _FakeService:
 
         return WorkerResult.dry_run_plan(int(getattr(spec, "disk_number", 0) or 0))
 
-    def check_config(self, config_path=None):
-        return SimpleNamespace(passed=True, message="配置可解析", error_code=0)
-
 
 def _controller(tmp_path, image_name: str = "win11.GHO") -> WorkflowController:
+    """载荷来源：构造时的分区默认值快照 + 现读的设置（镜像路径）示例。"""
     image = tmp_path / image_name
     image.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
 
-    def preflight(config_path=None, dry_run=False):
-        return {
-            "results": [{"name": "运行前检查", "passed": True, "message": "ok"}],
-            "config_payload": {
-                "partition_info": {
-                    "efi_size_mb": 300,
-                    "c_size_gb": 20,
-                    # 单测用小尺寸：显式放宽后端下限（C ≥ 60 GB）
-                    "allow_small_partitions": True,
-                },
-                "image_info": {"image_path": str(image), "image_index": 1},
-            },
-        }
+    def preflight(*, dry_run: bool = False) -> dict[str, Any]:
+        return {"results": [{"name": "运行前检查", "passed": True, "message": "ok"}]}
 
     return WorkflowController(
         service=_FakeService([_disk(1)]),
         dry_run=True,
         preflight_runner=preflight,
+        partition_defaults={
+            "efi_size_mb": 300,
+            "c_size_gb": 20,
+            # 单测用小尺寸：显式放宽后端下限（C ≥ 60 GB）
+            "allow_small_partitions": True,
+        },
+        settings_provider=lambda: {"sysWim": str(image)},
     )
 
 
 def test_prepare_allocates_fourth_letter_for_extra_partition(tmp_path) -> None:
     controller = _controller(tmp_path)
-    controller.start(None, dry_run=True)
+    controller.start(dry_run=True)
 
     prepared = controller.prepare(
         {
@@ -768,7 +767,7 @@ def test_prepare_allocates_fourth_letter_for_extra_partition(tmp_path) -> None:
                 "c_size": 20,
                 "data_partitions": [
                     {"size_gb": 10, "file_system": "NTFS"},
-                    {"size_gb": 15, "file_system": "exFAT"},
+                    {"size_gb": 15, "file_system": "NTFS"},
                 ],
             }
         }
@@ -787,19 +786,19 @@ def test_prepare_allocates_fourth_letter_for_extra_partition(tmp_path) -> None:
         "data",
         "data2",
     ]
-    assert prepared.plan.partition_plan[-1]["file_system"] == "exFAT"
+    assert prepared.plan.partition_plan[-1]["file_system"] == "NTFS"
     assert prepared.plan.unallocated_bytes > 0
-    assert prepared.spec.config_payload["partition_info"]["data_partitions"][1] == {
+    assert prepared.spec.task_payload["partition_info"]["data_partitions"][1] == {
         "size_gb": 15.0,
-        "file_system": "exFAT",
+        "file_system": "NTFS",
     }
     # 显式列表存在时老字段必须被清掉，避免两个来源打架
-    assert "data_size_gb" not in prepared.spec.config_payload["partition_info"]
+    assert "data_size_gb" not in prepared.spec.task_payload["partition_info"]
 
 
 def test_prepare_rejects_invalid_extra_partition(tmp_path) -> None:
     controller = _controller(tmp_path)
-    controller.start(None, dry_run=True)
+    controller.start(dry_run=True)
 
     with pytest.raises(Exception) as excinfo:
         controller.prepare(
@@ -817,7 +816,7 @@ def test_prepare_rejects_invalid_extra_partition(tmp_path) -> None:
 
 def test_prepare_blocks_when_extra_partition_does_not_fit(tmp_path) -> None:
     controller = _controller(tmp_path)
-    controller.start(None, dry_run=True)
+    controller.start(dry_run=True)
 
     with pytest.raises(Exception) as excinfo:
         controller.prepare(
@@ -836,7 +835,7 @@ def test_prepare_blocks_when_extra_partition_does_not_fit(tmp_path) -> None:
 
 def test_prepare_without_extra_partition_keeps_three_letters(tmp_path) -> None:
     controller = _controller(tmp_path)
-    controller.start(None, dry_run=True)
+    controller.start(dry_run=True)
 
     prepared = controller.prepare([1])[0]
     assert prepared.plan.drive_letters == {"efi": "E", "windows": "F", "data": "G"}
@@ -853,19 +852,15 @@ def _no_flag_controller(tmp_path) -> WorkflowController:
     image = tmp_path / "win11.GHO"
     image.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
 
-    def preflight(config_path=None, dry_run=False):
-        return {
-            "results": [{"name": "运行前检查", "passed": True, "message": "ok"}],
-            "config_payload": {
-                "partition_info": {"efi_size_mb": 300, "c_size_gb": 20},
-                "image_info": {"image_path": str(image), "image_index": 1},
-            },
-        }
+    def preflight(*, dry_run: bool = False) -> dict[str, Any]:
+        return {"results": [{"name": "运行前检查", "passed": True, "message": "ok"}]}
 
     return WorkflowController(
         service=_FakeService([_disk(1)]),
         dry_run=True,
         preflight_runner=preflight,
+        partition_defaults={"efi_size_mb": 300, "c_size_gb": 20},
+        settings_provider=lambda: {"sysWim": str(image)},
     )
 
 
@@ -913,13 +908,13 @@ def test_allow_small_partitions_flag_relaxes_minimums() -> None:
 
 def test_prepare_rejects_tiny_layout_unless_flag(tmp_path) -> None:
     controller = _no_flag_controller(tmp_path)
-    controller.start(None, dry_run=True)
+    controller.start(dry_run=True)
 
     with pytest.raises(Exception, match="分区过小"):
         controller.prepare([1])
 
     allowed = _controller(tmp_path)  # 同一个布局，但显式带了 allow_small_partitions
-    allowed.start(None, dry_run=True)
+    allowed.start(dry_run=True)
     assert allowed.prepare([1])[0].spec.disk_number == 1
 
 

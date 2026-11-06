@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import json
 import pathlib
 import threading
 from pathlib import Path
@@ -22,7 +21,6 @@ from app.preflight import CHECK_SETTING_PATHS, CHECK_TOOLS, run_preflight_checks
 
 def _preflight(settings: dict[str, Any], tmp_path) -> dict[str, Any]:
     return run_preflight_checks(
-        None,
         dry_run=True,
         admin_checker=lambda: True,
         command_lookup=lambda name: f"C:/{name}.exe",
@@ -92,7 +90,7 @@ def test_workflow_passes_release_switch_both_ways() -> None:
         wf = WorkflowController(
             service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
             dry_run=True,
-            preflight_runner=lambda path: {"results": [], "config_payload": {}},
+            preflight_runner=lambda *, dry_run=False: {"results": []},
             settings_provider=lambda v=value: {"releaseEfiLetter": v},
         )
         assert wf._runner_options()["release_efi_letter"] is expected
@@ -102,7 +100,7 @@ def test_workflow_release_switch_defaults_to_on() -> None:
     wf = WorkflowController(
         service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
         dry_run=True,
-        preflight_runner=lambda path: {"results": [], "config_payload": {}},
+        preflight_runner=lambda *, dry_run=False: {"results": []},
         settings_provider=dict,
     )
     assert wf._runner_options()["release_efi_letter"] is True
@@ -112,7 +110,7 @@ def test_workflow_maps_settings_to_runner_options() -> None:
     wf = WorkflowController(
         service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
         dry_run=True,
-        preflight_runner=lambda path: {"results": [], "config_payload": {}},
+        preflight_runner=lambda *, dry_run=False: {"results": []},
         settings_provider=lambda: {
             "sysTemp": r"D:\temp",
             "sysBoot": r"D:\boot",
@@ -130,9 +128,9 @@ def test_workflow_maps_settings_to_runner_options() -> None:
 def test_workflow_preflight_receives_settings() -> None:
     seen: list[dict[str, Any]] = []
 
-    def preflight(config_path=None, *, dry_run=False, settings=None):
+    def preflight(*, dry_run=False, settings=None):
         seen.append(dict(settings or {}))
-        return {"results": [], "config_payload": {}}
+        return {"results": []}
 
     wf = WorkflowController(
         service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
@@ -140,7 +138,7 @@ def test_workflow_preflight_receives_settings() -> None:
         preflight_runner=preflight,
         settings_provider=lambda: {"sysTemp": r"D:\temp"},
     )
-    wf._run_preflight(None)
+    wf._run_preflight()
     assert seen == [{"sysTemp": r"D:\temp"}]
 
 
@@ -151,7 +149,7 @@ def test_workflow_survives_broken_settings_provider() -> None:
     wf = WorkflowController(
         service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
         dry_run=True,
-        preflight_runner=lambda path: {"results": [], "config_payload": {}},
+        preflight_runner=lambda *, dry_run=False: {"results": []},
         settings_provider=boom,
     )
     assert wf._settings() == {}
@@ -281,7 +279,7 @@ def test_runner_accepts_runner_options_on_spec(
 
     spec = SimpleNamespace(
         disk_number=1,
-        config_payload=payload,
+        task_payload=payload,
         drive_letters=letters,
         runner_options={"boot_source": "D:/boot"},
     )
@@ -297,7 +295,7 @@ def test_workflow_ignores_blank_setting_values(bad: str) -> None:
     wf = WorkflowController(
         service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
         dry_run=True,
-        preflight_runner=lambda path: {"results": [], "config_payload": {}},
+        preflight_runner=lambda *, dry_run=False: {"results": []},
         settings_provider=lambda: {"sysTemp": bad},
     )
     # 布尔开关总是在（默认 True），空字符串项不该混进来
@@ -343,10 +341,8 @@ def _controller(settings: dict[str, Any], payload: dict[str, Any] | None = None)
             allowed_disk_numbers=frozenset({1}), dry_run=True, scan_protected_disks=lambda names: []
         ),
         dry_run=True,
-        preflight_runner=lambda path, **kwargs: {
-            "results": [],
-            "config_payload": dict(payload if payload is not None else {}),
-        },
+        preflight_runner=lambda *, dry_run=False: {"results": []},
+        partition_defaults=dict(payload or {}),
         settings_provider=lambda: dict(settings),
         worker_interval=0.0,
     )
@@ -354,13 +350,12 @@ def _controller(settings: dict[str, Any], payload: dict[str, Any] | None = None)
 
 def test_live_partition_defaults_follow_settings() -> None:
     """设置页改完 EFI / 分区大小 / 文件系统后，下一次建计划就用新值。"""
-    wf = _controller({"efiDefaultMb": 300, "sysDefaultGb": 200, "dataDefaultGb": 800, "defaultFs": "exFAT"})
+    wf = _controller({"efiDefaultMb": 300, "sysDefaultGb": 200, "dataDefaultGb": 800})
     defaults = wf._live_partition_defaults()
     assert defaults == {
         "efi_size_mb": 300,
         "c_size_gb": 200,
         "data_size_gb": 800,
-        "data_fs": "exFAT",
     }
 
 
@@ -369,11 +364,16 @@ def test_live_partition_defaults_keeps_auto_for_data() -> None:
     assert wf._live_partition_defaults()["data_size_gb"] is None
 
 
-def test_merged_excluded_names_unions_settings_and_config() -> None:
-    wf = _controller({"excludedDiskNames": ["From Settings"]})
-    merged = wf._merged_excluded_names({"excluded_disk_names": ["From Config", "from settings"]})
-    # 先出现的那份拼写胜出（配置优先于设置），但重复项不会重复计入
-    assert merged == ["From Config", "from settings"]
+def test_excluded_names_come_from_settings_only() -> None:
+    """排除名单只剩设置页一个来源，且按 casefold 去重、去空白。"""
+    wf = _controller({"excludedDiskNames": ["Samsung SSD", "samsung ssd", " WD "]})
+    assert wf._excluded_disk_names() == ["Samsung SSD", "WD"]
+
+
+def test_excluded_names_tolerates_broken_values() -> None:
+    """设置里塞了非列表也不能拖死开盘扫描。"""
+    wf = _controller({"excludedDiskNames": "not-a-list"})
+    assert wf._excluded_disk_names() == []
 
 
 def test_settings_excluded_names_hide_disks_at_start() -> None:
@@ -387,51 +387,35 @@ def test_settings_excluded_names_hide_disks_at_start() -> None:
     wf = WorkflowController(
         service=SimpleNamespace(allowed_disk_numbers=frozenset({1}), dry_run=True, scan_protected_disks=scan),
         dry_run=True,
-        preflight_runner=lambda path, **kwargs: {"results": [], "config_payload": {}},
+        preflight_runner=lambda *, dry_run=False: {"results": []},
         settings_provider=lambda: {"excludedDiskNames": ["Samsung SSD"]},
         worker_interval=0.0,
     )
-    wf.start(None, dry_run=True)
+    wf.start(dry_run=True)
     assert seen and seen[0] == ["Samsung SSD"]
 
 
 def test_default_system_image_from_settings() -> None:
     wf = _controller({"sysWim": r"D:\\sisp-test\\test.GHO", "imageDefaultIndex": 3})
-    wf.start(None, dry_run=True)
-    payload = wf.session.config_payload
+    wf.start(dry_run=True)
+    payload = wf.session.task_payload
     assert payload["image_info"]["image_path"] == str(Path(r"D:\\sisp-test\\test.GHO"))
     assert payload["image_info"]["image_index"] == 3
 
 
-def test_settings_image_overrides_config_when_config_not_explicit() -> None:
-    """界面设置优先时，sysWim 必须覆盖配置里的占位镜像路径。
-
-    模板里写的是占位路径（``json/win11.example.json``），如果只“补缺失”，
-    用户在设置页填了真镜像也会一直挂着「镜像文件不存在」的阻断。
-    """
-    wf = _controller(
-        {"sysWim": r"D:\\sisp-test\\test.GHO", "imageDefaultIndex": 1},
-        payload={"image_info": {"image_path": r"D:\\images\\config.GHO", "image_index": 3}},
-    )
-    wf.start(None, dry_run=True)
-    info = wf.session.config_payload["image_info"]
-    assert info["image_path"] == str(Path(r"D:\\sisp-test\\test.GHO"))
+def test_settings_image_is_the_only_source() -> None:
+    """``sysWim`` 是镜像路径的唯一来源：会话载荷里就是设置里那一份。"""
+    wf = _controller({"sysWim": r"D:\sisp-test\test.GHO", "imageDefaultIndex": 1})
+    wf.start(dry_run=True)
+    info = wf.session.task_payload["image_info"]
+    assert info["image_path"] == str(Path(r"D:\sisp-test\test.GHO"))
     assert info["image_index"] == 1
-
-
-def test_config_image_wins_when_config_explicit() -> None:
-    wf = _controller(
-        {"sysWim": r"D:\\sisp-test\\test.GHO"},
-        payload={"image_info": {"image_path": r"D:\\images\\from-config.GHO"}},
-    )
-    wf.start("preset.json", dry_run=True)
-    assert wf.session.config_payload["image_info"]["image_path"] == r"D:\\images\\from-config.GHO"
 
 
 def test_image_default_index_zero_keeps_ghost_default() -> None:
     wf = _controller({"sysWim": r"D:\images	est.GHO", "imageDefaultIndex": 0})
-    wf.start(None, dry_run=True)
-    assert "image_index" not in wf.session.config_payload["image_info"]
+    wf.start(dry_run=True)
+    assert "image_index" not in wf.session.task_payload["image_info"]
 
 
 def _image_check(report: dict[str, Any]) -> dict[str, Any] | None:
@@ -441,8 +425,8 @@ def _image_check(report: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def test_preflight_image_check_prefers_settings_syswim(tmp_path) -> None:
-    """无 -j 时，预检要检查界面设置里的镜像，而不是配置里的占位路径。"""
+def test_preflight_image_check_reads_settings_syswim(tmp_path) -> None:
+    """预检只认设置里的 ``sysWim``（业务配置那一层已移除）。"""
     wim = tmp_path / "real.GHO"
     wim.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
     report = _preflight({"sysWim": str(wim)}, tmp_path)
@@ -451,25 +435,19 @@ def test_preflight_image_check_prefers_settings_syswim(tmp_path) -> None:
     assert "real.GHO" in image["message"]
 
 
-def test_preflight_image_check_uses_config_when_explicit(tmp_path) -> None:
-    """显式 -j 时预检看配置里的镜像路径（配置优先），设置只作兜底。"""
+def test_preflight_image_check_flags_missing_file(tmp_path) -> None:
+    """设置里写的镜像不存在时必须报红，且消息里带全路径。"""
     from app.preflight import run_preflight_checks
 
-    settings_wim = tmp_path / "settings.GHO"
-    settings_wim.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
-    config = tmp_path / "preset.json"
-    config.write_text(
-        json.dumps({"image_info": {"image_path": str(tmp_path / "missing.GHO")}}),
-        encoding="utf-8",
-    )
+    missing = tmp_path / "missing.GHO"
     report = run_preflight_checks(
-        str(config),
         dry_run=True,
         admin_checker=lambda: True,
         command_lookup=lambda name: f"C:/{name}.exe",
         disk_usage=lambda root: (0, 0, 10 * 1024**3),
-        settings={"sysWim": str(settings_wim)},
+        settings={"sysWim": str(missing)},
     )
     image = _image_check(report)
     assert image is not None and image["passed"] is False, image
     assert "missing.GHO" in image["message"]
+

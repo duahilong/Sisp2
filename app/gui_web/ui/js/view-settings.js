@@ -29,7 +29,6 @@ const OPTIONS = {
   theme: [['light', '浅色'], ['dark', '深色'], ['system', '跟随系统']],
   density: [['comfortable', '舒适'], ['compact', '紧凑']],
   startView: [['main', '主页面'], ['install', '系统安装'], ['settings', '设置']],
-  defaultFs: [['NTFS', 'NTFS'], ['exFAT', 'exFAT']],
   logLevel: [['debug', 'debug'], ['info', 'info'], ['warn', 'warn'], ['error', 'error']],
 };
 
@@ -47,7 +46,6 @@ const FIELDS = [
   { section: 'install', key: 'sysDefaultGb', kind: 'int', effect: '下次生成计划生效', hint: '向导第 2 步的初始值，可以在那一步改。' },
   { section: 'install', key: 'efiDefaultMb', kind: 'int', effect: '下次生成计划生效', hint: 'EFI（ESP）分区大小，最小 64 MB；向导第 2 步只显示不可改。' },
   { section: 'install', key: 'dataDefaultGb', kind: 'auto-int', effect: '下次生成计划生效', hint: '“自动”= 剩余空间全给数据分区。' },
-  { section: 'install', key: 'defaultFs', kind: 'enum', effect: '下次生成计划生效', hint: '数据分区格式化用的文件系统（系统分区始终 NTFS）。' },
   { section: 'install', key: 'imageDefaultIndex', kind: 'int', effect: '下次生成计划生效', hint: '默认镜像里的第几个版本；0 = 用第一个。向导第 3 步可逐盘覆盖。' },
 
   { section: 'external', key: 'extEnabled', kind: 'bool', effect: '立即生效', hint: '关掉后一律用系统自带命令。' },
@@ -88,7 +86,6 @@ const LABELS = {
   efiDefaultMb: 'EFI 分区大小',
   imageDefaultIndex: '默认镜像版本',
   dataDefaultGb: '数据分区默认大小',
-  defaultFs: '数据分区文件系统',
   extEnabled: '允许调用外部程序',
   extConfirm: '外部程序调用前确认',
   extDiskpart: 'diskpart 路径',
@@ -132,19 +129,16 @@ export function renderSettings() {
 }
 
 /**
- * 顶部一行“当前生效来源”：界面设置优先，除非启动时显式指定了 -j/--config。
- * 没有这一行的话，用户改完设置发现计划没变，会怀疑是 bug。
+ * 顶部一行“当前生效来源”。
+ *
+ * 曾经这里有三种文案（显式业务配置 / 配置文件兜底 / 纯设置）。业务配置那一层
+ * 移除之后只剩一种来源，但这一行仍然保留：它是“你改的就是生效的”的凭据，
+ * 少了它用户改完设置发现计划没变会怀疑是 bug。
  */
 function sourceBanner() {
-  const session = state.session || {};
-  const configPath = session.config_path || '';
-  const explicit = !!session.config_explicit;
-  const text = explicit
-    ? `界面设置 · 业务配置已显式指定（${configPath}），同名分区字段以业务配置为准`
-    : (configPath
-      ? `界面设置（业务配置 ${configPath} 作为可选预设，界面设置优先）`
-      : '界面设置');
-  return `<div class="set-src" id="settingsSource">当前生效：${esc(text)}</div>`;
+  const count = dirtyCount();
+  const changed = count ? `（未保存的改动 ${count} 项）` : '';
+  return `<div class="set-src" id="settingsSource">当前生效：界面设置${esc(changed)}</div>`;
 }
 
 function sectionOf(key) {

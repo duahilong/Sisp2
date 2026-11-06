@@ -1,8 +1,9 @@
 """运行前检查（preflight）。
 
-在动任何硬盘之前先回答四个问题：有没有管理员权限、PowerShell 能不能用、
-配置文件在不在、配置文件能不能解析。任何一项不通过都会变成
-``WorkflowController.start()`` 里的阻断项，界面据此禁用“开始”。
+在动任何硬盘之前先回答几个问题：有没有管理员权限、PowerShell 能不能用、
+镜像在不在、接受不接受、临时目录放得下吗、外部工具和系统文件路径对不对。
+任何一项不通过都会变成 ``WorkflowController.start()`` 里的阻断项，
+界面据此禁用“开始”。
 
 返回值是给 ``workflow._build_check_items`` 消费的普通 dict 列表
 （``{"name", "passed", "message"}``），而不是 ``CheckItem``：检查层不需要
@@ -10,12 +11,14 @@
 
 两条设计约定：
 
-- **只读**：本模块不执行任何写操作，最坏情况是启动一次 ``powershell`` 查询版本；
-- **不猜配置语义**：“参数够不够用”由 ``prepare()`` 用实际分区大小判断，
-  这里只保证“读得出来、结构说得通”，避免把可用配置误判成不可用。
+- **只读**：本模块不执行任何写操作，最坏情况是启动一次 ``powershell`` 查询版本
+  （``sysTemp`` 目录会被创建，见 ``_add_setting_path_checks``）；
+- **不猜业务语义**：“参数够不够用”由 ``prepare()`` 用实际分区大小判断，
+  这里只回答“有没有、能不能用”。
 
-P0 说明：``config_path`` 为空时按 ``--config`` 的历史默认值找
-``<仓库根>/json/win11.json``；也支持用环境变量 ``SISP_CONFIG`` 指定。
+输入只有一处：界面设置（``settings``）。这一版之前还有“业务 JSON 配置文件”
+这一层，优先级规则（显式 ``-j`` 就配置赢、否则设置赢）让同一台机器跑出过两种
+结果，已整体移除——分区大小、镜像位置、排除的硬盘全部在设置页维护。
 """
 
 from __future__ import annotations
@@ -25,25 +28,17 @@ import os
 import shutil
 import sys
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from app import resources
 from app.modules.ghost.service import GHO_SUFFIXES
-from app.resources import app_root
 
-REPO_ROOT = app_root()
-DEFAULT_CONFIG_RELATIVE = resources.DEFAULT_CONFIG_RELATIVE
-CONFIG_ENV_VAR = "SISP_CONFIG"
 # 临时目录/日志目录至少要有这么多余量，低于它就先别开工。
 MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024
 
 # 检查项名称必须和 workflow._CHECK_KEYS 对齐，否则界面拿不到稳定 key。
 CHECK_ADMIN = "管理员权限检查"
 CHECK_POWERSHELL = "PowerShell 可用性检查"
-CHECK_CONFIG_EXISTS = "配置文件存在性检查"
-CHECK_CONFIG_PARSE = "配置文件可解析性检查"
 CHECK_IMAGE = "镜像文件存在性检查"
 CHECK_IMAGE_TYPE = "镜像可应用性检查"
 CHECK_FREE_SPACE = "临时目录可用空间检查"
@@ -65,27 +60,7 @@ SETTING_PATHS: tuple[tuple[str, str, str], ...] = (
     ("sysTemp", "临时目录", "dir"),
 )
 
-# 配置文件不存在/不可读；JSON 语法错误；结构不合法。
-ERROR_MISSING = 2
-ERROR_PARSE = 3
-ERROR_STRUCTURE = 4
-
 _POWERSHELL_NAMES = ("powershell", "pwsh", "powershell.exe", "pwsh.exe")
-
-
-@dataclass(frozen=True)
-class ConfigLoad:
-    """一次配置文件加载的中间结果，preflight 与 ``SispService.check_config`` 共用。"""
-
-    path: Path | None
-    exists: bool
-    payload: dict[str, Any] | None
-    error_code: int
-    message: str
-
-    @property
-    def passed(self) -> bool:
-        return self.payload is not None and self.error_code == 0
 
 
 def _text(value: Any) -> str | None:
@@ -93,133 +68,6 @@ def _text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
-
-
-def _as_number(value: Any) -> float | None:
-    """int/float/数字字符串 → float；bool、空串、非数字 → None。"""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return None
-        try:
-            return float(text)
-        except ValueError:
-            return None
-    return None
-
-
-def resolve_config_path(config_path: str | os.PathLike[str] | None = None) -> Path | None:
-    """确定这次要检查的配置文件。
-
-    优先级：显式参数 → ``SISP_CONFIG`` → ``<仓库根>/json/win11.json``。
-    显式传入的相对路径按当前工作目录解析，方便命令行 ``-j ../x.json``。
-    """
-    candidate = config_path if config_path not in (None, "") else os.environ.get(CONFIG_ENV_VAR)
-    if candidate in (None, ""):
-        # 冻结版优先用 exe 目录里的配置（用户可改），没有再回退随包模板。
-        return resources.ensure_default_config()
-    return Path(str(candidate)).expanduser()
-
-
-def validate_config_payload(payload: Mapping[str, Any]) -> list[str]:
-    """检查配置的“结构”是否说得通，返回问题列表（空列表 = 通过）。
-
-    只校验 workflow 真正会读的键，其余键原样透传：
-    ``partition_info``（efi_size_mb / c_size_gb / data_size_gb）、
-    ``image_info.image_path``、``excluded_disk_names``。
-    """
-    problems: list[str] = []
-
-    partition_info = payload.get("partition_info")
-    if partition_info is not None and not isinstance(partition_info, Mapping):
-        problems.append("partition_info 必须是对象")
-    elif isinstance(partition_info, Mapping):
-        for key in ("efi_size_mb", "c_size_gb"):
-            value = partition_info.get(key)
-            if value is None:
-                continue
-            number = _as_number(value)
-            if number is None or number <= 0:
-                problems.append(f"partition_info.{key} 必须是正数")
-        data_size = partition_info.get("data_size_gb")
-        if data_size not in (None, "", "auto"):
-            number = _as_number(data_size)
-            if number is None or number < 0:
-                problems.append("partition_info.data_size_gb 必须是正数或 auto")
-        # 显式数据分区列表（向导里加了 E 分区才会出现）：结构不对就阻断，
-        # 否则会一直到 diskpart 才发现，而那时盘已经清空了。
-        data_parts = partition_info.get("data_partitions")
-        if data_parts is not None:
-            from app.application.partitions import (
-                PartitionLayoutError,
-                normalise_data_partitions,
-            )
-
-            try:
-                normalise_data_partitions(data_parts)
-            except PartitionLayoutError as exc:
-                problems.append(f"partition_info.data_partitions 不合法：{exc}")
-
-    image_info = payload.get("image_info")
-    if image_info is not None and not isinstance(image_info, Mapping):
-        problems.append("image_info 必须是对象")
-    elif isinstance(image_info, Mapping):
-        image_path = image_info.get("image_path")
-        if image_path is not None and not isinstance(image_path, str):
-            problems.append("image_info.image_path 必须是字符串")
-
-    excluded = payload.get("excluded_disk_names")
-    if excluded is not None and not isinstance(excluded, (list, tuple)):
-        problems.append("excluded_disk_names 必须是数组")
-
-    return problems
-
-
-def load_config(config_path: str | os.PathLike[str] | None = None) -> ConfigLoad:
-    """读取并校验配置文件。
-
-    解析失败绝不抛异常：返回带 ``error_code`` 的 ``ConfigLoad``，
-    让 GUI 能把“文件不存在”和“JSON 写坏了”区分开。
-    """
-    path = resolve_config_path(config_path)
-    if path is None:
-        return ConfigLoad(None, False, None, ERROR_MISSING, "未指定配置文件")
-
-    if not path.is_file():
-        return ConfigLoad(path, False, None, ERROR_MISSING, f"配置文件不存在: {path}")
-
-    try:
-        # utf-8-sig：容忍记事本/VS Code 保存时带的 BOM。
-        text = path.read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeDecodeError) as exc:
-        return ConfigLoad(path, True, None, ERROR_MISSING, f"配置文件无法读取: {exc}")
-
-    try:
-        raw = json.loads(text)
-    except json.JSONDecodeError as exc:
-        return ConfigLoad(
-            path,
-            True,
-            None,
-            ERROR_PARSE,
-            f"配置文件不是合法 JSON: 第 {exc.lineno} 行第 {exc.colno} 列 {exc.msg}",
-        )
-
-    if not isinstance(raw, dict):
-        return ConfigLoad(path, True, None, ERROR_STRUCTURE, "配置文件顶层必须是 JSON 对象")
-
-    problems = validate_config_payload(raw)
-    if problems:
-        return ConfigLoad(path, True, None, ERROR_STRUCTURE, "配置文件结构不合法: " + "；".join(problems))
-
-    payload = dict(raw)
-    # workflow.start() 会在配置里没有 config_path 时用它兜底，这里补齐。
-    payload.setdefault("config_path", str(path))
-    return ConfigLoad(path, True, payload, 0, "")
 
 
 def is_admin() -> bool:
@@ -275,7 +123,6 @@ def _check_free_space(
 
 
 def run_preflight_checks(
-    config_path: str | os.PathLike[str] | None = None,
     *,
     dry_run: bool = False,
     admin_checker: Callable[[], bool] | None = None,
@@ -336,50 +183,10 @@ def run_preflight_checks(
     else:
         add(CHECK_POWERSHELL, False, "未找到 powershell/pwsh，无法扫描硬盘或执行 diskpart")
 
-    # --------------------------------------------------------------- 配置
-    # 业务配置是**可选预设**：分区大小、镜像、排除名单都能在界面设置里维护。
-    # 因此“文件不存在”只作为提示（optional），不阻断；而“文件存在但坏了”
-    # 仍然阻断——那是用户主动写的内容，静默忽略比报错更危险。
-    loaded = load_config(config_path)
-    missing = loaded.error_code == ERROR_MISSING
-    if loaded.path is None:
-        add(CHECK_CONFIG_EXISTS, False, "未指定配置文件", optional=True)
-    elif loaded.exists:
-        add(CHECK_CONFIG_EXISTS, True, f"配置文件存在: {loaded.path}")
-    elif missing:
-        add(
-            CHECK_CONFIG_EXISTS,
-            False,
-            f"{loaded.message}（可选，未找到就全部使用界面设置）",
-            optional=True,
-        )
-    else:
-        add(CHECK_CONFIG_EXISTS, False, loaded.message)
-    add(
-        CHECK_CONFIG_PARSE,
-        loaded.passed or missing,
-        "配置可解析" if loaded.passed else (f"{loaded.message}（可选）" if missing else loaded.message),
-        optional=missing,
-    )
-
-    payload = loaded.payload
-    if payload is None and missing:
-        payload = {}
-
     # --------------------------------------------------------------- 镜像
-    # 与运行时保持同一套优先级：无 -j 时界面设置的 sysWim 覆盖配置里的
-    # image_path（否则模板占位路径会让“填了真镜像”的用户一直看到阻断）；
-    # 显式 -j 时配置优先，设置只作兜底。
-    config_image = None
-    if payload is not None:
-        image_info = payload.get("image_info")
-        if isinstance(image_info, Mapping):
-            config_image = _text(image_info.get("image_path"))
-    settings_image = _text((settings or {}).get("sysWim"))
-    explicit_config = bool(str(config_path or "").strip() or os.environ.get(CONFIG_ENV_VAR))
-    image_path = (
-        (config_image or settings_image) if explicit_config else (settings_image or config_image)
-    )
+    # 镜像只有一个来源：设置页的「引用的镜像存储位置」(`sysWim`)。
+    # 配置文件这一层移除之后，“配置赢还是设置赢”的优先级分歧彻底消失。
+    image_path = _text((settings or {}).get("sysWim"))
     if image_path is not None:
         target = Path(image_path).expanduser()
         if target.is_file():
@@ -404,11 +211,9 @@ def run_preflight_checks(
             add(CHECK_IMAGE, False, f"镜像文件不存在: {target}")
 
     # ----------------------------------------------------------- 剩余空间
-    # 配置都没读出来时不额外加噪声；空间检查本身与配置无关，
-    # 但只要开始准备镜像就需要它，所以有配置才检查。
-    if payload is not None:
-        ok_space, space_message = _check_free_space(disk_usage)
-        add(CHECK_FREE_SPACE, ok_space, space_message)
+    # 与业务配置无关：只要做镜像/读盘就需要临时空间，永远检查。
+    ok_space, space_message = _check_free_space(disk_usage)
+    add(CHECK_FREE_SPACE, ok_space, space_message)
 
     # --------------------------------------------------- 界面设置里的工具/路径
     if settings:
@@ -416,12 +221,10 @@ def run_preflight_checks(
         _add_setting_path_checks(add, settings)
 
     return {
-        # 可选检查（例如没放业务配置文件）失败不算“没通过”
+        # 可选检查（例如没配镜像、没配外部工具）失败不算“没通过”
         "all_passed": all(item["passed"] for item in results if not item.get("optional")),
         "dry_run": bool(dry_run),
         "results": results,
-        "config_path": str(loaded.path) if loaded.path is not None else None,
-        "config_payload": payload,
     }
 
 

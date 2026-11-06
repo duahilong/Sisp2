@@ -475,7 +475,7 @@ def test_real_runner_fills_job_progress(tmp_path):
     job = manager.submit(
         JobSpec(
             disk_number=2,
-            config_payload=payload,
+            task_payload=payload,
             drive_letters=LETTERS,
             dry_run=False,
         ),

@@ -172,7 +172,7 @@ function stepDiskHtml() {
 
   return `<div class="wz-inner">
     <h3 class="wz-h">选择要装系统的硬盘</h3>
-    <p class="wz-p">可以一次选多块盘。系统盘、只读盘、配置里排除的盘会置灰；真实写盘时后端还会再核一次磁盘身份（UniqueId / 序列号）。</p>
+    <p class="wz-p">可以一次选多块盘。系统盘、只读盘、在设置里排除的盘会置灰；真实写盘时后端还会再核一次磁盘身份（UniqueId / 序列号）。</p>
     <div class="selbar">已选 <b id="selCount">${state.wizard.targets.length}</b> 块
       <button class="lnk" id="selAll">全选可安装</button>
       <button class="lnk" id="selNone">清空</button>
@@ -207,10 +207,10 @@ function bindStepDisk() {
   }
 }
 
-/** 第 2 步的 EFI 提示：优先用执行计划里真实的 EFI 大小（来自配置文件）。 */
+/** 第 2 步的 EFI 提示：优先用执行计划里真实的 EFI 大小（来自设置页默认值）。 */
 function efiText() {
-  const item = state.plans && state.plans.find((plan) => plan.spec && plan.spec.config_payload);
-  const info = item && item.spec.config_payload.partition_info;
+  const item = state.plans && state.plans.find((plan) => plan.spec && plan.spec.task_payload);
+  const info = item && item.spec.task_payload.partition_info;
   const mb = info && Number(info.efi_size_mb);
   return mb > 0 ? `EFI ${Math.round(mb)} MB` : 'EFI 分区';
 }
@@ -556,7 +556,7 @@ function ghostFiles() {
 function stepVersionHtml() {
   const rows = state.wizard.targets.map((target) => {
     const current = target.imagePath || defaultImagePath();
-    const options = ['<option value="">配置文件里的镜像（不改）</option>']
+    const options = ['<option value="">设置里的镜像（不改）</option>']
       .concat(ghostFiles().map((file) => `<option value="${esc(file.path)}"${file.path === current ? ' selected' : ''}>${esc(file.name)} · ${esc(file.size_display || fmtSize(file.size_bytes))}</option>`))
       .join('');
     const probing = images.probe && images.probe.path === current;
@@ -582,7 +582,7 @@ function stepVersionHtml() {
   const others = ((images.listing && images.listing.images) || []).filter((file) => file.kind !== 'gho');
   return `<div class="wz-inner">
     <h3 class="wz-h">系统镜像（GHO）</h3>
-    <p class="wz-p">装机用 Ghost 把 GHO 分区块镜像还原到系统分区。目录里的文件由「设置 → 系统文件 → 镜像目录」决定，不选就沿用配置文件里的镜像。</p>
+    <p class="wz-p">装机用 Ghost 把 GHO 分区块镜像还原到系统分区。目录里的文件由「设置 → 系统文件 → 镜像目录」决定，不选就沿用设置里指定的镜像。</p>
     <div class="selbar">
       镜像目录 <b>${esc(dir || '（未设置）')}</b>
       <button class="lnk" id="imgReload">重新读取</button>
@@ -625,6 +625,55 @@ function bindStepVersion() {
   }
 }
 
+/**
+ * 读取镜像目录并校验默认镜像。
+ *
+ * 两件事：先 ``POST /api/images`` 不带 path 列目录（只列 installable 的 .gho/.ghs），
+ * 再对默认镜像单独 probe 一次读文件头。``main.js`` 在进入第 3 步时调它，
+ * 「重新读取」按钮也调它——所以必须 export。
+ */
+export async function loadImages() {
+  if (images.loading) return;
+  images.loading = true;
+  images.error = '';
+  if (state.view === 'install' && state.wizard.step === 3) renderInstall();
+  try {
+    images.listing = await api.images({});
+  } catch (exc) {
+    images.listing = { directory: '', images: [], exists: false };
+    images.error = exc instanceof ApiError ? exc.message : String(exc);
+  } finally {
+    images.loading = false;
+  }
+  const path = defaultImagePath();
+  if (path) await probeImage(path);
+  else if (state.view === 'install') renderInstall();
+}
+
+/** 校验单个镜像：只看 Ghost 文件头和分区块序号，返回给第 3 步的 chip 显示。 */
+async function probeImage(path) {
+  if (!path) {
+    images.probe = null;
+    if (state.view === 'install') renderInstall();
+    return;
+  }
+  images.loading = true;
+  images.error = '';
+  if (state.view === 'install') renderInstall();
+  try {
+    images.probe = await api.images({ path });
+  } catch (exc) {
+    images.probe = null;
+    images.error = exc instanceof ApiError ? exc.message : String(exc);
+  } finally {
+    images.loading = false;
+  }
+  for (const target of state.wizard.targets) {
+    if (!target.imagePath) target.imagePath = path;
+  }
+  if (state.view === 'install') renderInstall();
+}
+
 /* ---- 第 4 步 ---- */
 function needsTypedConfirm() {
   return Boolean(state.settings && state.settings.typeToConfirm) && !(state.info && state.info.dry_run);
@@ -665,16 +714,17 @@ function stepConfirmHtml() {
     // 分区行以执行计划里的 partition_plan 为准（后端解析后的真实大小 + 盘符）；
     // 只有老后端没有这个字段时才退回按配置估算。
     const planned = Array.isArray(plan.partition_plan) ? plan.partition_plan : [];
-    const info = (item.spec && item.spec.config_payload && item.spec.config_payload.partition_info) || {};
+    const info = (item.spec && item.spec.task_payload && item.spec.task_payload.partition_info) || {};
     const efiMb = Number(info.efi_size_mb) || 0;
     const cGb = Number(info.c_size_gb) || (targets ? Number(targets.sysGb) : 0);
     const dataGb = Number(info.data_size_gb) || (targets ? Number(targets.dataGb) : 0);
-    const dataFs = String(info.data_fs || (state.settings && state.settings.defaultFs) || 'NTFS');
+    // 数据分区恒为 NTFS；`info.data_fs` 只是把后端算出来的值原样显示。
+    const dataFs = String(info.data_fs || 'NTFS');
     const partRows = planned.length
       ? planned.map((part) => `<tr><td class="k">${esc(roleLabel(part.role))}</td><td>${esc(part.size_display || '')} · ${esc(part.file_system || '')}${part.letter ? ` · 盘符 ${esc(part.letter)}:` : ''}</td></tr>`).join('')
       : [
-        `<tr><td class="k">EFI 分区</td><td>${efiMb > 0 ? `${Math.round(efiMb)} MB` : '配置文件默认'} · FAT32</td></tr>`,
-        `<tr><td class="k">系统分区</td><td>${cGb > 0 ? `${cGb} GB` : '配置文件默认'} · NTFS</td></tr>`,
+        `<tr><td class="k">EFI 分区</td><td>${efiMb > 0 ? `${Math.round(efiMb)} MB` : '设置默认'} · FAT32</td></tr>`,
+        `<tr><td class="k">系统分区</td><td>${cGb > 0 ? `${cGb} GB` : '设置默认'} · NTFS</td></tr>`,
         `<tr><td class="k">数据分区</td><td>${dataGb > 0 ? `${dataGb} GB` : '剩余空间'} · ${esc(dataFs)}</td></tr>`,
       ].join('');
     // convert gpt 会在盘首自动塞一个约 16 MB 的 MSR（Windows 的行为，不是我们的命令）。
@@ -751,11 +801,11 @@ function stepConfirmHtml() {
 }
 
 function versionText(target) {
-  if (!target) return '配置文件默认';
+  if (!target) return '设置默认';
   if (target.imageLabel) return target.imageLabel;
   if (target.imageIndex) return `GHO 分区块 #${target.imageIndex}`;
   if (target.imagePath) return target.imagePath;
-  return '配置文件默认';
+  return '设置默认';
 }
 
 function canStart() {

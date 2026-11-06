@@ -48,8 +48,5 @@ build/
 secrets.json
 config.local.json
 
-# 本机业务配置（由 json/win11.example.json 首次运行复制出来，含本机镜像路径）
-json/win11.json
-
 # 打包产物：任何 exe 都不入库（构建产物在 dist/，见上）
 *.exe

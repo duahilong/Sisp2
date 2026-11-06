@@ -52,7 +52,8 @@ def test_spec_declares_single_gui_executable() -> None:
 
 def test_spec_resources_exist() -> None:
     assert resources.ui_path().is_file(), "界面文件缺失，打出来的 exe 会打不开窗口"
-    assert (ROOT / "json" / "win11.example.json").is_file(), "业务配置模板缺失"
+    # 业务配置那一层已移除：仓库里不该再有 json/ 目录，也不该有任何一份配置模板
+    assert not (ROOT / "json").exists(), "json/ 目录应当已经删除"
     assert (PACKAGING / "sisp2.ico").is_file(), "图标缺失，先跑 packaging/make_icon.py"
     assert (PACKAGING / "version_info.txt").is_file()
 

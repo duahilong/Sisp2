@@ -3,28 +3,30 @@
 界面只负责“展示 + 用户操作”，不直接拼装配置、扫描、盘符分配和任务。
 ``WorkflowController`` 把一次完整操作串成：
 
-1. ``start()``：运行前检查、读取配置、扫描并应用硬盘保护规则；
-2. ``refresh_disks()``：重新扫描硬盘，不改变配置和检查结果；
-3. ``check_config()``：只重新校验配置文件，不重建会话；
-4. ``prepare()``：执行写前校验，为每块盘生成 ``ExecutionPlan`` 和
+1. ``start()``：运行前检查、扫描并应用硬盘保护规则；
+2. ``refresh_disks()``：重新扫描硬盘，不改变检查结果；
+3. ``prepare()``：执行写前校验，为每块盘生成 ``ExecutionPlan`` 和
    ``JobSpec``，并标明检查项与阻断项；
-5. ``submit()`` / ``confirm()`` / ``cancel()``：交给 ``JobManager`` 执行；
-6. ``results()``：汇总已结束任务的结果。
+4. ``submit()`` / ``confirm()`` / ``cancel()``：交给 ``JobManager`` 执行；
+5. ``results()``：汇总已结束任务的结果。
 
 本模块不依赖 Qt，也不执行任何 PowerShell 或磁盘操作，因此可以直接用
 普通单元测试覆盖。
 
 ``prepare()`` 既接受 ``[1, 3]``，也接受
 ``{1: {"c_size": 400, "data_size": 800}}`` 这种“每块盘一套参数”的写法；
-每个任务用合并后的配置载荷构造 ``JobSpec``，盘符分配仍由一次全局调用完成，
-避免并发分配撞车。
+每个任务用合并后的任务载荷（``TaskPayload``）构造 ``JobSpec``，盘符分配仍由
+一次全局调用完成，避免并发分配撞车。
+
+参数优先级（从弱到强）：**设置页默认值 → 向导里这块盘的逐盘覆盖**。
+这一版之前还有一层“业务 JSON 配置文件”，显式 ``-j`` 时它压过设置、否则被设置
+压过——同一台机器因此能跑出两种结果。那一层已整体移除。
 """
 
 from __future__ import annotations
 
 import copy
 import inspect
-import os
 import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -44,6 +46,7 @@ from app.application.partitions import (
     unallocated_bytes,
     with_auto_estimates,
 )
+from app.application.payload import build_task_payload
 from app.application.real_runner import build_real_runner
 from app.application.service import SispService
 from app.application.shell import find_program
@@ -58,8 +61,6 @@ PreflightRunner = Callable[..., dict[str, Any]]
 _CHECK_KEYS = {
     "管理员权限检查": "admin",
     "PowerShell 可用性检查": "powershell",
-    "配置文件存在性检查": "config_exists",
-    "配置文件可解析性检查": "config_parse",
     "镜像文件存在性检查": "image_exists",
     "镜像可应用性检查": "image_type",
     "临时目录可用空间检查": "free_space",
@@ -84,26 +85,14 @@ class WorkflowError(ValueError):
 class SessionState:
     """一次工作流会话的启动检查与硬盘扫描快照。"""
 
-    config_path: str | None
-    config_payload: dict[str, Any] | None
+    # 启动那一刻由设置页算出的任务载荷（分区默认值 + 镜像位置）。
+    # 它只是快照：``prepare()`` 会再读一次设置，改完设置不必重启。
+    task_payload: dict[str, Any] | None
     checks: tuple[CheckItem, ...] = ()
     disks: tuple[DiskInfo, ...] = ()
     blockers: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     dry_run: bool = False
-    # 用户是否显式指定了业务配置文件（``-j/--config`` 或 ``SISP_CONFIG``）。
-    # 显式指定时配置优先于界面设置，否则界面设置优先。
-    config_explicit: bool = False
-
-    @property
-    def ready(self) -> bool:
-        """配置可用且没有阻断项时才能继续确认执行。"""
-        return self.config_payload is not None and not self.blockers
-
-    @property
-    def can_prepare(self) -> bool:
-        """配置可用即可生成计划，阻断项会展示在计划中并阻止确认。"""
-        return self.config_payload is not None
 
     @property
     def selectable_disks(self) -> tuple[DiskInfo, ...]:
@@ -111,8 +100,6 @@ class SessionState:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "config_path": self.config_path,
-            "config_explicit": self.config_explicit,
             "dry_run": self.dry_run,
             "checks": [check.to_dict() for check in self.checks],
             "disks": [disk.to_dict() for disk in self.disks],
@@ -313,15 +300,13 @@ def _image_blocker(payload: Mapping[str, Any] | None) -> str | None:
 def _apply_partition_defaults(
     payload: dict[str, Any],
     defaults: Mapping[str, Any] | None,
-    *,
-    settings_win: bool = True,
 ) -> dict[str, Any]:
-    """把界面设置里的分区默认值合并进载荷。
+    """把设置页的分区默认值合并进载荷。
 
-    ``settings_win=True``（默认，界面设置优先）时用设置值覆盖配置；显式指定了
-    ``-j/--config`` 的会话会传 ``False``，退回到“配置优先、设置只补缺失字段”。
+    设置是唯一的默认值来源，所以这里永远是“覆盖”。向导里每块盘的逐盘覆盖在
+    ``_merge_payload`` 里合并，晚于这里，因此永远优先。
 
-    ``data_size_gb=None`` 表示“用剩余空间”，与配置缺省等价，因此不写入。
+    ``data_size_gb=None`` 表示“用剩余空间”，不写入（下游 ``or`` 判空即可）。
     """
     if not defaults:
         return payload
@@ -331,62 +316,51 @@ def _apply_partition_defaults(
         partition_info = {}
         payload["partition_info"] = partition_info
 
-    for key in ("efi_size_mb", "c_size_gb", "data_size_gb", "data_fs"):
+    for key in ("efi_size_mb", "c_size_gb", "data_size_gb"):
         value = defaults.get(key)
         if value in (None, ""):
-            continue
-        if not settings_win and partition_info.get(key) not in (None, ""):
             continue
         partition_info[key] = value
     return payload
 
 
-def _config_is_explicit(config_path: str | None) -> bool:
-    """用户是否显式指定了业务配置文件。
+def _image_from_settings(settings: Mapping[str, Any] | None) -> dict[str, Any]:
+    """设置页的「引用的镜像存储位置」+「默认镜像版本」→ ``image_info``。
 
-    显式指定（``-j/--config`` 或环境变量 ``SISP_CONFIG``）时保持“配置优先于界面
-    设置”的老行为，方便批量脚本用预设文件覆盖用户设置；默认走界面设置。
+    ``image_index`` 只在 >0 时写入：0 表示“用第一个版本”，交给执行层的
+    ``or 1`` 兜底，载荷里不必出现一个等于默认值的键。
     """
-    if str(config_path or "").strip():
-        return True
-    return bool(str(os.environ.get("SISP_CONFIG") or "").strip())
+    wim = str((settings or {}).get("sysWim") or "").strip()
+    if not wim:
+        return {}
+    info: dict[str, Any] = {"image_path": str(Path(wim).expanduser())}
+    try:
+        index = int((settings or {}).get("imageDefaultIndex") or 0)
+    except (TypeError, ValueError):
+        index = 0
+    if index > 0:
+        info["image_index"] = index
+    return info
 
 
 def _apply_image_defaults(
     payload: dict[str, Any],
     settings: Mapping[str, Any] | None,
-    *,
-    override: bool = False,
 ) -> dict[str, Any]:
-    """用设置里的“系统镜像文件 + 默认版本”决定镜像。
+    """把设置里的镜像合并进载荷。
 
-    ``override=True``（界面设置优先的会话）时，设置里的 ``sysWim`` 直接覆盖配置
-    里的同名字段——否则模板里的占位路径（``D:\\images\\win11.wim``）会一直挂着
-    「镜像文件不存在」的阻断，用户在设置页填了真镜像也不生效。
-    ``override=False``（显式 ``-j`` 的会话）时只补缺失字段，配置优先。
-
-    向导第 3 步的逐盘选择在 ``_merge_payload`` 里合并，晚于这里，所以永远优先。
+    设置是唯一来源，所以永远覆盖；``prepare()`` 每次重新调一次，设置页改完不必
+    重启。向导第 3 步的逐盘选择在 ``_merge_payload`` 里合并，晚于这里，所以永远
+    优先于这里的设置值。
     """
-    if not settings:
+    info = _image_from_settings(settings)
+    if not info:
         return payload
-    info = payload.get("image_info")
-    if not isinstance(info, dict):
-        info = {}
-        payload["image_info"] = info
-    if not override and str(info.get("image_path") or "").strip():
-        return payload
-    wim = str(settings.get("sysWim") or "").strip()
-    if not wim:
-        return payload
-    info["image_path"] = str(Path(wim).expanduser())
-    try:
-        index = int(settings.get("imageDefaultIndex") or 0)
-    except (TypeError, ValueError):
-        index = 0
-    if index > 0:
-        info["image_index"] = index
-    else:
-        info.pop("image_index", None)
+    current = payload.get("image_info")
+    if not isinstance(current, dict):
+        current = {}
+        payload["image_info"] = current
+    current.update(info)
     return payload
 
 
@@ -577,8 +551,8 @@ class WorkflowController:
         if allowlist is not None:
             self._service.allowed_disk_numbers = frozenset(allowlist)
 
-    def _run_preflight(self, config_path: str | None) -> dict[str, Any]:
-        """调用预检；兼容只接受 config_path 的测试替身。"""
+    def _run_preflight(self) -> dict[str, Any]:
+        """调用预检；按签名探测传参，兼容只接受一部分关键字的测试替身。"""
         accepts: set[str] = set()
         variadic = False
         try:
@@ -596,7 +570,7 @@ class WorkflowController:
             kwargs["dry_run"] = self._dry_run
         if (variadic or "settings" in accepts) and self._settings_provider is not None:
             kwargs["settings"] = self._settings()
-        return self._preflight_runner(config_path, **kwargs)
+        return self._preflight_runner(**kwargs)
 
     # ------------------------------------------------------------------ 设置
     def set_settings_provider(
@@ -617,14 +591,12 @@ class WorkflowController:
     def _live_partition_defaults(self) -> dict[str, Any]:
         """构造时的默认值 + 设置里的最新值（改完设置不必重启）。
 
-        设置页里 EFI / 系统分区 / 数据分区 / 文件系统这四项都是“下次生成计划生效”，
-        所以这里每次现读，而不是只用构造时抓的快照。
+        设置页里 EFI / 系统分区 / 数据分区这三项都是“下次生成计划生效”，
+        所以这里每次现读，而不是只用构造时抓的快照。文件系统不在其中：数据分区
+        恒为 NTFS（见 ``partitions.DATA_FS_CHOICES``）。
         """
         defaults = dict(self._partition_defaults)
         settings = self._settings()
-        fs = str(settings.get("defaultFs") or "").strip()
-        if fs:
-            defaults["data_fs"] = fs
         for key, source in (
             ("efi_size_mb", "efiDefaultMb"),
             ("c_size_gb", "sysDefaultGb"),
@@ -639,29 +611,23 @@ class WorkflowController:
             defaults["data_size_gb"] = data_size
         return defaults
 
-    def _merged_excluded_names(self, payload: Mapping[str, Any] | None) -> list[str]:
-        """禁止操作的硬盘型号：设置页的名单 ∪ 业务配置里的名单。
+    def _excluded_disk_names(self) -> list[str]:
+        """禁止操作的硬盘型号：设置页的 ``excludedDiskNames``（唯一来源）。
 
-        两处都要认：设置页是普通用户的入口（改了立即生效），业务配置是给
-        ``-j`` 指定预设文件的高级用法。
+        每次现读，改完设置不必重启。这里按 casefold 去重——服务里的匹配也是
+        casefold 的，同一块盘在名单里写两种大小写不该出两条“命中排除名单”。
         """
+        source = self._settings().get("excludedDiskNames")
         names: list[str] = []
         seen: set[str] = set()
-        for source in (
-            (payload or {}).get("excluded_disk_names"),
-            self._settings().get("excludedDiskNames"),
-        ):
-            if not isinstance(source, (list, tuple)):
-                continue
+        if isinstance(source, (list, tuple)):
             for item in source:
-                text = str(item).strip()
-                # 匹配本身是 casefold 的，重复项也按 casefold 判断，避免同一块盘
-                # 在两处名单里写法不同就出现两条“命中排除名单”。
-                marker = text.casefold()
-                if not text or marker in seen:
+                name = str(item).strip()
+                marker = name.casefold()
+                if not name or marker in seen:
                     continue
                 seen.add(marker)
-                names.append(text)
+                names.append(name)
         return names
 
     def _runner_options(self) -> dict[str, Any]:
@@ -740,20 +706,15 @@ class WorkflowController:
         return [job.result for job in self.jobs() if job.result is not None]
 
     # ------------------------------------------------------------------ 启动与扫描
-    def start(
-        self,
-        config_path: str | None = None,
-        *,
-        dry_run: bool | None = None,
-    ) -> SessionState:
-        """执行运行前检查、读取配置并扫描硬盘。"""
+    def start(self, *, dry_run: bool | None = None) -> SessionState:
+        """执行运行前检查、从设置算出任务载荷并扫描硬盘。"""
         if dry_run is not None:
             self._dry_run = self._resolve_dry_run(dry_run)
         # 扫描前先对齐设置里的保护开关，否则刚改的设置要重启才生效。
         self._apply_live_safety_flags()
 
         try:
-            report = self._run_preflight(config_path)
+            report = self._run_preflight()
         except Exception as exc:  # noqa: BLE001 - 预检失败也要变成会话阻断项而不是崩栈
             report = {
                 "all_passed": False,
@@ -764,13 +725,14 @@ class WorkflowController:
                         "message": f"运行前检查执行失败: {exc}",
                     }
                 ],
-                "config_payload": None,
             }
 
         checks = _build_check_items(report.get("results"))
-        payload = report.get("config_payload")
-        if not isinstance(payload, dict):
-            payload = None
+        # 任务载荷完全由设置推导：分区默认值 + 镜像位置。
+        payload = build_task_payload(
+            partition_info=self._live_partition_defaults(),
+            image_info=_image_from_settings(self._settings()),
+        )
 
         blockers = [
             f"{check.label}：{check.message}"
@@ -782,17 +744,7 @@ class WorkflowController:
         ]
         disks: tuple[DiskInfo, ...] = ()
 
-        # 业务配置从“必需”降级为“可选预设”：没有配置文件时用空载荷继续，
-        # 分区大小、镜像、排除名单都能从界面设置里拿到。
-        if payload is None:
-            payload = {}
-            warnings.append("未找到业务配置文件，全部使用界面设置")
-        payload = _apply_image_defaults(
-            payload,
-            self._settings(),
-            override=not _config_is_explicit(config_path),
-        )
-        excluded_names = self._merged_excluded_names(payload)
+        excluded_names = self._excluded_disk_names()
         try:
             disks = tuple(self._service.scan_protected_disks(excluded_names))
         except Exception as exc:  # noqa: BLE001 - 扫描失败记成阻断项，界面还能打开
@@ -804,9 +756,7 @@ class WorkflowController:
             warnings.append("当前没有可选硬盘，所有硬盘均被保护")
 
         session = SessionState(
-            config_path=self._resolve_config_path(config_path, payload),
-            config_payload=payload,
-            config_explicit=_config_is_explicit(config_path),
+            task_payload=payload,
             checks=checks,
             disks=disks,
             blockers=tuple(dict.fromkeys(blockers)),
@@ -828,7 +778,7 @@ class WorkflowController:
         try:
             disks = tuple(
                 self._service.scan_protected_disks(
-                    self._merged_excluded_names(session.config_payload)
+                    self._excluded_disk_names()
                 )
             )
         except Exception as exc:
@@ -843,14 +793,6 @@ class WorkflowController:
         self._session = replace(session, disks=disks, blockers=blockers)
         self._prepared = {}
         return list(disks)
-
-    def check_config(self, config_path: str | None = None) -> Any:
-        """单独重新校验配置文件，不重建会话。
-
-        返回 ``ConfigCheckResult``；界面只需要 ``passed/message/error_code``。
-        """
-        target = config_path or (self._session.config_path if self._session else None)
-        return self._service.check_config(target)
 
     # ------------------------------------------------------------------ 计划
     def prepare(
@@ -868,8 +810,6 @@ class WorkflowController:
         报错，避免“什么都没选却真写盘”。
         """
         session = self._require_session()
-        if session.config_payload is None:
-            raise WorkflowError("配置不可用，无法生成执行计划")
         self._apply_live_safety_flags()
 
         overrides: dict[int, dict[str, Any]] = {}
@@ -912,18 +852,13 @@ class WorkflowController:
             disk = disk_lookup.get(disk_number)
             if disk is None:
                 raise WorkflowError(f"硬盘编号不存在: {disk_number}")
-            # 优先级（从弱到强）：业务配置 → 界面设置 → 向导里这块盘的逐盘覆盖。
-            # 所以先把设置叠到会话载荷上，再合并逐盘覆盖——否则设置里的默认值
-            # 会把用户在向导第 2/3 步填的大小和镜像“改回去”。
-            base_payload = _apply_image_defaults(
-                session.config_payload,
-                self._settings(),
-                override=not session.config_explicit,
-            )
-            base_payload = _apply_partition_defaults(
-                base_payload,
-                self._live_partition_defaults(),
-                settings_win=not session.config_explicit,
+            # 优先级（从弱到强）：设置页默认值 → 向导里这块盘的逐盘覆盖。
+            # 设置每次现读（改完不必重启），逐盘覆盖最后合并——否则设置里的
+            # 默认值会把用户在第 2/3 步填的大小和镜像“改回去”。
+            base_payload = build_task_payload(
+                base=session.task_payload,
+                partition_info=self._live_partition_defaults(),
+                image_info=_image_from_settings(self._settings()),
             )
             payload = _merge_payload(base_payload, overrides.get(disk_number))
             for message in _check_partition_fit(disk, payload):
@@ -939,10 +874,9 @@ class WorkflowController:
         summaries = [disk.to_dict() for disk in session.disks]
         try:
             selection = self._service.build_selection_plan(
-                session.config_payload,
+                session.task_payload or {},
                 summaries,
                 selected,
-                config_path=session.config_path,
                 log_dir=self._log_dir,
                 result_dir=self._result_dir,
                 resource_resolver=self._resource_resolver,
@@ -979,7 +913,7 @@ class WorkflowController:
         payload: dict[str, Any] | None = None,
         implicit_allowlist: bool = False,
     ) -> PreparedJob:
-        task_payload = payload if payload is not None else (session.config_payload or {})
+        task_payload = payload if payload is not None else (session.task_payload or {})
         identity = build_worker_disk_identity(disk.to_dict())
         checks: list[CheckItem] = []
         # 会话级阻断项里，“镜像文件存在性检查”/“镜像可应用性检查”是按配置文件算的；
@@ -1112,7 +1046,6 @@ class WorkflowController:
             size_display=disk.size_display,
             identity=identity,
             drive_letters=dict(drive_letters),
-            config_path=session.config_path,
             dry_run=dry_run,
             warnings=tuple(warnings),
             checks=tuple(checks),
@@ -1124,7 +1057,7 @@ class WorkflowController:
         )
         spec = JobSpec(
             disk_number=disk.disk_number,
-            config_payload=task_payload,
+            task_payload=task_payload,
             expected_identity=identity,
             drive_letters=dict(drive_letters),
             dry_run=dry_run,
@@ -1317,14 +1250,3 @@ class WorkflowController:
                 raise WorkflowError(f"任务不存在: {job_id}")
             jobs.append(job)
         return jobs
-
-    @staticmethod
-    def _resolve_config_path(
-        config_path: str | None,
-        payload: dict[str, Any] | None,
-    ) -> str | None:
-        if config_path:
-            return str(config_path)
-        if payload and payload.get("config_path"):
-            return str(payload["config_path"])
-        return None

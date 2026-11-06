@@ -222,16 +222,6 @@ class DiskListResult:
 
 
 @dataclass(frozen=True)
-class ConfigCheckResult:
-    """配置检查结果，供 CLI/GUI 决定如何展示错误。"""
-
-    passed: bool
-    payload: dict[str, Any] | None = None
-    error_code: int = 0
-    message: str = ""
-
-
-@dataclass(frozen=True)
 class CheckItem:
     """单项检查结果，供计划确认界面展示。"""
 
