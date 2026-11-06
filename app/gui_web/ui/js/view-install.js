@@ -3,7 +3,7 @@
  *
  * 写盘链路只有一条，和 CLI 完全相同：
  *   POST /api/prepare  →  POST /api/submit  →  POST /api/confirm
- * 界面不自己拼 diskpart/dism 命令，也不自己算盘符：第 4 步显示的盘符来自
+ * 界面不自己拼 diskpart/Ghost 命令，也不自己算盘符：第 4 步显示的盘符来自
  * `plan.drive_letters`，第 2 步的大小只是给 `prepare` 的入参，后端
  * `_check_partition_fit` 还会再验一次。
  */
@@ -29,7 +29,7 @@ const images = {
   loading: false,
   error: '',
   listing: null,     // {directory, images[], exists}
-  probe: null,       // {path, name, kind, indexes[]}
+  probe: null,       // {path, name, kind, magic_ok, block_index}
 };
 
 const ROLE_TEXT = { efi: 'EFI 分区', windows: '系统分区', data: '数据分区' };
@@ -111,7 +111,7 @@ function renderFoot() {
 function hintText(step) {
   if (step === 1) return `${state.disks.filter(isSelectable).length} 块盘可安装 · 系统盘和只读盘已置灰`;
   if (step === 2) return '拖分隔条调大小：最后一个数据分区永远吃满剩余，剩下多少就给它多少';
-  if (step === 3) return images.loading ? '正在读取镜像索引…' : '版本来自镜像文件本身，不是写死的列表';
+  if (step === 3) return images.loading ? '正在读取镜像目录…' : '用 Ghost 还原 GHO 分区块镜像，装完再写 UEFI 引导';
   if (step === 4) return state.info && state.info.dry_run
     ? '当前是演练模式：点开始只会走一遍计划，不会真的写盘'
     : '点开始后先做五道安全检查，任何一道不通过都会拒绝写盘';
@@ -549,52 +549,55 @@ function bindDrag(bar) {
 }
 
 /* ---- 第 3 步 ---- */
+function ghostFiles() {
+  return ((images.listing && images.listing.images) || []).filter((file) => file.kind === 'gho');
+}
+
 function stepVersionHtml() {
   const rows = state.wizard.targets.map((target) => {
-    const disk = diskOf(target.diskNumber);
-    // 装机只接受 dism 能 /Apply-Image 的格式；ISO 需要先取出 sources\install.wim。
-    const fileOptions = ((images.listing && images.listing.images) || [])
-      .filter((file) => file.kind !== 'iso');
+    const current = target.imagePath || defaultImagePath();
     const options = ['<option value="">配置文件里的镜像（不改）</option>']
-      .concat(fileOptions.map((file) => `<option value="${esc(file.path)}"${file.path === (target.imagePath || defaultImagePath()) ? ' selected' : ''}>${esc(file.name)} · ${esc(file.size_display || fmtSize(file.size_bytes))}</option>`))
+      .concat(ghostFiles().map((file) => `<option value="${esc(file.path)}"${file.path === current ? ' selected' : ''}>${esc(file.name)} · ${esc(file.size_display || fmtSize(file.size_bytes))}</option>`))
       .join('');
-    const probing = images.probe && images.probe.path === (target.imagePath || defaultImagePath());
-    const chips = probing && images.probe.indexes
-      ? images.probe.indexes.map((entry) => `<button class="vchip${Number(target.imageIndex) === Number(entry.index) ? ' on' : ''}"
-          data-disk="${target.diskNumber}" data-index="${entry.index}" title="${esc(entry.description || entry.name || '')}">
-          ${esc(entry.name || `索引 ${entry.index}`)}<em>#${entry.index}</em></button>`).join('')
-      : '';
-    const hint = images.error
-      ? `<span class="errmsg">${esc(images.error)}</span>`
-      : (probing ? '' : `<span class="szsub">${images.loading ? '读取中…' : '点“检测版本”读取'}</span>`);
+    const probing = images.probe && images.probe.path === current;
+    let hint = '';
+    if (images.error) {
+      hint = `<span class="errmsg">${esc(images.error)}</span>`;
+    } else if (probing) {
+      // 只显示 Ghost 自己的判定：文件头对不对、分区块几号。
+      hint = images.probe.magic_ok
+        ? `<span class="szsub ok">Ghost 分区块 #${esc(String(images.probe.block_index || 1))}</span>`
+        : `<span class="errmsg">${esc(images.probe.reason || '不是有效 Ghost 镜像')}</span>`;
+    } else if (current) {
+      hint = '<span class="szsub">点“校验镜像”读取文件头</span>';
+    }
     return `<div class="vrow">
       <span class="vrow-n">磁盘 ${target.diskNumber}</span>
       <select class="sel" data-image="${target.diskNumber}">${options}</select>
-      <span class="vchips">${chips || hint}</span>
+      <span class="vchips">${hint}</span>
     </div>`;
   }).join('');
 
   const dir = images.listing ? images.listing.directory : (state.settings ? state.settings.sysIsoDir : '');
-  const isoCount = ((images.listing && images.listing.images) || [])
-    .filter((file) => file.kind === 'iso').length;
+  const others = ((images.listing && images.listing.images) || []).filter((file) => file.kind !== 'gho');
   return `<div class="wz-inner">
-    <h3 class="wz-h">系统版本</h3>
-    <p class="wz-p">版本列表是从镜像文件里用 dism 读出来的真实索引，不是写死的 Win10/Win11 两行。不选就沿用配置文件里的设置。</p>
+    <h3 class="wz-h">系统镜像（GHO）</h3>
+    <p class="wz-p">装机用 Ghost 把 GHO 分区块镜像还原到系统分区。目录里的文件由「设置 → 系统文件 → 镜像目录」决定，不选就沿用配置文件里的镜像。</p>
     <div class="selbar">
       镜像目录 <b>${esc(dir || '（未设置）')}</b>
       <button class="lnk" id="imgReload">重新读取</button>
       ${images.loading ? '<span class="szsub">正在读取…</span>' : ''}
     </div>
-    ${isoCount ? `<div class="szsub" style="margin:-2px 0 6px">目录里还有 ${isoCount} 个 ISO 没有列出：ISO 要先取出 sources\\install.wim 才能装机。</div>` : ''}
+    ${others.length ? `<div class="szsub" style="margin:-2px 0 6px">目录里还有 ${others.length} 个文件不能装机（ISO / WIM / ESD / SWM）：Ghost 只还原 GHO。</div>` : ''}
     ${rows || '<div class="empty-hint">还没有选盘</div>'}
-    ${images.listing && images.listing.images && images.listing.images.length === 0
-      ? `<div class="warnbox"><span class="wi">!</span><div>镜像目录里没找到 WIM/ESD/SWM/ISO 文件。可以先去「设置 → 系统文件 → 镜像目录」指一个目录。</div></div>`
+    ${images.listing && ghostFiles().length === 0
+      ? `<div class="warnbox"><span class="wi">!</span><div>镜像目录里没找到 GHO 文件。可以先去「设置 → 系统文件 → 镜像目录」指一个目录。</div></div>`
       : ''}
   </div>`;
 }
 
 function defaultImagePath() {
-  const files = ((images.listing && images.listing.images) || []).filter((file) => file.kind !== 'iso');
+  const files = ghostFiles();
   const preferred = (state.settings && state.settings.sysWim) || '';
   const hit = files.find((file) => file.path === preferred);
   return hit ? hit.path : (files.length ? files[0].path : '');
@@ -612,16 +615,6 @@ function bindStepVersion() {
       void probeImage(select.value);
     });
   });
-  $$('#wzBody .vchip').forEach((chip) => {
-    chip.addEventListener('click', () => {
-      const target = targetOf(Number(chip.dataset.disk));
-      if (!target) return;
-      target.imageIndex = Number(chip.dataset.index);
-      target.imageLabel = chip.textContent.trim();
-      state.wizard.ack = false;
-      renderInstall();
-    });
-  });
   const reload = $('#imgReload');
   if (reload) {
     reload.addEventListener('click', () => {
@@ -630,48 +623,6 @@ function bindStepVersion() {
       void loadImages();
     });
   }
-}
-
-/* ------------------------------------------------------------------ 镜像探测 */
-export async function loadImages() {
-  if (images.loading) return;
-  images.loading = true;
-  images.error = '';
-  if (state.view === 'install' && state.wizard.step === 3) renderInstall();
-  try {
-    images.listing = await api.images({});
-  } catch (exc) {
-    images.listing = { directory: '', images: [], exists: false };
-    images.error = exc instanceof ApiError ? exc.message : String(exc);
-  } finally {
-    images.loading = false;
-  }
-  const path = defaultImagePath();
-  if (path) await probeImage(path);
-  else if (state.view === 'install') renderInstall();
-}
-
-async function probeImage(path) {
-  if (!path) {
-    images.probe = null;
-    if (state.view === 'install') renderInstall();
-    return;
-  }
-  images.loading = true;
-  images.error = '';
-  if (state.view === 'install') renderInstall();
-  try {
-    images.probe = await api.images({ path });
-  } catch (exc) {
-    images.probe = null;
-    images.error = exc instanceof ApiError ? exc.message : String(exc);
-  } finally {
-    images.loading = false;
-  }
-  for (const target of state.wizard.targets) {
-    if (!target.imagePath) target.imagePath = path;
-  }
-  if (state.view === 'install') renderInstall();
 }
 
 /* ---- 第 4 步 ---- */
@@ -740,7 +691,7 @@ function stepConfirmHtml() {
         ${partRows}
         ${msrRow}
         <tr><td class="k">计划盘符</td><td>${esc(letterText)}</td></tr>
-        <tr><td class="k">版本</td><td>${esc(versionText(targets))}</td></tr>
+        <tr><td class="k">镜像</td><td>${esc(versionText(targets))}</td></tr>
         <tr><td class="k">模式</td><td>${plan.dry_run ? '演练（不写盘）' : '<b style="color:var(--danger)">真实写盘</b>'}</td></tr>
       </table>
       <div class="scriptbox" data-script-disk="${esc(plan.disk_number)}">
@@ -802,7 +753,7 @@ function stepConfirmHtml() {
 function versionText(target) {
   if (!target) return '配置文件默认';
   if (target.imageLabel) return target.imageLabel;
-  if (target.imageIndex) return `索引 ${target.imageIndex}`;
+  if (target.imageIndex) return `GHO 分区块 #${target.imageIndex}`;
   if (target.imagePath) return target.imagePath;
   return '配置文件默认';
 }
