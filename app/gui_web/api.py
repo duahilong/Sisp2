@@ -259,6 +259,58 @@ class WebApi:
         # （``dism /Get-WimInfo`` 这类只读动词不受影响）。
         return ImageProbe(dism=str(settings.get("extDism") or "") or None, allow_real_disk=True)
 
+    # ------------------------------------------------------------------ 分区预览
+    def partition_preview(self, disk_number: Any = None) -> dict[str, Any]:
+        """返回**真实会执行的分区脚本**（三段，与执行器同源生成）。
+
+        只读：不 prepare、不改会话、不碰盘。数据来自最近的 ``prepare()`` 结果，
+        所以确认页（第 4 步）能拿到与真跑逐字一致的脚本文本；还没 prepare 时
+        返回 ``E_PREPARE``，提示先生成计划。
+        """
+        try:
+            prepared = self._wf.prepared_jobs
+        except Exception as exc:  # noqa: BLE001
+            return err("E_PREPARE", str(exc))
+        if not prepared:
+            return err("E_PREPARE", "尚未生成执行计划，请先调用 /api/prepare")
+        wanted = None
+        if disk_number is not None:
+            try:
+                wanted = int(disk_number)
+            except (TypeError, ValueError):
+                return err("E_PREPARE", "硬盘编号不合法")
+        items: list[dict[str, Any]] = []
+        for item in prepared:
+            number = int(item.spec.disk_number)
+            if wanted is not None and number != wanted:
+                continue
+            try:
+                # 纯函数生成（与真实执行器同一套）：不经过 service，也不碰盘。
+                from app.application.partitions import plan_partitions, preview_segments
+
+                parts = plan_partitions(
+                    item.spec.config_payload, letters=item.spec.drive_letters
+                )
+                segments = preview_segments(number, parts)
+            except Exception as exc:  # noqa: BLE001 - 布局非法也要能回一句人话
+                return err("E_PREPARE", f"无法生成分区脚本：{exc}")
+            script = chr(10).join(
+                line for segment in segments for line in segment["lines"]
+            )
+            items.append(
+                {
+                    "disk_number": number,
+                    "model": item.plan.model,
+                    "drive_letters": dict(item.spec.drive_letters),
+                    "partitions": [dict(part) for part in item.plan.partition_plan],
+                    "segments": segments,
+                    "script": script,
+                }
+            )
+        if wanted is not None and not items:
+            return err("E_PREPARE", f"硬盘 {wanted} 还没有计划，请先调用 /api/prepare")
+        return ok(items)
+
     # ------------------------------------------------------------------ 引导
     def boot_report(self) -> dict[str, Any]:
         """扫描全部硬盘的 Windows 目录与 EFI 引导文件。"""

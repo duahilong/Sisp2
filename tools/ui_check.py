@@ -33,7 +33,7 @@ _IMPORT_RE = re.compile(r"""from\s+['"]\./([\w.-]+\.js)['"]""")
 _ATTR_RE = re.compile(r"""(?:href|src)="(/static/[^"]+)\"""")
 
 DERIVE_SCRIPT = """
-import { fmtSize, fsClass, segments, checkSizes, checkLayout, unallocatedBytes, partShortName, fitLayout, reserveGb, autoPartitionRole } from './derive.js';
+import { fmtSize, fsClass, segments, checkSizes, checkLayout, unallocatedBytes, partShortName, fitLayout, reserveGb, autoPartitionRole, phaseGroups, progressByPhase, skippedByFailure, layoutVerdict } from './derive.js';
 
 const GB = 1024 ** 3;
 const esp = { partition_number: 1, size_bytes: 100 * 1024 * 1024,
@@ -106,6 +106,39 @@ const out = {
     const fit = fitLayout(totalGb, sysGb, extrasGb);
     return fit.sysGb >= 60 && fit.dataGb >= 20 && fit.extrasGb.every((gb) => gb >= 1);
   }),
+  // ---------------------------------------------- 阶段编排（分区 / 装机 / 校验）
+  // 后端给了 plan.phases 就按它分组；老后端没有时回退内置 7 步表
+  phases_from_plan: phaseGroups({
+    phases: [
+      { key: 'partition', title: '硬盘分区', steps: ['efi', 'windows', 'data', 'layout'], stop_on_failure: true },
+      { key: 'system', title: '写入系统', steps: ['image', 'boot'] },
+    ],
+  }).map((phase) => phase.key),
+  phases_fallback: phaseGroups(null).map((phase) => [phase.key, phase.steps.length]),
+  // 分组进度：分区 4/4、系统 1/2（当前 image）
+  progress_groups: (() => {
+    const groups = phaseGroups(null);
+    const phases = progressByPhase(
+      { total: 7, completed: ['efi', 'windows', 'data', 'layout'], current: 'image', percent: 57 },
+      groups,
+      { efi: 'ok', windows: 'ok', data: 'ok', layout: 'ok', image: 'running' }
+    );
+    return phases.map((phase) => [phase.key, phase.percent, phase.status]);
+  })(),
+  // 分区验收失败 → 系统组与校验组都“未执行”
+  skipped_after_layout: (() => {
+    const groups = phaseGroups(null);
+    return skippedByFailure('layout', groups);
+  })(),
+  // 校验阶段失败不影响任何后续组（它是最后一组）
+  skipped_after_verify: (() => {
+    const groups = phaseGroups(null);
+    return skippedByFailure('verify', groups);
+  })(),
+  // 验收面板：problems 非空 → 不通过；warnings 只提示
+  verdict_ok: layoutVerdict({ partition_style: 'GPT', problems: [], warnings: ['ESP 盘符未关联'],
+    partitions: [{ number: 1, label: 'EFI', size_bytes: 100 * 1024 * 1024, mounted_letter: 'E', file_system: 'FAT32' }] }),
+  verdict_bad: layoutVerdict({ problems: ['第 2 个分区（Windows）大小不符'], warnings: [], partitions: [] }),
 };
 console.log(JSON.stringify(out));
 """
@@ -137,6 +170,11 @@ EXPECTED = {
     "fit_never_over": True,
     "fit_even_split": True,
     "fit_keeps_mins": True,
+    "phases_from_plan": ["partition", "system"],
+    "phases_fallback": [["partition", 4], ["system", 2], ["verify", 1]],
+    "progress_groups": [["partition", 100, "done"], ["system", 0, "running"], ["verify", 0, "idle"]],
+    "skipped_after_layout": ["system", "verify"],
+    "skipped_after_verify": [],
 }
 
 

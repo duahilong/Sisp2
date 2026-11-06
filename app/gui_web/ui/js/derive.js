@@ -410,3 +410,97 @@ export function unallocatedBytes(totalBytes, sysGb, dataGb, extras = [], efiMb =
   for (const extra of extras || []) used += fromGb(Number((extra && extra.sizeGb) || 0));
   return Math.max(0, total - used);
 }
+
+/* ------------------------------------------------------------------ 阶段编排
+ *
+ * 分区与装机在后端已经是两组独立阶段（`app/application/steps.py`），
+ * 前端不再硬编码一份步骤表：优先读 `plan.phases`，老后端没这个字段时回退到
+ * 下面这份内置表（键与后端 STEP_KEYS 一一对应）。全部是纯函数，node 可测。
+ */
+
+/** 老后端 / 老 exe 的兜底编排（与 `steps.py` 保持一致）。 */
+export const PHASE_FALLBACK = [
+  { key: 'partition', title: '硬盘分区', steps: ['efi', 'windows', 'data', 'layout'], stop_on_failure: true },
+  { key: 'system', title: '写入系统', steps: ['image', 'boot'], stop_on_failure: true },
+  { key: 'verify', title: '装机校验', steps: ['verify'], stop_on_failure: false },
+];
+
+/** 计划 → 阶段分组（缺失/非法时回退内置表）。 */
+export function phaseGroups(plan) {
+  const phases = plan && Array.isArray(plan.phases) ? plan.phases : null;
+  if (!phases || !phases.length) {
+    return PHASE_FALLBACK.map((phase) => ({ ...phase, steps: [...phase.steps] }));
+  }
+  return phases.map((phase) => ({
+    key: String(phase.key || ''),
+    title: String(phase.title || phase.key || ''),
+    steps: Array.isArray(phase.steps) ? phase.steps.map(String) : [],
+    stop_on_failure: phase.stop_on_failure !== false,
+  }));
+}
+
+/** 进度 + 步骤状态 → 每组的百分比 / 当前步 / 状态。
+ *
+ * `stepStates` 是 `{key: 'running'|'ok'|'failed'|'skipped'}`（来自 SSE 事件）。
+ */
+export function progressByPhase(progress, groups, stepStates) {
+  const list = Array.isArray(groups) && groups.length ? groups : PHASE_FALLBACK;
+  const completed = new Set((progress && progress.completed) || []);
+  const current = progress && progress.current;
+  const states = stepStates || {};
+  return list.map((group) => {
+    const steps = group.steps || [];
+    const done = steps.filter((key) => completed.has(key));
+    const failedKey = steps.find((key) => states[key] === 'failed') || null;
+    const runningKey = steps.find((key) => key === current || states[key] === 'running') || null;
+    let status = 'idle';
+    if (failedKey) status = 'failed';
+    else if (done.length === steps.length) status = 'done';
+    else if (runningKey) status = 'running';
+    return {
+      key: group.key,
+      title: group.title,
+      steps,
+      stop_on_failure: group.stop_on_failure !== false,
+      completed: done,
+      current: runningKey,
+      failed: failedKey,
+      total: steps.length,
+      percent: steps.length ? Math.round((done.length * 100) / steps.length) : 0,
+      status,
+    };
+  });
+}
+
+/** 某一步失败后，哪些阶段会被跳过（界面显示“未执行”）。 */
+export function skippedByFailure(stepKey, groups) {
+  const list = Array.isArray(groups) && groups.length ? groups : PHASE_FALLBACK;
+  const index = list.findIndex((group) => (group.steps || []).includes(stepKey));
+  if (index < 0) return [];
+  const group = list[index];
+  if (group.stop_on_failure === false) return [];
+  return list.slice(index + 1).map((item) => item.key);
+}
+
+/** 「分区验收」步骤的 details → 验收面板数据。 */
+export function layoutVerdict(details) {
+  const info = details && typeof details === 'object' ? details : {};
+  const problems = Array.isArray(info.problems) ? info.problems.map(String) : [];
+  const warnings = Array.isArray(info.warnings) ? info.warnings.map(String) : [];
+  const partitions = Array.isArray(info.partitions) ? info.partitions : [];
+  const rows = partitions.map((part) => ({
+    number: Number(part.number) || 0,
+    label: String(part.label || ''),
+    size: Number(part.size_bytes) || 0,
+    letter: String(part.drive_letter || part.mounted_letter || ''),
+    fileSystem: String(part.file_system || ''),
+  }));
+  return {
+    ok: problems.length === 0,
+    problems,
+    warnings,
+    rows,
+    partitionStyle: String(info.partition_style || ''),
+    largestFree: Number(info.largest_free) || 0,
+  };
+}

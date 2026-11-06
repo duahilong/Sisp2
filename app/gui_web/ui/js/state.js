@@ -15,9 +15,12 @@ export const STEP_LABELS = {
   efi: '清盘并重建分区表',
   windows: '创建系统分区 C:',
   data: '创建数据分区 D:',
+  // 「分区验收」是独立一步：分区组自己验收，不要求镜像/引导已写入
+  layout: '分区验收（对照计划）',
   image: '应用系统镜像',
   boot: '写入 UEFI 引导',
-  verify: '校验分区与引导',
+  // 装机结果校验：引导文件 + 系统文件（与上面的分区验收是两件事）
+  verify: '装机结果校验（引导文件 + 系统文件）',
 };
 
 export const JOB_STATUS_TEXT = {

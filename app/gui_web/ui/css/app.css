@@ -945,3 +945,30 @@ input.confirm.bad{border-color:var(--danger);box-shadow:0 0 0 2px var(--danger-b
 .wzbar .wseg.ext{background:#1F8A70}
 :root[data-theme="dark"] .szrow .rm{background:#1B2733;border-color:#2C3A48;color:var(--ink2)}
 :root[data-theme="dark"] .addpart{background:#16202A;border-color:#2C3A48}
+
+/* 进度页：阶段分组（分区 / 写入系统 / 装机校验）与分区验收面板 */
+.stages li .sk{display:inline-flex;align-items:center;justify-content:center}
+.stages li.phase-head{display:flex;align-items:center;gap:8px;margin:10px 0 2px;
+  font-size:12px;color:var(--ink);font-weight:600}
+.stages li.phase-head .ph-no{width:16px;height:16px;border-radius:50%;background:var(--line);
+  color:var(--ink2);font-size:10px;display:inline-flex;align-items:center;justify-content:center}
+.stages li.phase-head .ph-eta{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+.stages li.sub{padding-left:22px}
+.stages li.skip{padding-left:22px;color:var(--faint);font-size:11.5px}
+.stages li.verdict{margin:6px 0 4px 22px;padding:8px 10px;border:1px solid var(--line);
+  border-radius:6px;background:var(--bg2);font-size:11.5px;display:block}
+.stages li.verdict.ok{border-color:var(--ok)}
+.stages li.verdict.bad{border-color:var(--danger)}
+.stages li.verdict .vd-h{font-weight:600;margin-bottom:2px}
+.stages li.verdict .vd-m{color:var(--ink2);word-break:break-word}
+.stages li.verdict table.vd-rows{width:100%;border-collapse:collapse;margin-top:4px}
+.stages li.verdict table.vd-rows td{padding:1px 0;color:var(--ink2)}
+.stages li.verdict table.vd-rows td.k{width:130px;color:var(--faint)}
+.stages li.verdict .vd-p{color:var(--danger);margin-top:4px}
+.stages li.verdict .vd-w{color:var(--warn);margin-top:4px}
+
+/* 第 4 步：分区脚本预览 */
+.scriptbox{margin-top:8px}
+.scriptbox .scriptnote{font-size:11px;color:var(--faint);margin:4px 0}
+.scriptpre{max-height:220px;overflow:auto;padding:8px;border:1px solid var(--line);
+  border-radius:6px;background:var(--bg2);font-size:11px;white-space:pre;margin-top:4px}

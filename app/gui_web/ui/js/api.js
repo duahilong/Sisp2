@@ -68,6 +68,9 @@ export const api = {
   job: (jobId) => get(`/api/jobs/${encodeURIComponent(jobId)}`),
   jobLog: (jobId, tail = 200) => get(`/api/jobs/${encodeURIComponent(jobId)}/log?tail=${tail}`),
 
+  // 分区脚本预览（只读：与执行器同源生成，不执行任何命令）
+  partitionPreview: (diskNumber) => post('/api/partition/preview', { disk_number: diskNumber }),
+
   // 镜像
   images: (payload = {}) => post('/api/images', payload),
 

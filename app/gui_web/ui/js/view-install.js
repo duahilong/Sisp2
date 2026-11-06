@@ -14,6 +14,7 @@ import {
   fmtSize, segments, fsColor, isSelectable,
   protectionText, clamp, MIN_SYS_GB, MIN_DATA_GB, MIN_EXTRA_GB, MAX_EXTRAS,
   toGb, fromGb, extraColor, extraLetter, fitLayout, autoPartitionRole,
+  phaseGroups, progressByPhase, skippedByFailure, layoutVerdict,
 } from './derive.js';
 import {
   state, diskOf, targetOf, targetError, autoPartitionBytes, syncAutoPartition, addTarget, removeTarget,
@@ -742,6 +743,11 @@ function stepConfirmHtml() {
         <tr><td class="k">版本</td><td>${esc(versionText(targets))}</td></tr>
         <tr><td class="k">模式</td><td>${plan.dry_run ? '演练（不写盘）' : '<b style="color:var(--danger)">真实写盘</b>'}</td></tr>
       </table>
+      <div class="scriptbox" data-script-disk="${esc(plan.disk_number)}">
+        <button class="tbtn" data-load-script="${esc(plan.disk_number)}">查看分区阶段将执行的 diskpart 脚本</button>
+        <div class="scriptnote">只读预览：与真实执行器同一套生成器。分区验收不通过时，下面的镜像与引导都不会执行。</div>
+        <pre class="mono scriptpre" hidden></pre>
+      </div>
     </div>`;
   }).join('');
 
@@ -838,6 +844,31 @@ function bindStepConfirm() {
   }
   const start = $('#startBtn');
   if (start) start.addEventListener('click', () => { void startInstall(); });
+  for (const button of $$('[data-load-script]')) {
+    button.addEventListener('click', () => { void loadPartitionScript(button); });
+  }
+}
+
+async function loadPartitionScript(button) {
+  const diskNumber = Number(button.dataset.loadScript);
+  const box = button.closest('.scriptbox');
+  const pre = box ? box.querySelector('.scriptpre') : null;
+  if (!pre) return;
+  button.disabled = true;
+  button.textContent = '正在读取脚本…';
+  try {
+    const items = await api.partitionPreview(diskNumber);
+    const item = (items || []).find((entry) => Number(entry.disk_number) === diskNumber) || (items || [])[0];
+    pre.textContent = item ? item.script : '没有拿到脚本文本';
+    pre.hidden = false;
+    button.textContent = '收起 / 重新读取脚本';
+  } catch (exc) {
+    pre.textContent = exc instanceof ApiError ? exc.message : String(exc);
+    pre.hidden = false;
+    button.textContent = '重试读取脚本';
+  } finally {
+    button.disabled = false;
+  }
 }
 
 /* ------------------------------------------------------------------ 计划与执行 */
@@ -902,6 +933,33 @@ async function startInstall() {
 }
 
 /* ------------------------------------------------------------------ 进度页 */
+function planOfDisk(diskNumber) {
+  const item = (state.plans || []).find((entry) => Number(entry.plan && entry.plan.disk_number) === Number(diskNumber));
+  return item ? item.plan : null;
+}
+
+/** 从任务结果里取「分区验收」这一步（跑完才有；跑的过程中是 null）。 */
+function layoutDetailsOf(job) {
+  const steps = (job && job.result && job.result.steps) || [];
+  const step = steps.find((item) => item && item.key === 'layout');
+  if (!step) return null;
+  return { status: step.status, message: step.message || '', verdict: layoutVerdict(step.details) };
+}
+
+function layoutPanel(info) {
+  const verdict = info.verdict;
+  const ok = info.status === 'ok' && verdict.ok;
+  const rows = verdict.rows.map((row) => `<tr><td class="k">#${row.number} ${esc(row.label)}</td>
+      <td>${esc(fmtSize(row.size))}${row.letter ? ` · ${esc(row.letter)}:` : ''}${row.fileSystem ? ` · ${esc(row.fileSystem)}` : ''}</td></tr>`).join('');
+  return `<li class="verdict ${ok ? 'ok' : 'bad'}">
+    <div class="vd-h">分区验收${ok ? '通过' : `未通过（${verdict.problems.length} 个问题）`}</div>
+    <div class="vd-m">${esc(info.message)}</div>
+    ${rows ? `<table class="vd-rows">${rows}</table>` : ''}
+    ${verdict.problems.length ? `<div class="vd-p">${verdict.problems.map(esc).join('<br>')}</div>` : ''}
+    ${verdict.warnings.length ? `<div class="vd-w">${verdict.warnings.map(esc).join('<br>')}</div>` : ''}
+  </li>`;
+}
+
 function jobOf(jobId) {
   return state.jobs.get(jobId) || null;
 }
@@ -920,20 +978,41 @@ function renderProgressHtml() {
     const completed = progress.completed || [];
     const current = progress.current;
     const stepEvents = state.wizard.steps.get(jobId) || new Map();
-    const keys = Object.keys(STEP_LABELS);
-    const stages = keys.map((key) => {
-      const event = stepEvents.get(key);
-      const done = completed.includes(key);
-      const isCurrent = current === key || (event && event.status === 'running');
-      const failed = event && event.status === 'failed';
-      let cls = '';
-      if (done) cls = 'done';
-      else if (failed) cls = 'on';
-      else if (isCurrent) cls = 'on';
-      const mark = done ? '✓' : (failed ? '×' : (isCurrent ? '●' : ''));
-      const status = event ? (event.status === 'running' ? '进行中' : (JOB_STATUS_TEXT[event.status] || event.status)) : '';
-      return `<li class="${cls}"><span class="sk">${mark}</span>${esc(STEP_LABELS[key])}
-        <span class="stt">${esc(status)}</span></li>`;
+    // 阶段分组来自后端 plan.phases（老后端回退内置表），分区与装机在界面上就是两段。
+    const plan = (job && job.plan) || planOfDisk(diskNumber);
+    const groups = phaseGroups(plan);
+    const stepStates = {};
+    stepEvents.forEach((event, key) => { stepStates[key] = event.status; });
+    const perPhase = progressByPhase(progress, groups, stepStates);
+    const failedKey = Object.keys(stepStates).find((key) => stepStates[key] === 'failed') || null;
+    const skippedGroups = new Set(failedKey ? skippedByFailure(failedKey, groups) : []);
+    const layoutInfo = layoutDetailsOf(job);
+
+    const stages = perPhase.map((phase, index) => {
+      const head = `<li class="phase-head">
+        <span class="ph-no">${index + 1}</span>
+        <span class="ph-title">${esc(phase.title)}</span>
+        <span class="ph-eta">${phase.completed.length}/${phase.total}${phase.status === 'done' ? ' ✓' : (phase.status === 'failed' ? ' ×' : '')}</span>
+      </li>`;
+      if (skippedGroups.has(phase.key)) {
+        return head + `<li class="skip"><span class="sk">⊘</span>未执行（前一段没有通过验收）</li>`;
+      }
+      const items = phase.steps.map((key) => {
+        const event = stepEvents.get(key);
+        const done = completed.includes(key);
+        const isCurrent = current === key || (event && event.status === 'running');
+        const failed = event && event.status === 'failed';
+        let cls = '';
+        if (done) cls = 'done';
+        else if (failed) cls = 'on';
+        else if (isCurrent) cls = 'on';
+        const mark = done ? '✓' : (failed ? '×' : (isCurrent ? '●' : ''));
+        const status = event ? (event.status === 'running' ? '进行中' : (JOB_STATUS_TEXT[event.status] || event.status)) : '';
+        return `<li class="sub ${cls}"><span class="sk">${mark}</span>${esc(STEP_LABELS[key] || key)}
+          <span class="stt">${esc(status)}</span></li>`;
+      }).join('');
+      const panel = (phase.key === 'partition' && layoutInfo) ? layoutPanel(layoutInfo) : '';
+      return head + items + panel;
     }).join('');
 
     const status = job ? job.status : 'pending';

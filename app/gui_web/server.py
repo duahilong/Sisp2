@@ -163,6 +163,13 @@ def create_app(
         payload = body or {}
         return api.probe_images(payload.get("directory"), payload.get("path"))
 
+    # ------------------------------------------------------------- 分区脚本预览
+    @app.post("/api/partition/preview")
+    def partition_preview(body: dict[str, Any] | None = None) -> dict[str, Any]:
+        """返回真实会执行的三段 diskpart 脚本（只读，需先 ``/api/prepare``）。"""
+        payload = body or {}
+        return api.partition_preview(payload.get("disk_number"))
+
     # ------------------------------------------------------------- 引导修复
     @app.get("/api/boot/report")
     def boot_report() -> dict[str, Any]:
