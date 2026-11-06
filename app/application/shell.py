@@ -36,7 +36,8 @@ QUERY_ATTEMPTS = 3
 QUERY_INTERVAL = 0.3
 RELEASE_TIMEOUT = 120.0
 VERIFY_TIMEOUT = 120.0
-DISM_TIMEOUT = 3 * 3600.0
+# Ghost 还原 14 GB 的 GHO 在 SATA 上也够用；NVMe 通常 5–15 分钟。
+GHOST_TIMEOUT = 2 * 3600.0
 BCDBOOT_TIMEOUT = 120.0
 
 # 只读：查分区表 + 卷信息（盘符/卷标/文件系统）+ 盘容量。
@@ -106,11 +107,13 @@ def run_process(
     log: CommandLog,
     allow_real_disk: bool,
     env: Mapping[str, str] | None = None,
+    cwd: str | None = None,
     source: str = "ProcessShell",
 ) -> tuple[int, str, float]:
     """执行一条命令：先过护栏，再写日志，最后才交给操作系统。
 
     护栏放在"写日志"之前——被拦下的命令不应该看起来像执行过。
+    ``cwd`` 给 Ghost 这类"把失败原因写到当前目录"的程序用。
     """
     ensure_command_allowed(command, allow_real_disk=allow_real_disk, source=source)
     started = datetime.now()
@@ -120,6 +123,7 @@ def run_process(
             list(command),
             capture_output=True,
             timeout=timeout,
+            cwd=cwd or None,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             check=False,
             env=dict(env) if env else None,
@@ -138,9 +142,9 @@ def run_process(
 
 
 class ProcessShell:
-    """通用命令执行器（dism / bcdboot / 校验脚本都用它）。
+    """通用命令执行器（Ghost / bcdboot / 校验脚本都用它）。
 
-    ``runner`` 可注入 ``(command, timeout) -> (code, output, elapsed)``，
+    ``runner`` 可注入 ``(command, timeout, *, env=None, cwd=None) -> (code, output, elapsed)``，
     测试用它替代真实子进程；生产用模块级 :func:`run_process`。
     """
 
@@ -165,16 +169,18 @@ class ProcessShell:
         timeout: float,
         *,
         env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
     ) -> tuple[int, str, float]:
-        """执行命令。注入的 ``runner`` 签名：``(command, timeout, *, env=None)``。"""
+        """执行命令。注入的 ``runner`` 签名：``(command, timeout, *, env=None, cwd=None)``。"""
         if self._runner is not None:
-            return self._runner(list(command), timeout, env=env)
+            return self._runner(list(command), timeout, env=env, cwd=cwd)
         return run_process(
             command,
             timeout,
             log=self.log,
             allow_real_disk=self.allow_real_disk,
             env=env if env is not None else self.env,
+            cwd=cwd,
             source=self.source,
         )
 
@@ -183,7 +189,7 @@ class DiskpartShell:
     """diskpart + 只读 PowerShell 查询。
 
     这是"分区阶段"唯一需要的依赖：拿到它就能清盘、删 MSR、建分区、查分区表、
-    定位 ESP、释放盘符——不需要知道 dism / bcdboot 的存在。
+    定位 ESP、释放盘符——不需要知道 Ghost / bcdboot 的存在。
     """
 
     def __init__(
@@ -339,7 +345,7 @@ class DiskpartShell:
 __all__ = [
     "BCDBOOT_TIMEOUT",
     "DISKPART_TIMEOUT",
-    "DISM_TIMEOUT",
+    "GHOST_TIMEOUT",
     "PARTITIONS_SCRIPT",
     "QUERY_ATTEMPTS",
     "QUERY_INTERVAL",

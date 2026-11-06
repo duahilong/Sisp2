@@ -46,9 +46,10 @@ from app.application.partitions import (
 )
 from app.application.real_runner import build_real_runner
 from app.application.service import SispService
+from app.application.shell import find_program
 from app.application.steps import phases_payload
 from app.models import WorkerResult
-from app.modules.image.service import IMAGE_SUFFIXES
+from app.modules.ghost.service import GHO_SUFFIXES, sniff_gho
 from app.orchestrator import build_worker_disk_identity
 from app.preflight import run_preflight_checks
 
@@ -223,10 +224,10 @@ def _merge_payload(
     if isinstance(win_gho, str) and win_gho.strip():
         image_info = payload.setdefault("image_info", {})
         if isinstance(image_info, dict):
-            # 归一化：用户/脚本可能写成 D:/x/test.wim，但 dism 只认反斜杠。
+            # 归一化：用户/脚本可能写成 D:/x/test.GHO，统一成展开后的字符串。
             image_info["image_path"] = str(Path(win_gho.strip()).expanduser())
 
-    # 界面第 3 步：每块盘可以选同一个镜像文件里的不同版本（索引）。
+    # 界面第 3 步：GHO 内部的分区块序号（多数镜像是 1）。
     image_index = overrides.get("image_index")
     if image_index not in (None, ""):
         value = _as_number(image_index)
@@ -244,18 +245,21 @@ _IMAGE_TYPE_PREFIX = "镜像可应用性检查"
 
 def _image_problems(
     payload: Mapping[str, Any] | None,
-    read_indexes: Callable[[str], Sequence[int]] | None = None,
+    *,
+    ghost_available: bool | None = None,
 ) -> list[str]:
-    """这块盘要用的镜像能不能拿来装机（类型 / 存在性 / 索引）。
+    """这块盘要用的 GHO 能不能拿来装机（类型 / 存在性 / 文件头 / 引擎）。
 
     会话级预检只在 ``start()`` 时按配置文件算一次；而向导第 3 步允许每块盘换
     镜像、换目录，所以计划里的镜像阻断必须按合并后的 payload 重算——否则用户
     在第 3 步选了一个真实存在的镜像，第 4 步照样挂着“镜像文件不存在”的阻断。
 
-    这里只做“计划阶段就能判定”的事情：ISO 不能 apply、后缀不对、文件不在、
-    dism 里没有这个索引。真正的“装完能不能开机”在 ``verify`` 步骤里查。
+    这里只做“计划阶段就能判定”的事情：后缀对不对、文件在不在、Ghost 文件头
+    对不对、Ghost 可执行文件找不找得到。真正的“装完能不能开机”在 ``verify``
+    步骤里查。
 
-    ``read_indexes`` 不传时只查类型与存在性（纯函数，测试不需要 dism）。
+    ``ghost_available=None``（默认）时不查引擎，只要路径与文件头合法就算通过；
+    预检带上 ``True`` / ``False`` 就是完整的四道判定。
     """
     if not isinstance(payload, Mapping):
         return []
@@ -271,32 +275,31 @@ def _image_problems(
     suffix = target.suffix.lower()
     if suffix == ".iso":
         return [
-            f"{_IMAGE_TYPE_PREFIX}：{target.name} 是 ISO，dism 不能直接应用到分区；"
-            "请先挂载 ISO 取出 sources\\install.wim"
+            f"{_IMAGE_TYPE_PREFIX}：{target.name} 是 ISO，Ghost 只能还原 .GHO；"
+            "请先封装成 GHO 分区块镜像"
         ]
-    if suffix not in IMAGE_SUFFIXES:
+    if suffix in (".wim", ".esd", ".swm"):
+        return [
+            f"{_IMAGE_TYPE_PREFIX}：不支持 {suffix}，dism 路线已移除；"
+            "装机只接受 GHO/GHS（Ghost 分区块镜像）"
+        ]
+    if suffix not in GHO_SUFFIXES:
         return [
             f"{_IMAGE_TYPE_PREFIX}：不支持 {suffix or '无后缀'} 文件，"
-            "装机只接受 WIM/ESD/SWM"
+            "装机只接受 GHO/GHS"
         ]
     if not target.is_file():
         return [f"{_IMAGE_CHECK_PREFIX}：镜像文件不存在: {target}"]
 
-    if read_indexes is None:
-        return []
+    sniffed = sniff_gho(target)
+    if not sniffed.get("ok"):
+        reason = sniffed.get("reason") or "不是有效 Ghost 镜像"
+        return [f"{_IMAGE_TYPE_PREFIX}：{target.name} {reason}"]
 
-    # 执行器在缺省时用索引 1，所以没写索引也要校验 1 是否存在。
-    index = int(_as_number(image_info.get("image_index")) or 1)
-    try:
-        available = sorted({int(item) for item in read_indexes(str(target))})
-    except Exception as exc:  # noqa: BLE001 - dism 读不出来就是不可用
-        return [f"{_IMAGE_TYPE_PREFIX}：无法读取 {target.name} 的索引（{exc}）"]
-    if not available:
-        return [f"{_IMAGE_TYPE_PREFIX}：{target.name} 里没有可安装的版本"]
-    if index not in available:
+    if ghost_available is False:
         return [
-            f"{_IMAGE_TYPE_PREFIX}：镜像索引 {index} 不存在"
-            f"（{target.name} 可用索引：{available}）"
+            f"{_IMAGE_TYPE_PREFIX}：未找到 Ghost 可执行文件"
+            "（设置 → 外部程序 → Ghost 路径）"
         ]
     return []
 
@@ -440,7 +443,6 @@ class WorkflowController:
         block_unverified: bool = True,
         type_to_confirm: bool = False,
         settings_provider: Callable[[], dict[str, Any]] | None = None,
-        image_indexes: Callable[[str], Sequence[int]] | None = None,
     ) -> None:
         self._dry_run = bool(dry_run)
         # 构造时的 True 是硬上限：--dry-run / dryRunByDefault 启动后，
@@ -459,7 +461,7 @@ class WorkflowController:
         self._real_runner = real_runner
         # 界面设置的默认分区参数：只补业务配置没写的字段，不覆盖配置。
         self._partition_defaults = dict(partition_defaults or {})
-        # 外部工具路径（extDiskpart / extDism）；空值交给 runner 自身探测。
+        # 外部工具路径（extDiskpart / extGhost）；空值交给 runner 自身探测。
         self._tool_paths = {
             str(key): str(value).strip()
             for key, value in (tool_paths or {}).items()
@@ -472,9 +474,6 @@ class WorkflowController:
         self._type_to_confirm = bool(type_to_confirm)
         # 界面设置提供者：预检、执行器可选项都从这里取最新设置。
         self._settings_provider = settings_provider
-        # 镜像索引来源：默认用 dism 读（带 mtime 缓存），测试可整体替掉。
-        self._image_indexes = image_indexes
-        self._image_index_cache: dict[str, tuple[tuple[int, int], list[int]]] = {}
         # 上一次 prepare() 因“无显式白名单”而隐式加入的盘号；下次 prepare/start 时撤销。
         self._implicit_allowlist: set[int] = set()
         # 服务必须跟着控制器的开关走——dry-run、写盘白名单、执行器
@@ -499,7 +498,7 @@ class WorkflowController:
             runner = build_real_runner(
                 log_dir=self._log_dir,
                 diskpart=self._tool_paths.get("diskpart"),
-                dism=self._tool_paths.get("dism"),
+                ghost=self._tool_paths.get("ghost"),
             )
         return SispService(
             dry_run=bool(self._dry_run),
@@ -671,8 +670,6 @@ class WorkflowController:
         options: dict[str, Any] = {}
         for key, target in (
             ("sysTemp", "temp_dir"),
-            ("sysUnattend", "unattend_path"),
-            ("sysDrivers", "drivers_path"),
             ("sysBoot", "boot_source"),
         ):
             value = str(settings.get(key) or "").strip()
@@ -1137,32 +1134,15 @@ class WorkflowController:
 
     # ------------------------------------------------------------------ 执行
     def _image_problems_for(self, payload: Mapping[str, Any] | None) -> list[str]:
-        """按当前会话的 dism 重算镜像可用性（结果会缓存，避免每次 prepare 都读一遍）。"""
-        return _image_problems(payload, self._read_image_indexes)
+        """按当前会话重算镜像可用性（含“Ghost 可执行文件在不在”）。"""
+        return _image_problems(payload, ghost_available=self._ghost_available())
 
-    def _read_image_indexes(self, path: str) -> Sequence[int]:
-        if self._image_indexes is not None:
-            return self._image_indexes(path)
-        return self._probe_image_indexes(path)
-
-    def _probe_image_indexes(self, path: str) -> list[int]:
-        """用 dism 读索引；同一文件（mtime+大小没变）只读一次。"""
-        target = Path(path).expanduser()
-        try:
-            stat = target.stat()
-            stamp = (stat.st_mtime_ns, stat.st_size)
-        except OSError:
-            stamp = (0, 0)
-        cached = self._image_index_cache.get(str(target))
-        if cached is not None and cached[0] == stamp:
-            return cached[1]
-
-        from app.modules.image.service import ImageProbe
-
-        probe = ImageProbe(dism=self._tool_paths.get("dism") or None)
-        indexes = [int(item["index"]) for item in probe.read_indexes(str(target)) if item.get("index")]
-        self._image_index_cache[str(target)] = (stamp, indexes)
-        return indexes
+    def _ghost_available(self) -> bool:
+        """Ghost 可执行文件在不在：先看设置里的 extGhost，再退回 PATH/System32。"""
+        configured = str(self._tool_paths.get("ghost") or "").strip()
+        if configured:
+            return Path(configured).expanduser().is_file()
+        return bool(find_program("ghost64.exe") or find_program("ghost32.exe"))
 
     # ------------------------------------------------------------------ 执行
     def submit(

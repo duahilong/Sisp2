@@ -305,7 +305,7 @@ def build_api(config_path: str | None, dry_run: bool, settings_path: str | None 
         partition_defaults=store.partition_info(),
         tool_paths={
             "diskpart": settings.get("extDiskpart"),
-            "dism": settings.get("extDism"),
+            "ghost": settings.get("extGhost"),
         },
         protect_system_disk=bool(settings.get("protectSystemDisk", True)),
         block_unverified=bool(settings.get("blockUnverified", True)),

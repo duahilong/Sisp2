@@ -3,7 +3,7 @@
 这里的代码**只认识 diskpart**：
 
 - 依赖只有 :class:`~app.application.shell.DiskpartShell` 与 ``CommandLog``；
-- 不 import dism / bcdboot，也不读 ``image_info``（镜像写不写、写哪个，不归它管）；
+- 不 import Ghost / bcdboot，也不读 ``image_info``（镜像写不写、写哪个，不归它管）；
 - 结论通过 :class:`~app.application.phases.base.PhaseOutcome` 交回编排层。
 
 分区与装机解耦之后，"分区没做对"不会再被镜像阶段的失败掩盖，反过来也一样。

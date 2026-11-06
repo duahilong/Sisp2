@@ -1,42 +1,35 @@
-"""镜像探测：列目录里的镜像文件、读 WIM/ESD 的版本列表。
+"""镜像目录探测（Ghost 版）：列目录里的 GHO、认文件头。
 
-界面里“系统安装 → 选择版本”这一步需要真实数据：
+装机只支持 **Ghost 分区块镜像**（``.GHO`` / ``.GHS``）。以前这里还有两条路：
 
-- ``sysIsoDir`` 指向的目录里有哪些 ``.wim/.esd/.iso``；
-- 某个文件里有哪些索引（``Windows 11 专业版 / 家庭版 …``）。
+- ``dism /Get-WimInfo`` 读 WIM/ESD 索引（随"只用 Ghost"移除）；
+- ``Mount-DiskImage`` 挂载 ISO 再取 ``sources\\install.wim``（同样移除）。
 
-两个来源都只有系统工具能做：``dism /Get-WimInfo`` 读索引，ISO 需要
-``Mount-DiskImage`` 挂载后去 ``sources\\install.*`` 找镜像。
+现在整个模块**不 spawn 任何子进程**，只读文件系统与前两个字节：
 
-本模块把这两件事包起来，并保证：
+- :func:`list_directory` 列目录（GHO 可装；ISO/WIM/ESD/SWM 也列出来，
+  但标成不可用，好让界面解释"为什么选不了"）；
+- :func:`inspect_image` 校验单个文件（GHO 走 :func:`sniff_gho` 读文件头）。
 
-- ISO 挂载后**一定**卸载（``finally``），不留下挂起的盘符；
-- 没有任何写操作，不依赖 diskpart；
-- 解析逻辑拆成纯函数（``parse_wim_info``），可以用样例文本直接测；
-- 所有子进程都先过 ``app.safety_guard``：``dism /Get-WimInfo`` 这类只读动词放行，
-  ``Mount-DiskImage`` / ``Dismount-DiskImage`` 改的是挂载状态，需要显式授权
-  （``allow_real_disk=True``，只有生产入口会传）。
+计划期校验（``workflow._image_problems``）复用同一套判定，避免"界面说能用、
+计划说不能用"的双口径。
 """
 
 from __future__ import annotations
 
-import re
-import shutil
-import sys
-from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from app.safety_guard import ensure_command_allowed
+from app.modules.ghost.service import GHO_SUFFIXES, sniff_gho
 
-IMAGE_SUFFIXES = (".wim", ".esd", ".swm")
-ISO_SUFFIXES = (".iso",)
-LIST_SUFFIXES = IMAGE_SUFFIXES + ISO_SUFFIXES
+# 能直接还原的类型 / 只是列出来给人看的历史类型
+ISO_SUFFIXES: tuple[str, ...] = (".iso",)
+LEGACY_SUFFIXES: tuple[str, ...] = (".wim", ".esd", ".swm")
+LIST_SUFFIXES: tuple[str, ...] = GHO_SUFFIXES + ISO_SUFFIXES + LEGACY_SUFFIXES
 
-DISM_TIMEOUT = 120.0
-
-_INDEX_RE = re.compile(r"^\s*Index\s*:\s*(\d+)\s*$", re.IGNORECASE)
-_FIELD_RE = re.compile(r"^\s*([A-Za-z ]+?)\s*:\s*(.*?)\s*$")
+KIND_GHO = "gho"
+KIND_ISO = "iso"
+KIND_LEGACY = "legacy"
 
 
 class ImageError(ValueError):
@@ -54,11 +47,27 @@ def _size_display(size_bytes: int | None) -> str:
     return f"{size_bytes} B"
 
 
+def _kind_of(suffix: str) -> str:
+    if suffix in GHO_SUFFIXES:
+        return KIND_GHO
+    if suffix in ISO_SUFFIXES:
+        return KIND_ISO
+    return KIND_LEGACY
+
+
+def _note_of(kind: str) -> str:
+    if kind == KIND_GHO:
+        return "Ghost 分区块镜像，可直接还原"
+    if kind == KIND_ISO:
+        return "ISO 不能直接还原：请用封装好的 GHO"
+    return "已不支持 dism 路线（WIM/ESD/SWM）：请使用 GHO"
+
+
 def list_directory(directory: str | Path) -> dict[str, Any]:
-    """列出目录里的镜像文件（只读）。"""
-    base = Path(directory).expanduser()
+    """列出目录里的镜像文件（只读，不 spawn）。"""
     if not str(directory).strip():
         raise ImageError("尚未设置镜像目录（设置 → 系统文件 → 镜像目录）")
+    base = Path(directory).expanduser()
     if not base.is_dir():
         raise ImageError(f"镜像目录不存在：{base}")
 
@@ -69,18 +78,27 @@ def list_directory(directory: str | Path) -> dict[str, Any]:
         raise ImageError(f"无法读取镜像目录：{exc}") from exc
 
     for entry in entries:
-        if not entry.is_file() or entry.suffix.lower() not in LIST_SUFFIXES:
+        try:
+            if not entry.is_file():
+                continue
+        except OSError:
+            continue
+        suffix = entry.suffix.lower()
+        if suffix not in LIST_SUFFIXES:
             continue
         try:
             size_bytes = entry.stat().st_size
         except OSError:
             size_bytes = None
+        kind = _kind_of(suffix)
         images.append(
             {
                 "path": str(entry),
                 "name": entry.name,
-                "suffix": entry.suffix.lower(),
-                "kind": "iso" if entry.suffix.lower() in ISO_SUFFIXES else "wim",
+                "suffix": suffix,
+                "kind": kind,
+                "installable": kind == KIND_GHO,
+                "note": _note_of(kind),
                 "size_bytes": size_bytes,
                 "size_display": _size_display(size_bytes),
             }
@@ -88,211 +106,63 @@ def list_directory(directory: str | Path) -> dict[str, Any]:
     return {"directory": str(base), "images": images, "exists": True}
 
 
-def parse_wim_info(text: str) -> list[dict[str, Any]]:
-    """解析 ``dism /Get-WimInfo`` 的输出。
-
-    输出形如::
-
-        Details for image : D:\\images\\win11.wim
-
-        Index : 1
-        Name : Windows 11 Pro
-        Description : Windows 11 Pro
-        Size : 4,921,234,567 bytes
-
-    不同的 dism 版本字段顺序稳定但字段集合略有差异，因此按“遇到 Index
-    就开一条记录，其余键值对挂到当前记录”的方式解析。
-    """
-    images: list[dict[str, Any]] = []
-    current: dict[str, Any] | None = None
-    for raw_line in (text or "").splitlines():
-        match = _INDEX_RE.match(raw_line)
-        if match:
-            if current is not None:
-                images.append(current)
-            current = {"index": int(match.group(1)), "name": "", "description": "", "size": ""}
-            continue
-        if current is None:
-            continue
-        field = _FIELD_RE.match(raw_line)
-        if not field:
-            continue
-        key = field.group(1).strip().lower()
-        value = field.group(2).strip()
-        if not value:
-            continue
-        if key == "name":
-            current["name"] = value
-        elif key == "description":
-            current["description"] = value
-        elif key == "size":
-            current["size"] = value
-        elif key in ("edition", "architecture", "version", "languages"):
-            current[key] = value
-    if current is not None:
-        images.append(current)
-    return [image for image in images if image.get("index")]
-
-
-class ImageProbe:
-    """``dism`` 与 ISO 挂载的薄封装，全部依赖可注入以便测试。"""
-
-    def __init__(
-        self,
-        *,
-        dism: str | None = None,
-        powershell: str | None = None,
-        which: Callable[[str], str | None] | None = None,
-        run: Callable[[list[str], float], tuple[int, str]] | None = None,
-        mount: Callable[[str], dict[str, Any]] | None = None,
-        unmount: Callable[[str], None] | None = None,
-        allow_real_disk: bool = False,
-    ) -> None:
-        self._which = which or shutil.which
-        self.dism = dism or self._which("dism.exe")
-        self.powershell = powershell or self._which("powershell.exe")
-        # 挂载/卸载 ISO 会改系统状态，默认不授权；生产入口（WebApi）显式传 True。
-        self.allow_real_disk = bool(allow_real_disk)
-        self._run = run or self._run_guarded
-        self._mount = mount or self._mount_iso
-        self._unmount = unmount or self._unmount_iso
-
-    def _run_guarded(self, command: list[str], timeout: float) -> tuple[int, str]:
-        """默认执行器：先过 ``app.safety_guard``，再过 subprocess。"""
-        return _spawn(command, timeout, allow_real_disk=self.allow_real_disk)
-
-    # ------------------------------------------------------------------ 入口
-    def probe(self, path: str | None = None, *, directory: str | None = None) -> dict[str, Any]:
-        """列目录（``directory``）或读镜像索引（``path``）。"""
-        if path:
-            return self.inspect(path)
-        return list_directory(directory or "")
-
-    def inspect(self, path: str) -> dict[str, Any]:
-        target = Path(path).expanduser()
-        if not target.exists():
-            raise ImageError(f"镜像文件不存在：{target}")
-
-        suffix = target.suffix.lower()
-        if suffix in ISO_SUFFIXES:
-            return self._inspect_iso(target)
-        if suffix in IMAGE_SUFFIXES:
-            return {
-                "path": str(target),
-                "name": target.name,
-                "kind": "wim",
-                "indexes": self.read_indexes(target),
-                "mounted": False,
-            }
-        raise ImageError(f"不支持的镜像类型：{target.suffix or '无扩展名'}（支持 WIM/ESD/SWM/ISO）")
-
-    # ------------------------------------------------------------------ WIM
-    def read_indexes(self, path: str | Path) -> list[dict[str, Any]]:
-        if not self.dism:
-            raise ImageError("找不到 dism.exe，无法读取镜像索引")
-        code, output = self._run(
-            [self.dism, "/English", "/Get-WimInfo", f"/WimFile:{path}"], DISM_TIMEOUT
+def inspect_image(path: str | Path) -> dict[str, Any]:
+    """校验单个镜像文件，返回界面/计划期都要用的那一份信息。"""
+    target = Path(str(path)).expanduser()
+    suffix = target.suffix.lower()
+    if suffix in GHO_SUFFIXES:
+        sniffed = sniff_gho(target)
+        return {
+            "path": sniffed["path"],
+            "name": sniffed.get("name") or target.name,
+            "kind": KIND_GHO,
+            "installable": bool(sniffed.get("ok")),
+            "exists": bool(sniffed.get("exists")),
+            "magic_ok": bool(sniffed.get("ok")),
+            "reason": sniffed.get("reason", ""),
+            "size_bytes": sniffed.get("size_bytes"),
+            "size_display": _size_display(sniffed.get("size_bytes")),
+            "block_index": sniffed.get("block_index", 1),
+        }
+    if suffix in ISO_SUFFIXES:
+        raise ImageError(f"{target.name} 是 ISO：Ghost 只能还原 .GHO，请先封装成 GHO")
+    if suffix in LEGACY_SUFFIXES:
+        raise ImageError(
+            f"不支持 {suffix}：dism 路线已移除，装机只接受 GHO/GHS（Ghost 分区块镜像）"
         )
-        if code != 0:
-            raise ImageError(f"读取镜像索引失败（dism 退出码 {code}）：{output.strip()[:400]}")
-        indexes = parse_wim_info(output)
-        if not indexes:
-            raise ImageError("dism 没有返回任何镜像索引，文件可能不是有效的 WIM/ESD")
-        return indexes
-
-    # ------------------------------------------------------------------ ISO
-    def _inspect_iso(self, target: Path) -> dict[str, Any]:
-        mounted = self._mount(str(target))
-        try:
-            drive = mounted.get("drive") or ""
-            if not drive:
-                raise ImageError("ISO 挂载成功但没有拿到盘符")
-            source_dir = Path(drive) / "sources"
-            candidates = [
-                item
-                for item in (
-                    source_dir / "install.wim",
-                    source_dir / "install.esd",
-                    source_dir / "install.swm",
-                )
-                if item.is_file()
-            ]
-            if not candidates:
-                raise ImageError(f"ISO 里没有 sources\\install.wim/esd/swm：{target.name}")
-            chosen = candidates[0]
-            return {
-                "path": str(target),
-                "name": target.name,
-                "kind": "iso",
-                "inner_path": str(chosen),
-                "indexes": self.read_indexes(chosen),
-                "mounted": True,
-                "temporarily_mounted": True,
-            }
-        finally:
-            self._unmount(str(target))
-
-    def _mount_iso(self, path: str) -> dict[str, Any]:
-        script = (
-            f"$image = Mount-DiskImage -ImagePath '{path}' -PassThru;"
-            "$volume = $image | Get-Volume;"
-            "[PSCustomObject]@{ drive = $volume.DriveLetter } | ConvertTo-Json -Compress"
-        )
-        if not self.powershell:
-            raise ImageError("找不到 powershell.exe，无法挂载 ISO")
-        code, output = self._run(
-            [self.powershell, "-NoProfile", "-NonInteractive", "-Command", script], 120.0
-        )
-        if code != 0:
-            raise ImageError(f"挂载 ISO 失败：{output.strip()[:400]}")
-        import json
-
-        try:
-            data = json.loads(output.strip().splitlines()[-1])
-        except (ValueError, IndexError) as exc:
-            raise ImageError(f"挂载 ISO 后无法解析盘符：{output.strip()[:200]}") from exc
-        drive = str(data.get("drive") or "").strip().upper()[:1]
-        return {"drive": f"{drive}:" if drive else ""}
-
-    def _unmount_iso(self, path: str) -> None:
-        if not self.powershell:
-            return
-        script = f"Dismount-DiskImage -ImagePath '{path}'"
-        try:
-            self._run([self.powershell, "-NoProfile", "-NonInteractive", "-Command", script], 120.0)
-        except Exception:  # noqa: BLE001, S110 - 卸载失败不能覆盖原本的错误
-            pass
+    raise ImageError(
+        f"不支持的镜像类型：{target.suffix or '无扩展名'}（只接受 GHO/GHS）"
+    )
 
 
-def _spawn(
-    command: list[str], timeout: float, *, allow_real_disk: bool = False
-) -> tuple[int, str]:
-    import subprocess
-
-    # 护栏：读盘/读索引（``dism /Get-*``）放行，挂载/卸载 ISO 需要授权。
-    ensure_command_allowed(command, allow_real_disk=allow_real_disk, source="ImageProbe")
-    try:
-        completed = subprocess.run(  # noqa: S603 - 固定命令
-            command,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0,
-        )
-    except subprocess.TimeoutExpired:
-        return 124, f"命令超时（{timeout:.0f} 秒）"
-    except OSError as exc:
-        return 127, f"无法启动命令：{exc}"
-    text = (completed.stdout or b"").decode("mbcs", errors="replace")
-    text += (completed.stderr or b"").decode("mbcs", errors="replace")
-    return completed.returncode, text
+def probe(directory: str | Path | None = None, path: str | Path | None = None) -> dict[str, Any]:
+    """``/api/images`` 的统一入口：给 ``path`` 就读单个文件，否则列目录。"""
+    if path:
+        return inspect_image(path)
+    return list_directory(directory or "")
 
 
-def find_default_image(images: Iterable[dict[str, Any]]) -> str:
-    """从目录列表里挑一个默认镜像：优先 wim，其次 esd，最后 iso。"""
+def find_default_image(images: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> str:
+    """从目录列表里挑一个默认镜像：优先 .gho，其次 .ghs。"""
     items = list(images)
-    for kind, suffix in (("wim", ".wim"), ("wim", ".esd"), ("iso", ".iso")):
+    for suffix in GHO_SUFFIXES:
         for item in items:
-            if item.get("kind") == kind and str(item.get("suffix")) == suffix:
+            if str(item.get("suffix")) == suffix and item.get("installable", True):
                 return str(item.get("path") or "")
-    return str(items[0].get("path") or "") if items else ""
+    return ""
+
+
+__all__ = [
+    "GHO_SUFFIXES",
+    "ISO_SUFFIXES",
+    "KIND_GHO",
+    "KIND_ISO",
+    "KIND_LEGACY",
+    "LEGACY_SUFFIXES",
+    "LIST_SUFFIXES",
+    "ImageError",
+    "find_default_image",
+    "inspect_image",
+    "list_directory",
+    "probe",
+]

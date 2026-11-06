@@ -5,7 +5,7 @@
 既方便替换实现，也方便在测试里完全绕开磁盘。
 
 **安全默认值（最重要的一条）**：``SispService()`` 默认 ``dry_run=True``，
-``execute_spec()`` 只返回“将要执行什么”的计划，不会调用 diskpart 或 dism，
+``execute_spec()`` 只返回“将要执行什么”的计划，不会调用 diskpart 或 Ghost，
 也不会写任何字节。真实写盘必须同时满足四个条件，缺一即抛 ``PermissionError``：
 
 1. 构造时显式传入 ``dry_run=False``；
@@ -599,7 +599,7 @@ class SispService:
             ),
             StepResult(
                 key="windows",
-                title="创建 Windows 分区并应用镜像",
+                title=STEP_TITLES["windows"],
                 status=STEP_SKIPPED,
                 message="dry-run 未执行",
                 details={"letter": letters.get("windows"), "size_gb": self._c_size_gb(payload)},
@@ -620,7 +620,7 @@ class SispService:
             ),
             StepResult(
                 key="image",
-                title="应用镜像",
+                title=STEP_TITLES["image"],
                 status=STEP_SKIPPED,
                 message="dry-run 未执行",
                 details={"image_path": self._image_path(payload)},

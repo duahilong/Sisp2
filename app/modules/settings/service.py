@@ -48,21 +48,20 @@ DEFAULTS: dict[str, Any] = {
     "efiDefaultMb": 100,
     "dataDefaultGb": "auto",
     "defaultFs": "NTFS",
+    # GHO 内部的分区块序号（0 = 用 Ghost 默认的 1）
     "imageDefaultIndex": 0,
     # 外部程序（空 = 用系统自带或 PATH 里的）
     "extEnabled": True,
     "extConfirm": False,
     "extDiskpart": "",
-    "extDism": "",
-    "extWimlib": "",
+    # 装机只走 Ghost：留空则依次找 <exe 目录>\sw\ghost64.exe 与 PATH 里的 ghost64/ghost32。
+    "extGhost": "",
     "extVentoy": "",
     "ext7z": "",
     # 系统文件
     "sysIsoDir": "",
     "sysWim": "",
     "sysBoot": "",
-    "sysUnattend": "",
-    "sysDrivers": "",
     "sysTemp": "",
     # 安全
     "protectSystemDisk": True,
@@ -80,15 +79,12 @@ DEFAULTS: dict[str, Any] = {
 # 哪些键代表“文件/目录路径”，probe 时按文件或目录检查
 _PATH_KEYS: dict[str, str] = {
     "extDiskpart": "file",
-    "extDism": "file",
-    "extWimlib": "file",
+    "extGhost": "file",
     "extVentoy": "file",
     "ext7z": "file",
     "sysIsoDir": "dir",
     "sysWim": "file",
     "sysBoot": "dir",
-    "sysUnattend": "file",
-    "sysDrivers": "dir",
     "sysTemp": "dir",
     "logDir": "dir",
 }
@@ -96,8 +92,7 @@ _PATH_KEYS: dict[str, str] = {
 # 空值时可以尝试从系统里自动发现的命令
 _BUILTIN_COMMANDS: dict[str, tuple[str, ...]] = {
     "extDiskpart": ("diskpart",),
-    "extDism": ("dism", "dism.exe"),
-    "extWimlib": ("wimlib-imagex", "wimlib-imagex.exe"),
+    "extGhost": ("ghost64", "ghost64.exe", "ghost32", "ghost32.exe"),
     "extVentoy": ("Ventoy2Disk", "Ventoy2Disk.exe"),
     "ext7z": ("7z", "7z.exe"),
 }

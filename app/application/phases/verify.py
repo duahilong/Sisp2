@@ -5,7 +5,7 @@
 - ``layout``：**分区做对了没有**（GPT、分区数、顺序类型、大小、盘符、卷标、吃满）；
 - ``verify``：**装完能不能开机**（EFI 里有 ``bootmgfw.efi``、C 里有系统文件）。
 
-前者在 ``dism`` 之前跑，后者在所有写入完成之后跑。
+前者在 ``image``（Ghost）之后、``boot`` 之前跑，后者在所有写入完成之后跑。
 """
 
 from __future__ import annotations
@@ -137,7 +137,7 @@ def verify_verdict(
 def _extract_json(text: str) -> Any | None:
     """从输出里取出 JSON 对象：优先整段，其次最后一行能解析的 ``{...}``。
 
-    ``ProcessShell`` 返回的是 stdout + stderr（dism/powershell 可能往 stderr 写
+    ``ProcessShell`` 返回的是 stdout + stderr（ghost/powershell 可能往 stderr 写
     编码提示），所以不能假设整段就是 JSON；但仍然只接受合法 JSON，不猜内容。
     """
     raw = (text or "").strip()

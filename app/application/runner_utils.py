@@ -80,7 +80,7 @@ def existing_dir(value: Any) -> str | None:
 
 
 def decode_output(data: bytes | None) -> str:
-    """dism/diskpart 在中文 Windows 上按 OEM 代码页输出，先 mbcs 再兜底。"""
+    """diskpart/ghost 在中文 Windows 上按 OEM 代码页输出，先 mbcs 再兜底。"""
     if not data:
         return ""
     for encoding in ("mbcs", "utf-8", "latin-1"):

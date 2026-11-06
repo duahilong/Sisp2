@@ -46,7 +46,7 @@ STEP_TITLES: dict[str, str] = {
     "windows": "创建 Windows 分区",
     "data": "创建数据分区",
     "layout": "分区验收（对照计划）",
-    "image": "应用系统镜像",
+    "image": "应用 GHO 镜像（Ghost）",
     "boot": "写入 UEFI 引导",
     "verify": "装机结果校验（引导文件 + 系统文件）",
 }

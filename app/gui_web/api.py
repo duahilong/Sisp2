@@ -240,24 +240,17 @@ class WebApi:
 
     # ------------------------------------------------------------------ 镜像
     def probe_images(self, directory: str | None = None, path: str | None = None) -> dict[str, Any]:
-        """列镜像目录，或读取某个 WIM/ISO 的索引列表。"""
+        """列镜像目录，或校验单个 GHO（读文件头，全部是纯文件操作）。"""
         try:
-            probe = self._image_probe()
+            from app.modules.image.service import probe as probe_image
+
             target_dir = directory
             if path is None and not target_dir:
                 target_dir = str(self._settings.get().get("sysIsoDir") or "")
-            data = probe.probe(path, directory=target_dir)
+            data = probe_image(directory=target_dir, path=path)
         except Exception as exc:  # noqa: BLE001
             return err("E_IMAGE", str(exc))
         return ok(data)
-
-    def _image_probe(self) -> Any:
-        from app.modules.image.service import ImageProbe
-
-        settings = self._settings.get()
-        # GUI 是生产入口：ISO 探测需要真的挂载/卸载，这里显式授权
-        # （``dism /Get-WimInfo`` 这类只读动词不受影响）。
-        return ImageProbe(dism=str(settings.get("extDism") or "") or None, allow_real_disk=True)
 
     # ------------------------------------------------------------------ 分区预览
     def partition_preview(self, disk_number: Any = None) -> dict[str, Any]:

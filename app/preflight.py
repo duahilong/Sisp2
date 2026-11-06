@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from app import resources
-from app.modules.image.service import IMAGE_SUFFIXES
+from app.modules.ghost.service import GHO_SUFFIXES
 from app.resources import app_root
 
 REPO_ROOT = app_root()
@@ -50,20 +50,18 @@ CHECK_FREE_SPACE = "临时目录可用空间检查"
 CHECK_TOOLS = "外部工具可用性检查"
 CHECK_SETTING_PATHS = "设置路径有效性检查"
 
-# 界面设置里的可选外部工具：配了就必须存在，没配就跳过（内置 dism/bcdboot 够用）。
+# 界面设置里的可选外部工具：配了就必须存在，没配就跳过（bcdboot 是系统自带的）。
 OPTIONAL_TOOLS: tuple[tuple[str, str], ...] = (
-    ("extWimlib", "wimlib-imagex"),
+    ("extGhost", "ghost64"),
     ("extVentoy", "Ventoy"),
     ("ext7z", "7-Zip"),
 )
 
 # 界面设置里的系统文件路径：(键名, 中文名, 期望类型)
 SETTING_PATHS: tuple[tuple[str, str, str], ...] = (
-    ("sysIsoDir", "ISO 目录", "dir"),
-    ("sysWim", "系统 WIM 文件", "file"),
+    ("sysIsoDir", "镜像目录", "dir"),
+    ("sysWim", "系统 GHO 镜像", "file"),
     ("sysBoot", "引导文件目录", "dir"),
-    ("sysUnattend", "无人值守应答文件", "file"),
-    ("sysDrivers", "驱动目录", "dir"),
     ("sysTemp", "临时目录", "dir"),
 )
 
@@ -386,21 +384,21 @@ def run_preflight_checks(
         target = Path(image_path).expanduser()
         if target.is_file():
             add(CHECK_IMAGE, True, f"镜像文件存在: {target}")
-            # 类型检查：dism 只能 ``/Apply-Image`` 到分区，ISO 必须先把 install.wim 取出来。
+            # 类型检查：装机只走 Ghost，只认 GHO/GHS 分区块镜像。
             suffix = target.suffix.lower()
-            if suffix in IMAGE_SUFFIXES:
-                add(CHECK_IMAGE_TYPE, True, f"可直接应用到分区：{suffix}")
+            if suffix in GHO_SUFFIXES:
+                add(CHECK_IMAGE_TYPE, True, f"Ghost 分区块镜像：{suffix}")
             elif suffix == ".iso":
                 add(
                     CHECK_IMAGE_TYPE,
                     False,
-                    f"{target.name} 是 ISO：dism 不能直接应用，请先取出 sources\\install.wim",
+                    f"{target.name} 是 ISO：Ghost 只能还原 .GHO，请先封装成 GHO",
                 )
             else:
                 add(
                     CHECK_IMAGE_TYPE,
                     False,
-                    f"不支持 {suffix or '无后缀'} 文件：装机只接受 WIM/ESD/SWM",
+                    f"不支持 {suffix or '无后缀'} 文件：装机只接受 GHO/GHS",
                 )
         else:
             add(CHECK_IMAGE, False, f"镜像文件不存在: {target}")
@@ -445,14 +443,14 @@ def _add_tool_checks(add: Callable[[str, bool, str], None], settings: Mapping[st
     elif configured:
         add(CHECK_TOOLS, True, "外部工具已就绪：" + "；".join(configured))
     else:
-        add(CHECK_TOOLS, True, "未配置外部工具，使用内置 dism/bcdboot")
+        add(CHECK_TOOLS, True, "未配置外部工具，使用系统自带的 bcdboot/diskpart")
 
 
 def _add_setting_path_checks(
     add: Callable[[str, bool, str], None],
     settings: Mapping[str, Any],
 ) -> None:
-    """系统文件路径（ISO/WIM/引导/应答/驱动/临时目录）。
+    """系统文件路径（镜像目录/默认 GHO/引导/临时目录）。
 
     ``sysTemp`` 不存在是正常的（执行时会自动创建），其余路径配错了必须报错，
     否则真实写盘会在半路失败。

@@ -50,7 +50,7 @@ EFI_DEFAULT_MB = 100
 # 会把这两边钉在一起，避免以后只剩一端改了）。
 #
 # 为什么后端也要拦：界面那套只是表单校验，直连 ``POST /api/prepare``
-# 可以传 ``c_size_gb = 1``，那样会一路排到 dism 才失败——而那时候盘已经清空了。
+# 可以传 ``c_size_gb = 1``，那样会一路排到 Ghost 还原才失败——而那时候盘已经清空了。
 MIN_C_GB = 60
 MIN_DATA_GB = 20
 MIN_EXTRA_DATA_GB = 1
@@ -573,7 +573,7 @@ def partition_verdict(
     """对照**分区计划**逐项验证盘上的实际结果（分区验收的唯一判据）。
 
     这一关只看“分区做对了没有”，不要求镜像/引导已经写进去，所以它在
-    ``dism``（最长 3 小时）之前就能把问题拦住。检查项与计划的对应关系：
+    Ghost 还原（最长 2 小时）之前就能把问题拦住。检查项与计划的对应关系：
 
     ==================  ==========================================================
     分区表与数量        GPT、分区数 == 计划数、没有 Reserved/MSR
@@ -703,3 +703,27 @@ def partition_verdict(
     if warnings:
         message += "；" + "；".join(warnings)
     return True, message, details
+
+
+# ---------------------------------------------------------------- Ghost 目标
+def ghost_target(disk_number: Any, parts: Sequence[PlannedPartition]) -> tuple[int, int]:
+    """Ghost 的 ``dst``：``(1 基磁盘号, 1 基分区号)``。
+
+    Ghost 11.x 的编号口径与 Windows 不同：**磁盘和分区都从 1 开始**，而且只认
+    ``磁盘:分区``，不认盘符。所以这里要换算，且换算依据必须是**计划**：
+
+    分区验收（``layout`` 步）保证实际分区表与计划逐项一致（数量、顺序、GPT 类型、
+    大小），因此"计划里 windows 的位置"就是"实际分区号"，不需要等运行期查分区表。
+
+    两条前置条件不满足就直接拒绝，不猜：
+    - EFI 必须是第 1 个分区（Ghost 只写 Windows 分区，EFI 编号不参与，但要保证顺序）；
+    - 计划里必须有 windows 分区。
+    """
+    roles = [str(getattr(part, "role", "")) for part in parts]
+    if not roles:
+        raise PartitionLayoutError("分区计划为空，无法确定 Ghost 目标")
+    if roles[0] != "efi":
+        raise PartitionLayoutError("Ghost 写入要求 EFI 是 1 号分区（当前计划不符）")
+    if "windows" not in roles:
+        raise PartitionLayoutError("分区计划里没有 Windows 分区，无法写入镜像")
+    return int(disk_number) + 1, roles.index("windows") + 1

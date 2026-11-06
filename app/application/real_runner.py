@@ -1,6 +1,6 @@
 """真实写盘执行器 = 组装 + 编排（不再自己实现分区/镜像/引导/校验）。
 
-历史包袱：这个文件曾经一手包办 diskpart 四段脚本、dism、bcdboot、校验，以及
+历史包袱：这个文件曾经一手包办 diskpart 四段脚本、镜像写入、bcdboot、校验，以及
 "分区失败就把后面步骤记成 skipped"的分支——分区阶段因此认识下游步骤名，
 测试也只能 ``runner._run_diskpart = fake`` 这种"直接赋值"去 mock（2026-11-06
 清盘事故的成因）。
@@ -38,8 +38,9 @@ from app.application.partitions import (
     wipe_lines,
 )
 from app.application.phases.base import PhaseContext, PhaseOutcome, PhaseResult
+from app.application.phases.ghost import GhostImagePhase
 from app.application.phases.partition import EfiLetterReleaser, PartitionPhase
-from app.application.phases.system import BootPhase, ImagePhase, SystemPhase
+from app.application.phases.system import BootPhase, SystemPhase
 from app.application.phases.verify import BootVerifyPhase, verify_verdict
 from app.application.pipeline import JobPipeline, PipelineResult
 from app.application.runner_utils import (
@@ -54,7 +55,7 @@ from app.application.runner_utils import (
 from app.application.shell import (
     BCDBOOT_TIMEOUT,
     DISKPART_TIMEOUT,
-    DISM_TIMEOUT,
+    GHOST_TIMEOUT,
     QUERY_ATTEMPTS,
     QUERY_INTERVAL,
     QUERY_TIMEOUT,
@@ -111,7 +112,7 @@ class WindowsDiskRunner:
 
     - ``shell``：``DiskpartShell`` 形状的对象（分区阶段用），不传就按本次任务的
       日志/临时目录现造；
-    - ``process``：``ProcessShell`` 形状的对象（dism/bcdboot/校验用）；
+    - ``process``：``ProcessShell`` 形状的对象（Ghost/bcdboot/校验用）；
     - ``verify``：``BootVerifyPhase`` 形状的对象（``.run(ctx)``），不传用默认实现；
     - ``pipeline_factory``：``(ctx) -> JobPipeline``，给需要换掉整个编排的测试用。
 
@@ -124,7 +125,7 @@ class WindowsDiskRunner:
         *,
         log_dir: str | os.PathLike[str] | None = None,
         diskpart: str | None = None,
-        dism: str | None = None,
+        ghost: str | None = None,
         bcdboot: str | None = None,
         powershell: str | None = None,
         allow_real_disk: bool = False,
@@ -134,12 +135,13 @@ class WindowsDiskRunner:
         pipeline_factory: Any = None,
     ) -> None:
         # 真实写盘授权：默认关闭。生产入口 build_real_runner() 会显式打开；
-        # 测试/脚本里直接构造的 runner 只能"读"，执行 diskpart/format/bcdboot/dism
+        # 测试/脚本里直接构造的 runner 只能"读"，执行 diskpart/format/bcdboot/ghost
         # 会被 app.safety_guard 拦下（2026-11-06 清盘事故的直接防线）。
         self.allow_real_disk = bool(allow_real_disk)
         self.log_dir = log_dir
         self.diskpart = diskpart or find_program("diskpart.exe")
-        self.dism = dism or find_program("dism.exe")
+        # 装机只走 Ghost：ghost64 优先，取不到退 ghost32。
+        self.ghost = ghost or find_program("ghost64.exe") or find_program("ghost32.exe")
         self.bcdboot = bcdboot or find_program("bcdboot.exe")
         self.powershell = powershell or find_program("powershell.exe")
         self._shell = shell
@@ -190,10 +192,12 @@ class WindowsDiskRunner:
         shell = self._build_shell(ctx.log, ctx.options, ctx.env or {})
         process = self._build_process(ctx.log, ctx.env or {})
         verify = self._verify or BootVerifyPhase(process, powershell=self.powershell)
+        # ghosterr.txt 落在日志目录（没有就落到本次任务的临时目录）。
+        cwd = existing_dir(self.log_dir) or existing_dir(ctx.options.get("temp_dir"))
         return JobPipeline(
             partition=PartitionPhase(shell),
             system=SystemPhase(
-                ImagePhase(process, dism=self.dism),
+                GhostImagePhase(process, ghost=self.ghost, cwd=cwd),
                 BootPhase(process, bcdboot=self.bcdboot),
             ),
             verify=verify,
@@ -241,7 +245,7 @@ class WindowsDiskRunner:
             name
             for name, value in (
                 ("diskpart.exe", self.diskpart),
-                ("dism.exe", self.dism),
+                ("ghost64.exe", self.ghost),
                 ("bcdboot.exe", self.bcdboot),
             )
             if not value
@@ -347,23 +351,23 @@ def build_real_runner(
     *,
     log_dir: str | os.PathLike[str] | None = None,
     diskpart: str | None = None,
-    dism: str | None = None,
+    ghost: str | None = None,
 ) -> WindowsDiskRunner:
     """工厂函数；``WorkflowController`` 用它给未注入服务的会话配默认执行器。
 
-    ``diskpart`` / ``dism`` 由界面设置（``extDiskpart`` / ``extDism``）传入；
+    ``diskpart`` / ``ghost`` 由界面设置（``extDiskpart`` / ``extGhost``）传入；
     空值或 ``None`` 时回退到 PATH / System32 探测。
     """
     # 生产入口：这里是唯一显式打开"真实写盘"的地方。
     return WindowsDiskRunner(
-        log_dir=log_dir, diskpart=diskpart, dism=dism, allow_real_disk=True
+        log_dir=log_dir, diskpart=diskpart, ghost=ghost, allow_real_disk=True
     )
 
 
 __all__ = [
     "BCDBOOT_TIMEOUT",
     "DISKPART_TIMEOUT",
-    "DISM_TIMEOUT",
+    "GHOST_TIMEOUT",
     "QUERY_ATTEMPTS",
     "QUERY_INTERVAL",
     "QUERY_TIMEOUT",
