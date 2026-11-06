@@ -1,6 +1,6 @@
 # Sisp2
 
-Sisp2 是面向 Windows 的硬盘装机工具，可规划并执行清盘、GPT EFI/Windows/Data 分区、应用 WIM、写入 UEFI 引导及分区结果校验。真实执行会破坏目标盘全部数据；在隔离环境外使用前必须逐项核对目标盘。
+Sisp2 是面向 Windows 的硬盘装机工具，可规划并执行清盘、GPT EFI/Windows/Data 分区、用 Ghost 还原 GHO 镜像、写入 UEFI 引导及分区结果校验。真实执行会破坏目标盘全部数据；在隔离环境外使用前必须逐项核对目标盘。
 
 ## 环境与安装
 
@@ -65,7 +65,7 @@ python -m pytest tests/ -q
 ```
 
 测试主要依赖替身与注入实现，目标是验证逻辑而非真实设备写盘；`app/safety_guard.py` 会在
-执行前拦下 diskpart/format/bcdboot/写盘 cmdlet 等危险命令（`dism /Get-*` 这类只读查询除外，详见[测试指南](Docs/测试指南.md)）。Web API 测试需要 `httpx`；SSE 测试会在后台线程启动真实 uvicorn（随机空闲端口），因此需要 `uvicorn`。不要在真实磁盘环境中尝试写盘测试。
+执行前拦下 diskpart/format/bcdboot/ghost64 -clone/写盘 cmdlet 等危险命令（`ghost64 -ver`、`dism /Get-*` 这类只读查询除外，详见[测试指南](Docs/测试指南.md)）。Web API 测试需要 `httpx`；SSE 测试会在后台线程启动真实 uvicorn（随机空闲端口），因此需要 `uvicorn`。不要在真实磁盘环境中尝试写盘测试。
 
 ## 设计原型
 

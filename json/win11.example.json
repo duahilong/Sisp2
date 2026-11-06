@@ -5,7 +5,7 @@
     "data_size_gb": "auto"
   },
   "image_info": {
-    "image_path": "D:\\images\\win11.wim",
+    "image_path": "D:\\images\\win11.GHO",
     "image_index": 1
   },
   "excluded_disk_names": [
