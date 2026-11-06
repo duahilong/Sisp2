@@ -255,7 +255,9 @@ class WebApi:
         from app.modules.image.service import ImageProbe
 
         settings = self._settings.get()
-        return ImageProbe(dism=str(settings.get("extDism") or "") or None)
+        # GUI 是生产入口：ISO 探测需要真的挂载/卸载，这里显式授权
+        # （``dism /Get-WimInfo`` 这类只读动词不受影响）。
+        return ImageProbe(dism=str(settings.get("extDism") or "") or None, allow_real_disk=True)
 
     # ------------------------------------------------------------------ 引导
     def boot_report(self) -> dict[str, Any]:

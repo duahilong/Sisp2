@@ -12,7 +12,10 @@
 
 - ISO 挂载后**一定**卸载（``finally``），不留下挂起的盘符；
 - 没有任何写操作，不依赖 diskpart；
-- 解析逻辑拆成纯函数（``parse_wim_info``），可以用样例文本直接测。
+- 解析逻辑拆成纯函数（``parse_wim_info``），可以用样例文本直接测；
+- 所有子进程都先过 ``app.safety_guard``：``dism /Get-WimInfo`` 这类只读动词放行，
+  ``Mount-DiskImage`` / ``Dismount-DiskImage`` 改的是挂载状态，需要显式授权
+  （``allow_real_disk=True``，只有生产入口会传）。
 """
 
 from __future__ import annotations
@@ -23,6 +26,8 @@ import sys
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
+
+from app.safety_guard import ensure_command_allowed
 
 IMAGE_SUFFIXES = (".wim", ".esd", ".swm")
 ISO_SUFFIXES = (".iso",)
@@ -141,13 +146,20 @@ class ImageProbe:
         run: Callable[[list[str], float], tuple[int, str]] | None = None,
         mount: Callable[[str], dict[str, Any]] | None = None,
         unmount: Callable[[str], None] | None = None,
+        allow_real_disk: bool = False,
     ) -> None:
         self._which = which or shutil.which
         self.dism = dism or self._which("dism.exe")
         self.powershell = powershell or self._which("powershell.exe")
-        self._run = run or _spawn
+        # 挂载/卸载 ISO 会改系统状态，默认不授权；生产入口（WebApi）显式传 True。
+        self.allow_real_disk = bool(allow_real_disk)
+        self._run = run or self._run_guarded
         self._mount = mount or self._mount_iso
         self._unmount = unmount or self._unmount_iso
+
+    def _run_guarded(self, command: list[str], timeout: float) -> tuple[int, str]:
+        """默认执行器：先过 ``app.safety_guard``，再过 subprocess。"""
+        return _spawn(command, timeout, allow_real_disk=self.allow_real_disk)
 
     # ------------------------------------------------------------------ 入口
     def probe(self, path: str | None = None, *, directory: str | None = None) -> dict[str, Any]:
@@ -252,9 +264,13 @@ class ImageProbe:
             pass
 
 
-def _spawn(command: list[str], timeout: float) -> tuple[int, str]:
+def _spawn(
+    command: list[str], timeout: float, *, allow_real_disk: bool = False
+) -> tuple[int, str]:
     import subprocess
 
+    # 护栏：读盘/读索引（``dism /Get-*``）放行，挂载/卸载 ISO 需要授权。
+    ensure_command_allowed(command, allow_real_disk=allow_real_disk, source="ImageProbe")
     try:
         completed = subprocess.run(  # noqa: S603 - 固定命令
             command,

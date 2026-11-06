@@ -19,6 +19,8 @@ import locale
 import subprocess
 import sys
 
+from app.safety_guard import ensure_command_allowed
+
 # ---------------------------------------------------------------- 常量
 
 # 磁盘扫描（Get-Disk / Get-Partition / Get-Volume）在慢盘、USB 机械盘上会明显
@@ -113,12 +115,20 @@ _UTF8_OUTPUT_PROLOGUE = (
 )
 
 
-def run_powershell(script: str, timeout: float | None = POWERSHELL_SCAN_TIMEOUT) -> subprocess.CompletedProcess[str]:
+def run_powershell(
+    script: str,
+    timeout: float | None = POWERSHELL_SCAN_TIMEOUT,
+    *,
+    allow_real_disk: bool = False,
+) -> subprocess.CompletedProcess[str]:
     """执行一段 PowerShell 脚本，返回 ``CompletedProcess[str]``。
 
     参数：
         script：要执行的脚本文本，通过 ``-Command`` 传入（不是临时文件）。
         timeout：超时秒数，``None`` 表示不限制；默认 ``POWERSHELL_SCAN_TIMEOUT``。
+        allow_real_disk：是否允许写盘/改挂载的命令，默认 **False**。只读扫描
+            （``Get-Disk`` / ``Get-Partition``）不受影响；真需要写盘的调用方
+            必须显式传 ``True``，否则会抛 :class:`app.safety_guard.RealDiskBlocked`。
 
     返回：
         ``subprocess.CompletedProcess``，``stdout`` / ``stderr`` 已经是 ``str``。
@@ -128,6 +138,7 @@ def run_powershell(script: str, timeout: float | None = POWERSHELL_SCAN_TIMEOUT)
 
     注意：超时和“找不到 powershell.exe”同样以返回值表达（退出码 124 / 127，
     中文说明放在 ``stderr``），这样调用方抛出的错误信息里既有退出码也有原因。
+    写盘命令被护栏拦下则**抛异常**，不返回结果——被拦的命令不应该看起来像执行过。
     """
     if not isinstance(script, str) or not script.strip():
         raise ValueError("PowerShell 脚本不能为空")
@@ -139,6 +150,10 @@ def run_powershell(script: str, timeout: float | None = POWERSHELL_SCAN_TIMEOUT)
         "-Command",
         _UTF8_OUTPUT_PROLOGUE + script,
     ]
+
+    # 护栏：只读扫描放行；脚本里有写盘 cmdlet / 外部写盘程序 / -File 这类不可检查调用时
+    # 直接抛 RealDiskBlocked（默认不允许，也没必要：本模块的调用方都是只读扫描）。
+    ensure_command_allowed(argv, allow_real_disk=allow_real_disk, source="run_powershell")
 
     try:
         completed = subprocess.run(  # noqa: S603 - argv 由本模块按固定模板拼装

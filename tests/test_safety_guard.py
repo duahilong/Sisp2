@@ -18,6 +18,7 @@ from app.safety_guard import (
     ensure_command_allowed,
     is_dangerous_command,
     program_name,
+    strip_comments,
 )
 
 DISKPART = ["diskpart.exe", "/s", "script.txt"]
@@ -138,3 +139,153 @@ def test_boot_repairer_block_error_type_is_boot_error_compatible() -> None:
     """``RealDiskBlocked`` 是 ``RuntimeError``，不会被误当成 ``BootError``（``ValueError``）。"""
     assert not issubclass(RealDiskBlocked, BootError)
     assert issubclass(RealDiskBlocked, RuntimeError)
+
+
+# ------------------------------------------------- 注释剥离（引号感知）
+
+def test_strip_comments_keeps_hash_inside_quotes() -> None:
+    """引号里的 ``#`` 是路径/字符串内容，不是注释开头。"""
+    assert strip_comments(r"Get-Disk # 注释") == r"Get-Disk "
+    assert strip_comments(r"$p = 'D:\a#b\x.iso' # 尾部注释") == r"$p = 'D:\a#b\x.iso' "
+    assert strip_comments('Write-Output "a # b"') == 'Write-Output "a # b"'
+    # 转义引号不能提前结束字符串
+    assert strip_comments(r"Write-Output 'it''s # not a comment'") == r"Write-Output 'it''s # not a comment'"
+
+
+def test_hash_inside_quotes_cannot_hide_a_write_cmdlet() -> None:
+    """回归：旧实现按 ``#`` 硬切，会把引号后面的 ``Clear-Disk`` 一起切掉 → 漏判。"""
+    script = "$tag = 'a#b'; Clear-Disk -Number 1 -RemoveData"
+    assert is_dangerous_command(["powershell.exe", "-Command", script]) is True
+
+
+# ------------------------------------------------- 看不到内容的调用
+
+@pytest.mark.parametrize("command", [
+    ["powershell.exe", "-NoProfile", "-File", r"D:\scripts\wipe.ps1"],
+    ["powershell.exe", "-NoProfile", "-f", r"D:\scripts\wipe.ps1"],
+    ["pwsh.exe", "-fil", r"D:\scripts\wipe.ps1"],
+    ["powershell.exe", "-EncodedCommand", "QwBsAGUAYQByAC0ARABpAHMAawAg" * 4],
+])
+def test_uninspectable_powershell_calls_are_dangerous(command) -> None:
+    assert is_dangerous_command(command) is True
+
+
+def test_powershell_parameters_that_are_not_scripts_stay_allowed() -> None:
+    """``-NoProfile`` / ``-NonInteractive`` / ``-ExecutionPolicy`` 不是“看不到内容”的参数。"""
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "Get-Disk | Select-Object Number",
+    ]
+    assert is_dangerous_command(command) is False
+
+
+@pytest.mark.parametrize("script", [
+    "Invoke-Expression 'diskpart /s wipe.txt'",
+    "iex $payload",
+])
+def test_dynamic_execution_is_dangerous(script: str) -> None:
+    """拼出来的命令看不到内容，一律按危险处理。"""
+    assert is_dangerous_command(["powershell.exe", "-Command", script]) is True
+
+
+# ------------------------------------------------- 脚本里调用外部写盘程序
+
+@pytest.mark.parametrize("script", [
+    "Start-Process diskpart -ArgumentList '/s','wipe.txt'",
+    "Start-Process -FilePath diskpart",
+    r"& 'C:\Windows\System32\diskpart.exe' /s wipe.txt",
+    "Get-Disk | ForEach-Object { bcdboot.exe C:\\Windows /s E: /f UEFI }",
+    "dism.exe /Apply-Image /ImageFile:a.wim /Index:1 /ApplyDir:C:\\",
+    "$x = 1; diskpart /s script.txt",
+])
+def test_script_program_invocations_are_dangerous(script: str) -> None:
+    assert is_dangerous_command(["powershell.exe", "-Command", script]) is True
+
+
+@pytest.mark.parametrize("script", [
+    "Get-Disk | Format-Table Number,Size",
+    "Get-Partition | Format-List",
+    "Get-ChildItem D:\\diskpart-docs",
+    "Test-Path D:\\diskpart",
+    "$format = 'exFAT'; Get-Volume | Where-Object FileSystem -eq $format",
+])
+def test_read_only_scripts_are_not_mistaken_for_program_calls(script: str) -> None:
+    assert is_dangerous_command(["powershell.exe", "-Command", script]) is False
+
+
+# ------------------------------------------------- dism 按参数区分读写
+
+def test_dism_read_verbs_are_allowed() -> None:
+    assert is_dangerous_command(["dism.exe", "/English", "/Get-WimInfo", "/WimFile:D:\\a.wim"]) is False
+    assert is_dangerous_command(["dism", "/Get-ImageInfo", "/ImageFile:a.wim"]) is False
+
+
+def test_dism_write_verbs_stay_dangerous() -> None:
+    assert is_dangerous_command(["dism.exe", "/Apply-Image", "/ImageFile:a.wim", "/ApplyDir:F:\\"]) is True
+    assert is_dangerous_command(["dism.exe", "/Add-Driver", "/Image:C:\\", "/Driver:D:\\d"] ) is True
+    assert is_dangerous_command(["dism.exe", "/Online", "/Cleanup-Image", "/RestoreHealth"]) is True
+
+
+# ------------------------------------------------- 新接入护栏的两个模块
+
+def test_image_probe_default_runner_passes_authorization(monkeypatch) -> None:
+    """默认执行器把实例的授权状态原样传给 ``_spawn``，不自己默认成 True。"""
+    from app.modules.image import service as image_service
+
+    captured: list[tuple[list[str], bool]] = []
+
+    def fake_spawn(command, timeout, *, allow_real_disk=False):
+        captured.append((list(command), allow_real_disk))
+        return 0, "Index : 1\nName : Win11\n"
+
+    monkeypatch.setattr(image_service, "_spawn", fake_spawn)
+    probe = image_service.ImageProbe(dism="dism.exe", allow_real_disk=True)
+    indexes = probe.read_indexes("D:\\a.wim")
+    assert indexes[0]["index"] == 1
+    assert "/Get-WimInfo" in captured[0][0][2]
+    assert captured[0][1] is True
+
+
+def test_image_probe_blocks_mount_without_authorization() -> None:
+    from app.modules.image.service import ImageProbe
+
+    probe = ImageProbe(dism="dism.exe", powershell="powershell.exe")
+    assert probe.allow_real_disk is False
+    with pytest.raises(RealDiskBlocked):
+        probe._mount_iso("D:\\win11.iso")
+
+
+def test_image_probe_mount_requires_authorization_even_when_authorized() -> None:
+    """授权了也还得看环境：测试进程里仍然拦（第一道闸是实例授权，第二道是环境）。"""
+    from app.modules.image.service import ImageProbe
+
+    probe = ImageProbe(dism="dism.exe", powershell="powershell.exe", allow_real_disk=True)
+    with pytest.raises(RealDiskBlocked) as excinfo:
+        probe._mount_iso("D:\\win11.iso")
+    assert BLOCK_ENV in str(excinfo.value)
+
+
+def test_run_powershell_allows_read_only_scan(monkeypatch) -> None:
+    import subprocess
+
+    from app.modules.common import service as common_service
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, b"[]", b"")
+
+    monkeypatch.setattr(common_service.subprocess, "run", fake_run)
+    done = common_service.run_powershell("Get-Disk | ConvertTo-Json")
+    assert done.returncode == 0
+
+
+def test_run_powershell_blocks_write_script() -> None:
+    """写盘 cmdlet 在 ``run_powershell`` 里也必须先被拦下（不 spawn 进程）。"""
+    from app.modules.common import service as common_service
+
+    with pytest.raises(RealDiskBlocked):
+        common_service.run_powershell("Format-Volume -DriveLetter F -FileSystem NTFS")
