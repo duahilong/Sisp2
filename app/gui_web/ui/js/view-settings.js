@@ -7,7 +7,7 @@
  * `settings.DEFAULTS` 的键逐个核对，后端新增设置而前端漏了会直接测试失败。
  *
  * 改动先写进 state.draft，点“保存设置”才 `PUT /api/settings`；
- * 保存后按生效时机提示：立即 / 下次生成计划 / 下次任务 / 重启后 / 仅保存
+ * 保存后按生效时机提示：立即 / 下次生成计划 / 下次任务 / 重启后
  * （与 `Docs/配置说明.md` 的“生效时机”一节一致）。
  */
 
@@ -26,7 +26,6 @@ const SECTIONS = [
 ];
 
 const OPTIONS = {
-  language: [['zh-CN', '简体中文'], ['en-US', 'English']],
   theme: [['light', '浅色'], ['dark', '深色'], ['system', '跟随系统']],
   density: [['comfortable', '舒适'], ['compact', '紧凑']],
   startView: [['main', '主页面'], ['install', '系统安装'], ['settings', '设置']],
@@ -35,7 +34,6 @@ const OPTIONS = {
 
 /* kind: bool | enum | int | auto-int | path | text */
 const FIELDS = [
-  { section: 'general', key: 'language', kind: 'enum', effect: '仅保存', hint: '当前版本只保存这个值，界面固定简体中文。' },
   { section: 'general', key: 'theme', kind: 'enum', effect: '立即生效' },
   { section: 'general', key: 'density', kind: 'enum', effect: '立即生效' },
   { section: 'general', key: 'rememberWindow', kind: 'bool', effect: '下次启动生效', hint: '关掉后窗口每次都从默认大小开始。' },
@@ -68,7 +66,6 @@ const FIELDS = [
 const FIELD_BY_KEY = new Map(FIELDS.map((field) => [field.key, field]));
 
 const LABELS = {
-  language: '界面语言',
   theme: '主题',
   density: '界面密度',
   rememberWindow: '记住窗口大小和位置',

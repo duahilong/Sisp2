@@ -35,7 +35,6 @@ SECTIONS: tuple[tuple[str, str], ...] = (
 
 DEFAULTS: dict[str, Any] = {
     # 常规
-    "language": "zh-CN",
     "theme": "light",
     "density": "comfortable",
     "rememberWindow": True,
@@ -99,7 +98,6 @@ _BOOL_KEYS = {
 }
 
 _ENUM_KEYS: dict[str, tuple[str, ...]] = {
-    "language": ("zh-CN", "en-US"),
     "theme": ("light", "dark", "system"),
     "density": ("compact", "comfortable"),
     "logLevel": ("debug", "info", "warn", "error"),

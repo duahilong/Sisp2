@@ -27,7 +27,7 @@ def store(tmp_path: Path) -> SettingsStore:
 
 def test_loads_defaults_when_file_missing(store: SettingsStore) -> None:
     settings = store.get()
-    assert settings["language"] == "zh-CN"
+    assert settings["theme"] == "light"
     assert settings["sysDefaultGb"] == 120
     assert settings["dataDefaultGb"] == "auto"
     assert store.get_warnings() == []
@@ -86,7 +86,7 @@ def test_corrupt_file_falls_back_to_defaults(tmp_path: Path) -> None:
     path = tmp_path / "settings.json"
     path.write_text("{ not json", encoding="utf-8")
     store = SettingsStore(path, which=lambda _name: None)
-    assert store.get()["language"] == "zh-CN"
+    assert store.get()["theme"] == "light"
     assert any("无法解析" in warning for warning in store.get_warnings())
 
 
