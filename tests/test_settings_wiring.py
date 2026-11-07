@@ -364,35 +364,22 @@ def test_live_partition_defaults_keeps_auto_for_data() -> None:
     assert wf._live_partition_defaults()["data_size_gb"] is None
 
 
-def test_excluded_names_come_from_settings_only() -> None:
-    """排除名单只剩设置页一个来源，且按 casefold 去重、去空白。"""
-    wf = _controller({"excludedDiskNames": ["Samsung SSD", "samsung ssd", " WD "]})
-    assert wf._excluded_disk_names() == ["Samsung SSD", "WD"]
-
-
-def test_excluded_names_tolerates_broken_values() -> None:
-    """设置里塞了非列表也不能拖死开盘扫描。"""
-    wf = _controller({"excludedDiskNames": "not-a-list"})
-    assert wf._excluded_disk_names() == []
-
-
-def test_settings_excluded_names_hide_disks_at_start() -> None:
-    """设置里的排除名单必须真的让开盘扫描时置灰。"""
+def test_start_scans_without_excluded_names() -> None:
+    """排除名单功能连同设置项一起移除：开盘扫描不再接收任何名单参数。"""
     seen: list[Any] = []
 
-    def scan(names: Any = None) -> list[Any]:
-        seen.append(list(names or []))
+    def scan(*args: Any, **kwargs: Any) -> list[Any]:
+        seen.append((args, kwargs))
         return []
 
     wf = WorkflowController(
         service=SimpleNamespace(allowed_disk_numbers=frozenset({1}), dry_run=True, scan_protected_disks=scan),
         dry_run=True,
         preflight_runner=lambda *, dry_run=False: {"results": []},
-        settings_provider=lambda: {"excludedDiskNames": ["Samsung SSD"]},
         worker_interval=0.0,
     )
     wf.start(dry_run=True)
-    assert seen and seen[0] == ["Samsung SSD"]
+    assert seen == [((), {})]
 
 
 def test_default_system_image_from_settings() -> None:

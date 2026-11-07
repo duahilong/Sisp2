@@ -2,7 +2,7 @@
 
 覆盖两类“设置项终于接上了业务逻辑”的行为：
 
-- ``protectSystemDisk`` / ``blockUnverified`` 决定哪些盘不可选，并且
+- ``protectSystemDisk`` 决定哪些盘不可选，并且
   ``SispService._require_write_allowed`` 在执行层再判一次（纵深防御）；
 - ``typeToConfirm`` 打开时，``WorkflowController.confirm`` 必须拿到匹配的
   确认文本，否则拒绝真实执行。
@@ -85,17 +85,16 @@ def test_offline_disk_stays_protected_even_when_system_protection_is_off() -> No
     assert "硬盘离线" in scanned.protection_reasons
 
 
-def test_block_unverified_rejects_disk_without_identity() -> None:
+def test_disk_without_identity_is_selectable() -> None:
+    """身份门槛已移除：没有 UniqueId/SerialNumber 的盘不再被置灰。
+
+    写盘闸门仍会在执行前重扫一次，并按“盘号 + 容量 + 型号”复核（见下面的
+    闸门用例），所以这不是“什么都不查”。
+    """
     disk = _summary(unique_id=None, serial_number=None)
-    strict = _service(disk)
-    loose = _service(disk, block_unverified=False)
-
-    (strict_disk,) = strict.scan_protected_disks()
-    (loose_disk,) = loose.scan_protected_disks()
-
-    assert strict_disk.is_selectable is False
-    assert any("唯一标识" in reason for reason in strict_disk.protection_reasons)
-    assert loose_disk.is_selectable is True
+    (scanned,) = _service(disk).scan_protected_disks()
+    assert scanned.is_selectable is True
+    assert scanned.protection_reasons == ()
 
 
 # ------------------------------------------------------------------ 执行闸门
@@ -122,12 +121,29 @@ def test_execute_spec_refuses_protected_system_disk() -> None:
     assert "受保护" in str(excinfo.value)
 
 
-def test_execute_spec_refuses_unverified_disk() -> None:
+def test_execute_spec_allows_disk_without_identity() -> None:
+    """无唯一标识的盘也能执行：闸门退回按盘号 + 容量 + 型号复核。"""
+    disk = _summary(unique_id=None, serial_number=None)
+    calls: list[int] = []
+
+    def runner(spec, event):
+        calls.append(int(spec.disk_number))
+        return WorkerResult.dry_run_plan(int(spec.disk_number))
+
+    service = _service(disk, allowed_disk_numbers=[1], real_runner=runner)
+    service.execute_spec(_spec(1, unique_id=None, serial=None))
+    assert calls == [1]
+
+
+def test_execute_spec_refuses_when_weak_identity_differs() -> None:
+    """弱身份也必须比对：容量对不上（等于换了一块盘）就要拒绝。"""
     disk = _summary(unique_id=None, serial_number=None)
     service = _service(disk, allowed_disk_numbers=[1])
+    spec = _spec(1, unique_id=None, serial=None)
+    spec.expected_identity["size_bytes"] = 120 * _GIB
     with pytest.raises(PermissionError) as excinfo:
-        service.execute_spec(_spec(1, unique_id=None, serial=None))
-    assert "UniqueId" in str(excinfo.value)
+        service.execute_spec(spec)
+    assert "不一致" in str(excinfo.value)
 
 
 def test_execute_spec_runs_runner_for_clean_disk() -> None:
@@ -222,7 +238,6 @@ def test_settings_provider_updates_protection_live() -> None:
     """设置页关掉系统盘保护后，无需重启即可重新扫描出可选盘。"""
     settings: dict[str, Any] = {
         "protectSystemDisk": True,
-        "blockUnverified": True,
         "typeToConfirm": True,
     }
     service = _service(_summary(0, is_system=True), allowed_disk_numbers=[0])
@@ -237,11 +252,9 @@ def test_settings_provider_updates_protection_live() -> None:
     assert disk.is_selectable is False
 
     settings["protectSystemDisk"] = False
-    settings["blockUnverified"] = False
     wf._apply_live_safety_flags()
 
     assert service.protect_system_disk is False
-    assert service.block_unverified is False
     (disk,) = service.scan_protected_disks()
     assert disk.is_selectable is True
 
@@ -321,76 +334,7 @@ def test_prepare_without_selection_fails_when_all_protected() -> None:
     assert "没有可操作" in str(excinfo.value)
 
 
-# ------------------------------------------------------- 排除名单（分区/引导旁路）
-def _gate_api(
-    disks: list[dict[str, Any]],
-    settings_patch: dict[str, Any] | None = None,
-    tmp_path: Path | None = None,
-):
-    """构造一个真实 SispService + 真实会话的 WebApi，只为了调 ``_gate``。"""
-    from app.gui_web.api import WebApi
-    from app.modules.settings.service import build_store
-
-    def preflight(*, dry_run: bool = False) -> dict[str, Any]:
-        return {"results": [{"name": "运行前检查", "passed": True, "message": "ok"}]}
-
-    service = SispService(
-        disk_scanner=lambda: list(disks), dry_run=False, allowed_disk_numbers=[1]
-    )
-    wf = _wire(
-        service=service, dry_run=False, preflight_runner=preflight, worker_interval=0.0
-    )
-    wf.start(dry_run=False)
-    store = build_store((tmp_path or Path.cwd()) / "settings.json")
-    if settings_patch:
-        store.update(settings_patch)
-    return WebApi(wf, settings=store)
-
-
-_IDENTITY = {"unique_id": "unique-1", "serial_number": "SN-1", "model": "test disk"}
-
-
-def test_gate_rejects_disk_matching_excluded_names(tmp_path: Path) -> None:
-    """写盘闸门必须吃设置页里的 excludedDiskNames。
-
-    这条旁路曾经完全不生效：网页里的 gate 只传两个参数，
-    ``excluded_names`` 默认成空列表，于是排除名单在“修复引导”这条路上
-    形同虚设（整盘安装走 spec.task_payload，一直是生效的）。
-    """
-    api = _gate_api(
-        [_summary(model="Samsung SSD 980 PRO 1TB")],
-        settings_patch={"excludedDiskNames": ["980 PRO"]},
-        tmp_path=tmp_path,
-    )
-    with pytest.raises(PermissionError) as excinfo:
-        api._gate(1, dict(_IDENTITY))
-    assert "排除名单" in str(excinfo.value)
-
-
-def test_gate_allows_disk_not_matching_excluded_names(tmp_path: Path) -> None:
-    """名单写了但型号不匹配时必须放行，不能误伤。"""
-    api = _gate_api(
-        [_summary(model="test disk")],
-        settings_patch={"excludedDiskNames": ["Some Other SSD"]},
-        tmp_path=tmp_path,
-    )
-    summary = api._gate(1, dict(_IDENTITY))
-    assert summary["disk_number"] == 1
-
-
-def test_gate_without_excluded_names_still_checks_other_rules(tmp_path: Path) -> None:
-    """名单为空不代表闸门不工作：系统盘仍然要被拒。"""
-    api = _gate_api(
-        [_summary(is_system=True)],
-        settings_patch={"excludedDiskNames": []},
-        tmp_path=tmp_path,
-    )
-    with pytest.raises(PermissionError) as excinfo:
-        api._gate(1, dict(_IDENTITY))
-    assert "系统盘" in str(excinfo.value)
-
-
-# --------------------------------------------------- 五道闸门（逐条分支）
+# --------------------------------------------------- 四道闸门（逐条分支）
 def test_gate_service_dry_run_refuses() -> None:
     service = SispService(
         disk_scanner=lambda: [_summary()],
@@ -408,10 +352,22 @@ def test_gate_disk_outside_allowlist_refuses() -> None:
         service.require_disk_writable(1, {"unique_id": "unique-1", "serial_number": "SN-1"})
 
 
-def test_gate_weak_identity_refuses() -> None:
+def test_gate_weak_identity_is_allowed() -> None:
+    """弱身份不再被拒（身份门槛已移除），但仍会与重扫结果比对。"""
     service = _service(_summary(), allowed_disk_numbers=[1])
-    with pytest.raises(PermissionError, match="期望身份缺少"):
-        service.require_disk_writable(1, {"model": "test disk"})
+    summary = service.require_disk_writable(
+        1, {"disk_number": 1, "model": "test disk", "size_bytes": 60 * _GIB}
+    )
+    assert summary["disk_number"] == 1
+
+
+def test_gate_weak_identity_model_mismatch_refuses() -> None:
+    """没有标识可比时，型号对不上仍然算“换了一块盘”。"""
+    service = _service(_summary(), allowed_disk_numbers=[1])
+    with pytest.raises(PermissionError, match="不一致"):
+        service.require_disk_writable(
+            1, {"disk_number": 1, "model": "another disk", "size_bytes": 60 * _GIB}
+        )
 
 
 def test_gate_missing_disk_refuses() -> None:

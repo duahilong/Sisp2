@@ -16,7 +16,7 @@
 载荷来源（重构后）
 ------------------
 
-界面设置（分区默认值、镜像位置、排除的硬盘）+ 向导里每块盘的逐盘覆盖。
+界面设置（分区默认值、镜像位置）+ 向导里每块盘的逐盘覆盖。
 不再有任何“配置文件优先 / 设置优先”的歧义。
 
 约定
@@ -31,7 +31,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any, TypedDict
 
 __all__ = [
@@ -86,7 +86,6 @@ class TaskPayload(TypedDict, total=False):
 
     partition_info: PartitionInfo
     image_info: ImageInfo
-    excluded_disk_names: list[str]
 
 
 def _clean(value: Any) -> bool:
@@ -124,10 +123,9 @@ def build_task_payload(
     *,
     partition_info: Mapping[str, Any] | None = None,
     image_info: Mapping[str, Any] | None = None,
-    excluded_disk_names: Sequence[str] | None = None,
     base: Mapping[str, Any] | None = None,
 ) -> TaskPayload:
-    """构造一份任务载荷：``base`` 打底，其余三节覆盖其上。
+    """构造一份任务载荷：``base`` 打底，其余两节覆盖其上。
 
     ``base`` 用于把已有载荷（例如会话里那份）再叠一层，其余参数优先。
     空值一律丢弃，保证 ``payload == {}`` 表示「什么都没配」。
@@ -135,13 +133,6 @@ def build_task_payload(
     payload: dict[str, Any] = dict(base or {})
     _merge_section(payload, "partition_info", partition_info)
     _merge_section(payload, "image_info", image_info)
-    names = [
-        str(name).strip()
-        for name in (excluded_disk_names or ())
-        if str(name).strip()
-    ]
-    if names:
-        payload["excluded_disk_names"] = names
     return payload  # type: ignore[return-value]
 
 

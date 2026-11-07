@@ -41,7 +41,6 @@ def test_build_drops_blank_values() -> None:
             "data_partitions": [],
         },
         image_info={"image_path": "  ", "image_index": None},
-        excluded_disk_names=["", "  "],
     )
     assert payload == {"partition_info": {"c_size_gb": 60}}
 

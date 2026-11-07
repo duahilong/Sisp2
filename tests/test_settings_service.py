@@ -222,37 +222,6 @@ def test_load_tolerates_utf8_bom(tmp_path: Path) -> None:
     assert loaded.get()["logLevel"] == "debug"
 
 
-# ------------------------------------------------------------------ 列表型设置
-def test_excluded_disk_names_accepts_lines_and_dedupes(store: SettingsStore) -> None:
-    saved = store.update({"excludedDiskNames": "Samsung  SSD\n\nsamsung ssd\nWD Blue"})
-    assert saved["excludedDiskNames"] == ["Samsung SSD", "WD Blue"]
-    reloaded = SettingsStore(store.path, which=lambda _name: None).get()
-    assert reloaded["excludedDiskNames"] == ["Samsung SSD", "WD Blue"]
-
-
-def test_excluded_disk_names_accepts_list_and_keeps_order(store: SettingsStore) -> None:
-    saved = store.update({"excludedDiskNames": ["B disk", "A disk", "b disk"]})
-    assert saved["excludedDiskNames"] == ["B disk", "A disk"]
-
-
-def test_excluded_disk_names_rejects_wrong_type(store: SettingsStore) -> None:
-    with pytest.raises(SettingsError) as excinfo:
-        store.update({"excludedDiskNames": {"a": 1}})
-    assert excinfo.value.field == "excludedDiskNames"
-
-
-def test_excluded_disk_names_limits(store: SettingsStore) -> None:
-    with pytest.raises(SettingsError):
-        store.update({"excludedDiskNames": [f"disk-{index}" for index in range(51)]})
-    with pytest.raises(SettingsError):
-        store.update({"excludedDiskNames": ["x" * 121]})
-
-
-def test_excluded_disk_names_empty_clears(store: SettingsStore) -> None:
-    store.update({"excludedDiskNames": ["A"]})
-    assert store.update({"excludedDiskNames": ""})["excludedDiskNames"] == []
-
-
 # ------------------------------------------------------------------ EFI / 镜像版本
 def test_efi_default_range(store: SettingsStore) -> None:
     for bad in (63, 1025, "abc"):

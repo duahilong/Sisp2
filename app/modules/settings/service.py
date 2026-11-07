@@ -66,11 +66,8 @@ DEFAULTS: dict[str, Any] = {
     "sysTemp": "",
     # 安全
     "protectSystemDisk": True,
-    "dryRunByDefault": False,
-    "blockUnverified": True,
     # 任务结束后是否释放 EFI 分区的临时盘符（关掉时盘符会一直留着）
     "releaseEfiLetter": True,
-    "excludedDiskNames": [],
     "logRetentionDays": 30,
     # 日志
     "logDir": "",
@@ -110,8 +107,6 @@ _BOOL_KEYS = {
     "confirmBeforeStart",
     "typeToConfirm",
     "protectSystemDisk",
-    "dryRunByDefault",
-    "blockUnverified",
     "releaseEfiLetter",
     "extEnabled",
     "extConfirm",
@@ -132,11 +127,8 @@ _INT_RANGES: dict[str, tuple[int, int]] = {
     "logRetentionDays": (1, 3650),
 }
 
-# 列表型设置：每项是一个字符串，用于“怎么输都能收敛”的清洗
-_LIST_LIMITS: dict[str, tuple[int, int]] = {
-    # key: (最多多少条, 单条最长字符)
-    "excludedDiskNames": (50, 120),
-}
+# 列表型设置已经没有了：唯一用过的 excludedDiskNames 连功能一起移除，
+# 多行文本 → 数组的清洗函数（_coerce_name_list）同时删除，不留死代码。
 
 
 class SettingsError(ValueError):
@@ -235,45 +227,7 @@ def coerce_value(key: str, raw: Any) -> Any:
             raise SettingsError(key, f"不能超过 {limit} 个字符")
         return text
 
-    if key in _LIST_LIMITS:
-        return _coerce_name_list(key, raw)
-
     raise SettingsError(key, "未知设置项")
-
-
-def _coerce_name_list(key: str, raw: Any) -> list[str]:
-    """把“列表或整段文本”收敛成干净的字符串列表。
-
-    界面上的控件是一个多行输入框（一行一条），API 调用方也可能直接给数组，
-    所以两种形态都要接：字符串按换行切分，数组逐项转字符串。
-    规则：丢空项、按不区分大小写去重（保留首次出现的原始写法）、限制条数与单条长度。
-    """
-    limit, item_max = _LIST_LIMITS[key]
-    if raw is None:
-        return []
-    if isinstance(raw, str):
-        items: list[Any] = raw.splitlines()
-    elif isinstance(raw, (list, tuple)):
-        items = list(raw)
-    else:
-        raise SettingsError(key, "需要字符串列表")
-
-    cleaned: list[str] = []
-    seen: set[str] = set()
-    for item in items:
-        text = " ".join(str(item or "").split())
-        if not text:
-            continue
-        if len(text) > item_max:
-            raise SettingsError(key, f"单条不能超过 {item_max} 个字符")
-        marker = text.casefold()
-        if marker in seen:
-            continue
-        seen.add(marker)
-        cleaned.append(text)
-    if len(cleaned) > limit:
-        raise SettingsError(key, f"最多 {limit} 条")
-    return cleaned
 
 
 class SettingsStore:

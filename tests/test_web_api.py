@@ -563,11 +563,10 @@ def test_session_without_dry_run_keeps_process_mode(tmp_path: Path) -> None:
 
 # ------------------------------------------------- 分区/引导：真实操作的强身份
 def test_resolve_identity_prefers_caller_then_scans(tmp_path: Path, monkeypatch) -> None:
-    """界面只传盘号时，闸门也要拿到这块盘的 UniqueId/序列号。
+    """界面只传盘号时，闸门也要拿到这块盘的身份（执行前复核用）。
 
-    ``blockUnverified`` 默认打开，闸门要求期望身份里有强标识。以前这里是
-    ``identity or {}``，于是**真实分区操作和修复引导全部被拒**——在打包好的
-    exe 上实测才会发现（演练模式不拦，所以本地测不出来）。
+    以前这里是 ``identity or {}``，于是**真实分区操作和修复引导全部被拒**——
+    在打包好的 exe 上实测才会发现（演练模式不拦，所以本地测不出来）。
     """
     _client, wf = _build_client(tmp_path)
     api = WebApi(wf, settings=build_store(tmp_path / "settings.json"))
@@ -601,7 +600,7 @@ def test_resolve_identity_prefers_caller_then_scans(tmp_path: Path, monkeypatch)
 
 def test_export_settings_writes_file_and_roundtrips(tmp_path: Path) -> None:
     store = build_store(tmp_path / "settings.json")
-    store.update({"sysDefaultGb": 200, "excludedDiskNames": ["A disk"]})
+    store.update({"sysDefaultGb": 200, "sysImageALabel": "A 版本"})
     _client, wf = _build_client(tmp_path)
     api = WebApi(wf, settings=store)
 
@@ -611,7 +610,7 @@ def test_export_settings_writes_file_and_roundtrips(tmp_path: Path) -> None:
     assert target.is_file()
     written = json.loads(target.read_text(encoding="utf-8"))
     assert written["settings"]["sysDefaultGb"] == 200
-    assert written["settings"]["excludedDiskNames"] == ["A disk"]
+    assert written["settings"]["sysImageALabel"] == "A 版本"
 
 
 def test_export_without_path_uses_settings_folder(tmp_path: Path) -> None:

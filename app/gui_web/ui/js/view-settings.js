@@ -63,10 +63,7 @@ const FIELDS = [
   { section: 'system_files', key: 'sysTemp', kind: 'path', pick: 'dir', effect: '下次任务生效', hint: '空 = 系统临时目录；diskpart 脚本也写这里。' },
 
   { section: 'safety', key: 'protectSystemDisk', kind: 'bool', effect: '立即生效', hint: '系统盘/引导盘一律拒绝写。' },
-  { section: 'safety', key: 'dryRunByDefault', kind: 'bool', effect: '下次启动生效', hint: '打开后启动就是演练模式，重启程序才换回真实模式。' },
-  { section: 'safety', key: 'blockUnverified', kind: 'bool', effect: '立即生效', hint: '拿不到 UniqueId/序列号就拒绝写盘。' },
   { section: 'safety', key: 'releaseEfiLetter', kind: 'bool', effect: '下次任务生效', hint: '任务结束后摘掉 EFI 分区的临时盘符；关掉会让它一直占着一个盘符。' },
-  { section: 'safety', key: 'excludedDiskNames', kind: 'list', effect: '立即生效', hint: '一行一个硬盘型号（子串匹配，不区分大小写）；命中的盘禁止安装、分区和修复引导。' },
   { section: 'safety', key: 'logRetentionDays', kind: 'int', effect: '下次清理生效', hint: '超过天数的任务日志会被删。' },
 
   { section: 'logging', key: 'logDir', kind: 'path', pick: 'dir', effect: '重启后生效', hint: '空 = 用户目录下的 Sisp 日志目录。' },
@@ -102,9 +99,6 @@ const LABELS = {
   sysTemp: '临时目录',
   protectSystemDisk: '保护系统盘',
   releaseEfiLetter: '任务结束后释放 EFI 盘符',
-  dryRunByDefault: '默认演练模式',
-  blockUnverified: '身份不明的磁盘禁止写入',
-  excludedDiskNames: '禁止操作的硬盘型号',
   logRetentionDays: '日志保留天数',
   logDir: '日志目录',
   logLevel: '日志级别',
@@ -170,7 +164,6 @@ function renderRow(field, settings) {
 function defaultDesc(field) {
   if (field.kind === 'bool') return '开关类设置，保存后立即按新值判断。';
   if (field.kind === 'path') return `路径类设置，可以点“检测”确认是否存在（${field.pick === 'dir' ? '目录' : '文件'}）。`;
-  if (field.kind === 'list') return '列表类设置，一行一条；保存时自动去掉空行和重复项。';
   if (field.kind === 'text') return field.hint ? '' : '文本设置，存的就是这一串字符。';
   return '';
 }
@@ -197,11 +190,6 @@ function renderControl(field, value) {
   if (field.kind === 'path') {
     return `<button class="tbtn" data-act="pick" data-key="${esc(key)}">浏览…</button>
       <button class="tbtn" data-act="probe" data-key="${esc(key)}">检测</button>`;
-  }
-  if (field.kind === 'list') {
-    const items = Array.isArray(value) ? value : [];
-    return `<textarea class="txtin" rows="4" spellcheck="false" data-key="${esc(key)}"
-      placeholder="一行一个型号，例如：Samsung SSD 980 PRO 1TB">${esc(items.join('\n'))}</textarea>`;
   }
   if (field.kind === 'text') {
     return `<input class="textin" type="text" data-key="${esc(key)}" value="${esc(value)}"
@@ -270,18 +258,6 @@ function bindSettings() {
       let value = input.value === '' ? '' : Number(input.value);
       if (field && field.kind === 'int' && Number.isFinite(value)) value = Math.round(value);
       setDraft(key, value === '' && key === 'dataDefaultGb' ? 'auto' : value);
-      markDirty();
-    });
-  });
-
-  // 列表类（一行一条）：先拆行存成数组，清洗交给后端 coerce_value 做，
-  // 这样“界面输入 → API → 落盘”只有一套归一化规则。
-  $$('#settingsBody textarea[data-key]').forEach((area) => {
-    area.addEventListener('input', () => {
-      setDraft(
-        area.dataset.key,
-        area.value.split('\n').map((line) => line.trim()).filter(Boolean),
-      );
       markDirty();
     });
   });

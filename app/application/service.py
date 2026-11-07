@@ -6,14 +6,14 @@
 
 **安全默认值（最重要的一条）**：``SispService()`` 默认 ``dry_run=True``，
 ``execute_spec()`` 只返回“将要执行什么”的计划，不会调用 diskpart 或 Ghost，
-也不会写任何字节。真实写盘必须同时满足四个条件，缺一即抛 ``PermissionError``：
+也不会写任何字节。真实写盘必须同时满足下列条件，缺一即抛 ``PermissionError``：
 
 1. 构造时显式传入 ``dry_run=False``；
 2. 目标硬盘编号在 ``allowed_disk_numbers`` 白名单里；
-3. ``spec.expected_identity`` 带 UniqueId 或 SerialNumber，且与**现在重新扫描到
-   的那块盘**一致（防止确认后换盘）；
-4. 目标盘此刻仍然“可选”（系统盘/启动盘/含系统盘符/离线/只读/命中排除名单/
-   缺少唯一标识都会被拒），与计划阶段的判定同源，防止绕过确认直接执行；
+3. ``spec.expected_identity`` 与**现在重新扫描到的那块盘**一致（有 UniqueId /
+   SerialNumber 就比标识，没有就比盘号 + 容量 + 型号；防止确认后换盘）；
+4. 目标盘此刻仍然“可选”（系统盘/启动盘/含系统盘符/离线/只读都会被拒），
+   与计划阶段的判定同源，防止绕过确认直接执行；
 5. 注入了 ``real_runner``（真正的执行实现放在仓库外或由调用方提供）。
 
 也就是说，默认构造 + 默认调用一定不会碰磁盘；这不是配置项，而是代码路径本身。
@@ -50,7 +50,7 @@ from app.application.partitions import (
 )
 from app.application.steps import STEP_TITLES
 from app.models import STEP_SKIPPED, StepResult, WorkerResult
-from app.orchestrator import build_worker_disk_identity, identity_matches, is_strong_identity
+from app.orchestrator import build_worker_disk_identity, identity_matches
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -183,15 +183,13 @@ class SispService:
         disk_scanner: Callable[[], list[dict[str, Any]]] | None = None,
         powershell: str | None = None,
         protect_system_disk: bool = True,
-        block_unverified: bool = True,
     ) -> None:
         # 默认 True：只要调用方没明确要求，就永远不写盘。
         self.dry_run = bool(dry_run)
-        # 两个安全开关由界面设置（protectSystemDisk / blockUnverified）驱动。
-        # protect_system_disk=False 只是“允许列出并操作系统盘”，白名单与身份
-        # 校验依旧生效；block_unverified=True 时缺少唯一标识的盘不可选。
+        # 安全开关由界面设置里的 protectSystemDisk 驱动。
+        # protect_system_disk=False 只是“允许列出并操作系统盘”，
+        # 白名单与执行前的身份复核依旧生效。
         self.protect_system_disk = bool(protect_system_disk)
-        self.block_unverified = bool(block_unverified)
         self.allowed_disk_numbers = (
             frozenset(int(number) for number in allowed_disk_numbers)
             if allowed_disk_numbers is not None
@@ -250,22 +248,14 @@ class SispService:
             raise TypeError("硬盘扫描输出格式异常")
         return [_normalize_summary(item) for item in payload if isinstance(item, Mapping)]
 
-    def scan_protected_disks(
-        self,
-        excluded_names: Sequence[str] | None = None,
-    ) -> list[DiskInfo]:
+    def scan_protected_disks(self) -> list[DiskInfo]:
         """扫描并标记保护状态；被保护的盘 ``is_selectable=False``。"""
-        excluded = [
-            str(name).strip().casefold()
-            for name in (excluded_names or ())
-            if str(name).strip()
-        ]
         system_letter = _system_drive_letter()
 
         disks: list[DiskInfo] = []
         for summary in self.scan_disks():
             disk = DiskInfo.from_summary(summary)
-            reasons = self._protection_reasons(disk, excluded, system_letter)
+            reasons = self._protection_reasons(disk, system_letter)
             disks.append(
                 replace(
                     disk,
@@ -279,13 +269,12 @@ class SispService:
     def _protection_reasons(
         self,
         disk: DiskInfo,
-        excluded: Sequence[str] = (),
         system_letter: str | None = None,
     ) -> list[str]:
         """一块盘“不可操作”的全部理由；空列表表示可选。
 
-        ``protect_system_disk`` / ``block_unverified`` 关掉时对应的理由不产生，
-        但离线、只读、排除名单这三种保护永远生效。
+        ``protect_system_disk`` 关掉时系统盘/引导盘/含系统盘符的理由不产生，
+        但离线、只读这两种保护永远生效。
         """
         reasons: list[str] = []
         if self.protect_system_disk:
@@ -300,17 +289,6 @@ class SispService:
             reasons.append("硬盘离线")
         if disk.is_read_only:
             reasons.append("硬盘只读")
-        if self.block_unverified and not is_strong_identity(
-            {"unique_id": disk.unique_id, "serial_number": disk.serial_number}
-        ):
-            reasons.append("缺少硬盘唯一标识（UniqueId/SerialNumber 均为空）")
-
-        model = (disk.model or "").casefold()
-        if model and excluded:
-            for name in excluded:
-                if name and name in model:
-                    reasons.append(f"命中排除名单: {name}")
-                    break
         return list(dict.fromkeys(reasons))
 
     # ------------------------------------------------------------------ 计划
@@ -474,42 +452,36 @@ class SispService:
         self,
         disk_number: int,
         expected_identity: Mapping[str, Any] | None = None,
-        *,
-        excluded_names: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """非整盘任务（分区操作、修复引导）复用的同一条写盘闸门。
 
         判定链与 ``_require_write_allowed`` 完全一致：dry-run → 白名单 →
-        强身份 → **重新扫描后复核身份** → 保护规则。返回最新的硬盘摘要，
+        **重新扫描后复核身份** → 保护规则。返回最新的硬盘摘要，
         调用方据此再决定具体命令，避免“界面上看到的盘”和“实际要动的盘”不是同一块。
         """
         return self._gate_target(
             int(disk_number),
             dict(expected_identity or {}),
-            {"excluded_disk_names": list(excluded_names or ())},
         )
 
     def _require_write_allowed(self, spec: Any) -> None:
-        """真实写盘的五道闸门；任何一道不通都抛 ``PermissionError``。
+        """真实写盘的四道闸门；任何一道不通都抛 ``PermissionError``。
 
-        第 5 道是“目标盘现在仍然可选”：系统盘/启动盘/含系统盘符/离线/只读/
-        命中排除名单/缺少唯一标识（``block_unverified``）一律拒绝。计划阶段
-        已经有同样的判定，这里是执行层的纵深防御，防止绕过 ``confirm()``
-        直接调 ``execute_spec``。
+        第 4 道是“目标盘现在仍然可选”：系统盘/启动盘/含系统盘符/离线/只读
+        一律拒绝。计划阶段已经有同样的判定，这里是执行层的纵深防御，防止绕过
+        ``confirm()`` 直接调 ``execute_spec``。
         """
         self._gate_target(
             int(getattr(spec, "disk_number", 0) or 0),
             dict(getattr(spec, "expected_identity", None) or {}),
-            dict(getattr(spec, "task_payload", None) or {}),
         )
 
     def _gate_target(
         self,
         disk_number: int,
         expected: Mapping[str, Any],
-        payload: Mapping[str, Any],
     ) -> dict[str, Any]:
-        """五道闸门的实现；返回重新扫描到的硬盘摘要。"""
+        """四道闸门的实现；返回重新扫描到的硬盘摘要。"""
         if self.dry_run:
             raise PermissionError(
                 "SispService 处于 dry-run 模式，拒绝执行任何写盘操作；"
@@ -521,26 +493,18 @@ class SispService:
                 f"（当前白名单: {sorted(self.allowed_disk_numbers) or '空'}）"
             )
 
-        if not is_strong_identity(expected):
-            raise PermissionError(
-                f"硬盘 {disk_number} 的期望身份缺少 UniqueId/SerialNumber，拒绝写盘"
-            )
-
         summary = self._find_disk_summary(disk_number)
         if summary is None:
             raise PermissionError(f"硬盘 {disk_number} 当前不存在，拒绝写盘")
         actual = build_worker_disk_identity(summary)
-        if not identity_matches(dict(expected), actual, require_strong=True):
+        # require_strong=False：没有 UniqueId/SerialNumber 的盘也能写，那就按
+        # 盘号 + 容量 + 型号比对；有标识的盘仍逐个比对标识，换盘一样会被挡住。
+        if not identity_matches(dict(expected), actual, require_strong=False):
             raise PermissionError(
                 f"硬盘 {disk_number} 身份与确认时不一致，拒绝写盘"
             )
 
-        excluded = [
-            str(name).strip().casefold()
-            for name in (payload.get("excluded_disk_names") or ())
-            if str(name).strip()
-        ]
-        reasons = self._protection_reasons(DiskInfo.from_summary(summary), excluded)
+        reasons = self._protection_reasons(DiskInfo.from_summary(summary))
         if reasons:
             raise PermissionError(
                 f"硬盘 {disk_number} 受保护，拒绝写盘：{'、'.join(reasons)}"

@@ -126,7 +126,7 @@ class WebApi:
         """启动会话。
 
         ``dry_run`` 省略（``None``）表示“保持进程当前的模式”——GUI 的模式在
-        ``gui_web/main.py`` 里已经按 ``--dry-run`` / ``dryRunByDefault`` 定好了，
+        ``gui_web/main.py`` 里已经按 ``--dry-run`` 定好了，
         界面不该在每次刷新会话时把它改回真实写盘。
         """
         try:
@@ -373,12 +373,11 @@ class WebApi:
     def _resolve_identity(
         self, disk_number: int, identity: dict[str, Any] | None
     ) -> dict[str, Any]:
-        """取这块盘的强身份：调用方给了就用，没给就现场扫一次。
+        """取这块盘的身份：调用方给了就用，没给就现场扫一次。
 
-        ``blockUnverified`` 默认是打开的，写盘闸门要求“期望身份”里有 UniqueId 或
-        序列号；而界面上的修复引导只传盘号。如果不在这里补齐身份，真实操作
-        会一律被拒（写入前复核拿不到可比对的东西）——扫描本身是只读的，补这一下
-        比放宽闸门安全得多。
+        写盘闸门要拿“期望身份”与执行时重扫的结果比对，防止“确认的盘”和
+        “实际要写的盘”不是同一块；而界面上的修复引导只传盘号。扫描本身是只读的，
+        补这一下比放宽闸门安全得多。
         """
         if identity:
             return dict(identity)
@@ -395,30 +394,13 @@ class WebApi:
             "size_display": summary.get("size_display"),
         }
 
-    def _excluded_names(self) -> list[str]:
-        """当前生效的“禁止操作”的硬盘型号名单。
-
-        唯一来源是设置页的 ``excludedDiskNames``（业务配置文件那一层已移除）。
-        去重、丢空项；大小写不在这里处理，``_protection_reasons`` 自己 casefold。
-        """
-        source = self._settings.get().get("excludedDiskNames")
-        names: list[str] = []
-        if isinstance(source, (list, tuple)):
-            names.extend(str(item).strip() for item in source if str(item).strip())
-        return list(dict.fromkeys(names))
-
     def _gate(self, disk_number: int, identity: dict[str, Any]) -> Any:
-        """分区/引导共用的写盘闸门；dry-run 下由各 runner 自己短路。
-
-        ``excluded_names`` 必须带上：``require_disk_writable`` 的第 5 道判定只认
-        入参里的名单，不读全局状态；漏传等于让“排除名单”在分区与修复引导两条
-        旁路上完全失效（整盘安装走的是 ``spec.task_payload``，不受影响）。
-        """
+        """分区/引导共用的写盘闸门；dry-run 下由各 runner 自己短路。"""
         service = self._wf.service
         gate = getattr(service, "require_disk_writable", None)
         if gate is None:  # 测试替身没有该方法时退回“只读扫描”
             return _scan_summary(disk_number)
-        return gate(disk_number, identity, excluded_names=self._excluded_names())
+        return gate(disk_number, identity)
 
     def _service_dry_run(self) -> bool:
         return bool(getattr(self._wf.service, "dry_run", True))

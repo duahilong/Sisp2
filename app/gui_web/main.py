@@ -287,8 +287,8 @@ def build_api(dry_run: bool, settings_path: str | None = None):
 
     store = build_store(settings_path)
     settings = store.get()
-    # 界面里的「演练模式」开关优先于命令行参数
-    effective_dry_run = bool(dry_run) or bool(settings.get("dryRunByDefault"))
+    # 演练模式只由命令行 --dry-run 决定（设置里不再有这个开关）。
+    effective_dry_run = bool(dry_run)
 
     log_dir = str(settings.get("logDir") or "").strip() or None
     level = str(settings.get("logLevel", "info")).lower()
@@ -306,7 +306,6 @@ def build_api(dry_run: bool, settings_path: str | None = None):
             "ghost": settings.get("extGhost"),
         },
         protect_system_disk=bool(settings.get("protectSystemDisk", True)),
-        block_unverified=bool(settings.get("blockUnverified", True)),
         type_to_confirm=bool(settings.get("typeToConfirm", True)),
         # 预检与执行器可选项都从设置里取最新值（改完设置不用重建控制器）。
         settings_provider=store.get,

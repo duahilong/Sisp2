@@ -418,13 +418,12 @@ class WorkflowController:
         partition_defaults: Mapping[str, Any] | None = None,
         tool_paths: Mapping[str, str] | None = None,
         protect_system_disk: bool = True,
-        block_unverified: bool = True,
         type_to_confirm: bool = False,
         settings_provider: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._dry_run = bool(dry_run)
-        # 构造时的 True 是硬上限：--dry-run / dryRunByDefault 启动后，
-        # UI 或 API 只能把会话降级为演练，不能反过来升级为真实写盘。
+        # 构造时的 True 是硬上限：--dry-run 启动后，UI 或 API 只能把会话
+        # 降级为演练，不能反过来升级为真实写盘。
         self._forced_dry_run = bool(dry_run)
         self._worker_interval = max(float(worker_interval), 0.0)
         self._max_parallel = max(int(max_parallel), 1)
@@ -445,10 +444,9 @@ class WorkflowController:
             for key, value in (tool_paths or {}).items()
             if str(value).strip()
         }
-        # 安全开关：protectSystemDisk / blockUnverified 决定哪些盘“不可选”，
+        # 安全开关：protectSystemDisk 决定系统盘/引导盘是否“不可选”，
         # typeToConfirm 决定真实执行前是否必须手输盘号/型号。
         self._protect_system_disk = bool(protect_system_disk)
-        self._block_unverified = bool(block_unverified)
         self._type_to_confirm = bool(type_to_confirm)
         # 界面设置提供者：预检、执行器可选项都从这里取最新设置。
         self._settings_provider = settings_provider
@@ -483,7 +481,6 @@ class WorkflowController:
             allowed_disk_numbers=self._allowed_disk_numbers or (),
             real_runner=runner,
             protect_system_disk=self._protect_system_disk,
-            block_unverified=self._block_unverified,
         )
 
     def _execute_spec(
@@ -517,17 +514,11 @@ class WorkflowController:
             if value != self._protect_system_disk:
                 self._protect_system_disk = value
                 changed = True
-        if "blockUnverified" in settings:
-            value = bool(settings.get("blockUnverified"))
-            if value != self._block_unverified:
-                self._block_unverified = value
-                changed = True
         if "typeToConfirm" in settings:
             self._type_to_confirm = bool(settings.get("typeToConfirm"))
         if changed:
             # 执行层重算保护原因时看的是 service 上的开关，要保持一致。
             self._service.protect_system_disk = self._protect_system_disk
-            self._service.block_unverified = self._block_unverified
 
     def _explicit_allowlist(self) -> frozenset[int] | None:
         """显式白名单优先；也认 ``cli.inject_policy_flags`` 挂上的 ``allow_disks``。"""
@@ -614,25 +605,6 @@ class WorkflowController:
         elif isinstance(data_size, (int, float)) and not isinstance(data_size, bool):
             defaults["data_size_gb"] = data_size
         return defaults
-
-    def _excluded_disk_names(self) -> list[str]:
-        """禁止操作的硬盘型号：设置页的 ``excludedDiskNames``（唯一来源）。
-
-        每次现读，改完设置不必重启。这里按 casefold 去重——服务里的匹配也是
-        casefold 的，同一块盘在名单里写两种大小写不该出两条“命中排除名单”。
-        """
-        source = self._settings().get("excludedDiskNames")
-        names: list[str] = []
-        seen: set[str] = set()
-        if isinstance(source, (list, tuple)):
-            for item in source:
-                name = str(item).strip()
-                marker = name.casefold()
-                if not name or marker in seen:
-                    continue
-                seen.add(marker)
-                names.append(name)
-        return names
 
     def _runner_options(self) -> dict[str, Any]:
         """把界面设置里的执行器可选项挑出来，随任务一起下发。"""
@@ -748,9 +720,8 @@ class WorkflowController:
         ]
         disks: tuple[DiskInfo, ...] = ()
 
-        excluded_names = self._excluded_disk_names()
         try:
-            disks = tuple(self._service.scan_protected_disks(excluded_names))
+            disks = tuple(self._service.scan_protected_disks())
         except Exception as exc:  # noqa: BLE001 - 扫描失败记成阻断项，界面还能打开
             blockers.append(f"硬盘扫描失败：{exc}")
 
@@ -780,11 +751,7 @@ class WorkflowController:
         self._apply_live_safety_flags()
 
         try:
-            disks = tuple(
-                self._service.scan_protected_disks(
-                    self._excluded_disk_names()
-                )
-            )
+            disks = tuple(self._service.scan_protected_disks())
         except Exception as exc:
             raise WorkflowError(f"硬盘扫描失败：{exc}") from exc
 
@@ -969,29 +936,28 @@ class WorkflowController:
             checks.append(
                 CheckItem(
                     key="identity",
-                    label="硬盘强身份",
+                    label="硬盘身份复核",
                     passed=True,
                     message="dry-run 不要求 UniqueId 或 SerialNumber",
                 )
             )
         else:
+            # 身份不再作为“必要条件”（设置里的 blockUnverified 已移除）：
+            # 执行前的闸门会重新扫描并按盘号/容量/型号（有 UniqueId、
+            # SerialNumber 时再比它们）复核，确保“确认的盘”就是“要写的盘”。
             has_identity = _is_strong_identity(identity)
             checks.append(
                 CheckItem(
                     key="identity",
-                    label="硬盘强身份",
-                    passed=has_identity,
+                    label="硬盘身份复核",
+                    passed=True,
                     message=(
-                        "已具备 UniqueId 或 SerialNumber"
+                        "已具备 UniqueId 或 SerialNumber，执行前按标识复核"
                         if has_identity
-                        else "缺少 UniqueId 和 SerialNumber，拒绝写盘"
+                        else "该盘没有 UniqueId/SerialNumber，执行前按盘号+容量+型号复核"
                     ),
                 )
             )
-            if not has_identity:
-                blockers.append(
-                    f"硬盘 {disk.disk_number} 缺少 UniqueId 和 SerialNumber，拒绝写盘"
-                )
 
         letters_complete = all(
             str(drive_letters.get(key) or "").strip() for key in _PLAN_STEP_KEYS

@@ -59,7 +59,7 @@ function bootBodyHtml(report) {
 
   const targets = (report.targets || []).map((target) => {
     const disk = (state.disks || []).find((item) => Number(item.disk_number) === Number(target.disk_number));
-    // 被保护的盘（系统盘 / 排除名单 / 离线 / 只读）不给修复按钮：后端闸门会拒，
+    // 被保护的盘（系统盘 / 启动盘 / 离线 / 只读）不给修复按钮：后端闸门会拒，
     // 这里先拦下来，省掉一次“点了才报错”。
     const locked = disk ? !isSelectable(disk) : false;
     let action = `<span class="dim">${esc(target.reason || '不可修复')}</span>`;
