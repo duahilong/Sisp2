@@ -46,18 +46,18 @@ def test_preflight_without_settings_skips_new_checks(tmp_path) -> None:
 
 
 def test_preflight_reports_missing_configured_tool(tmp_path) -> None:
-    report = _preflight({"ext7z": str(tmp_path / "nope" / "7z.exe")}, tmp_path)
+    report = _preflight({"extGhost": str(tmp_path / "nope" / "ghost64.exe")}, tmp_path)
     item = _check(report, CHECK_TOOLS)
     assert item["passed"] is False
     assert "不存在" in item["message"]
 
 
 def test_preflight_accepts_existing_configured_tool(tmp_path) -> None:
-    tool = tmp_path / "7z.exe"
+    tool = tmp_path / "ghost64.exe"
     tool.write_text("stub", encoding="utf-8")
-    item = _check(_preflight({"ext7z": str(tool)}, tmp_path), CHECK_TOOLS)
+    item = _check(_preflight({"extGhost": str(tool)}, tmp_path), CHECK_TOOLS)
     assert item["passed"] is True
-    assert "7-Zip" in item["message"]
+    assert "ghost64" in item["message"]
 
 
 def test_preflight_reports_missing_system_image(tmp_path) -> None:

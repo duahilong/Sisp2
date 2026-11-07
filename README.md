@@ -41,7 +41,7 @@ exe 的参数与源码运行一致（`--dry-run` / `--serve` / `--settings` 等�
 
 ## 配置
 
-**全部配置都在界面「设置」里**：EFI/系统/数据分区大小、默认镜像位置与版本、禁止操作的硬盘型号、外部工具路径、安全开关。数据分区的文件系统固定为 NTFS（不可选）。
+**全部配置都在界面「设置」里**：EFI/系统/数据分区大小、默认镜像位置与版本、外部工具路径（diskpart / Ghost）、安全开关。数据分区的文件系统固定为 NTFS（不可选）。
 
 设置默认保存于 `%APPDATA%\Sisp\settings.json`（无 `APPDATA` 时为用户目录下 `.config/Sisp/settings.json`）；GUI 可用 `--settings` 指定位置。
 

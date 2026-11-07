@@ -50,13 +50,9 @@ DEFAULTS: dict[str, Any] = {
     # GHO 内部的分区块序号（0 = 用 Ghost 默认的 1）
     "imageDefaultIndex": 0,
     # 外部程序（空 = 用系统自带或 PATH 里的）
-    "extEnabled": True,
-    "extConfirm": False,
     "extDiskpart": "",
-    # 装机只走 Ghost：留空则依次找 <exe 目录>\sw\ghost64.exe 与 PATH 里的 ghost64/ghost32。
+    # 装机只走 Ghost：留空则依次找 PATH 与 System32 里的 ghost64/ghost32。
     "extGhost": "",
-    "extVentoy": "",
-    "ext7z": "",
     # 系统文件：两个具名系统槽位（各存一个 GHO），外加引导/临时目录
     "sysImageA": "",
     "sysImageALabel": "Windows 10",
@@ -78,8 +74,6 @@ DEFAULTS: dict[str, Any] = {
 _PATH_KEYS: dict[str, str] = {
     "extDiskpart": "file",
     "extGhost": "file",
-    "extVentoy": "file",
-    "ext7z": "file",
     "sysImageA": "file",
     "sysImageB": "file",
     "sysBoot": "dir",
@@ -97,8 +91,6 @@ _TEXT_LIMITS: dict[str, int] = {
 _BUILTIN_COMMANDS: dict[str, tuple[str, ...]] = {
     "extDiskpart": ("diskpart",),
     "extGhost": ("ghost64", "ghost64.exe", "ghost32", "ghost32.exe"),
-    "extVentoy": ("Ventoy2Disk", "Ventoy2Disk.exe"),
-    "ext7z": ("7z", "7z.exe"),
 }
 
 _BOOL_KEYS = {
@@ -108,8 +100,6 @@ _BOOL_KEYS = {
     "typeToConfirm",
     "protectSystemDisk",
     "releaseEfiLetter",
-    "extEnabled",
-    "extConfirm",
 }
 
 _ENUM_KEYS: dict[str, tuple[str, ...]] = {
