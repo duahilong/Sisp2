@@ -53,13 +53,11 @@ DEFAULTS: dict[str, Any] = {
     "extGhost": "",
     # 写引导用的 bcdboot.exe；留空则用 System32 里的。
     "extBcdboot": "",
-    # 系统文件：两个具名系统槽位（各存一个 GHO），外加引导/临时目录
+    # 系统文件：两个具名系统槽位（各存一个 GHO）
     "sysImageA": "",
     "sysImageALabel": "Windows 10",
     "sysImageB": "",
     "sysImageBLabel": "Windows 11",
-    "sysBoot": "",
-    "sysTemp": "",
     # 安全
     "protectSystemDisk": True,
     # 任务结束后是否释放 EFI 分区的临时盘符（关掉时盘符会一直留着）
@@ -76,8 +74,6 @@ _PATH_KEYS: dict[str, str] = {
     "extBcdboot": "file",
     "sysImageA": "file",
     "sysImageB": "file",
-    "sysBoot": "dir",
-    "sysTemp": "dir",
     "logDir": "dir",
 }
 
@@ -321,11 +317,6 @@ class SettingsStore:
         data_gb = data.get("dataDefaultGb")
         if isinstance(data_gb, int) and sys_gb + data_gb <= 60:
             raise SettingsError("dataDefaultGb", "C 与 D 的大小之和过小，至少留 60GB 给系统盘")
-
-        temp_dir = str(data.get("sysTemp") or "").strip()
-        log_dir = str(data.get("logDir") or "").strip()
-        if temp_dir and log_dir and Path(temp_dir) == Path(log_dir):
-            raise SettingsError("sysTemp", "临时目录不能与日志目录相同")
 
         # 两个系统槽位是并列的两个“版本”，重了就没得选：同一个 GHO 装两次没有意义，
         # 同名会让向导上两个按钮长得一模一样。

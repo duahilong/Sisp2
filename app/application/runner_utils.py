@@ -98,20 +98,13 @@ def tail(text: str, limit: int = 4000) -> str:
     return "…（前略）\n" + text[-limit:]
 
 
-def runtime_env(options: Mapping[str, Any] | None, log: Any) -> dict[str, str]:
-    """子进程环境：界面里的临时目录优先生效（TMP/TEMP）。"""
-    env = dict(os.environ)
-    configured = to_text((options or {}).get("temp_dir"))
-    if not configured:
-        return env
-    temp_dir = existing_dir(configured)
-    if not temp_dir:
-        log.write(f"临时目录不可用，改用系统默认：{configured}")
-        return env
-    env["TMP"] = temp_dir
-    env["TEMP"] = temp_dir
-    log.write(f"临时目录：{temp_dir}")
-    return env
+def runtime_env() -> dict[str, str]:
+    """子进程环境：直接继承系统环境（``TMP``/``TEMP`` 用系统默认）。
+
+    以前这里会把界面设置的临时目录塞进 ``TMP``/``TEMP``；那个设置项已经移除，
+    子进程统一用系统临时目录，行为与手工在命令行里跑 Ghost/bcdboot 一致。
+    """
+    return dict(os.environ)
 
 
 __all__ = [

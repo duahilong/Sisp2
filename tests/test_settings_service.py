@@ -170,8 +170,11 @@ def test_probe_can_check_a_draft_value(tmp_path: Path) -> None:
 def test_probe_all_covers_every_path_key(store: SettingsStore) -> None:
     probed = store.probe_all()
     assert "extGhost" in probed
-    assert "sysTemp" in probed
-    assert probed["sysTemp"]["state"] == "na"
+    assert "sysImageA" in probed
+    assert probed["sysImageA"]["state"] == "na"
+    # 临时目录 / 引导源目录这两个设置项已移除，不该再出现
+    assert "sysTemp" not in probed
+    assert "sysBoot" not in probed
 
 
 def test_partition_info_bridges_defaults(store: SettingsStore) -> None:
@@ -184,12 +187,6 @@ def test_partition_info_bridges_defaults(store: SettingsStore) -> None:
     info = store.partition_info()
     assert info["c_size_gb"] == 260
     assert info["data_size_gb"] == 900
-
-
-def test_relation_rule_temp_equals_log_rejected(store: SettingsStore) -> None:
-    with pytest.raises(SettingsError) as excinfo:
-        store.update({"sysTemp": "C:/tmp/sisp", "logDir": "C:/tmp/sisp"})
-    assert excinfo.value.field == "sysTemp"
 
 
 def test_default_settings_path_uses_appdata(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

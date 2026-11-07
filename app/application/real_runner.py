@@ -176,7 +176,6 @@ class WindowsDiskRunner:
             diskpart=self.diskpart,
             powershell=self.powershell,
             allow_real_disk=self.allow_real_disk,
-            temp_dir=existing_dir(options.get("temp_dir")),
             env=env,
         )
 
@@ -200,8 +199,8 @@ class WindowsDiskRunner:
             bcdboot=self.bcdboot,
             probe=BootProbe(process, powershell=self.powershell),
         )
-        # ghosterr.txt 落在日志目录（没有就落到本次任务的临时目录）。
-        cwd = existing_dir(self.log_dir) or existing_dir(ctx.options.get("temp_dir"))
+        # ghosterr.txt 落在日志目录；日志目录不可用时交给系统临时目录。
+        cwd = existing_dir(self.log_dir)
         return JobPipeline(
             partition=PartitionPhase(shell),
             system=SystemPhase(
@@ -229,7 +228,7 @@ class WindowsDiskRunner:
         }
         options = dict(getattr(spec, "runner_options", None) or {})
         log = CommandLog(self.log_dir)
-        env = runtime_env(options, log)
+        env = runtime_env()
         started = datetime.now()
         log.write(f"任务开始：disk={disk_number} dry_run=False letters={letters}")
         log.write(f"配置：{json.dumps(payload, ensure_ascii=False)[:2000]}")

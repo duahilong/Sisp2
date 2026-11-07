@@ -77,13 +77,12 @@ def test_boot_target_defaults_to_windows_dir():
     assert target.efi_letter == "E"
     assert target.windows_letter == "F"
     assert target.source == "F:\\Windows"
-    assert target.source_from_settings is False
 
 
-def test_boot_target_prefers_settings_source():
+def test_boot_target_ignores_legacy_boot_source_option():
+    """引导源固定用还原出来的 Windows 目录，旧选项不再生效。"""
     target = BootTarget.from_context(_ctx(options={"boot_source": "D:/boot"}))
-    assert target.source == "D:/boot"
-    assert target.source_from_settings is True
+    assert target.source == "F:\\Windows"
 
 
 def test_boot_target_requires_efi_letter():

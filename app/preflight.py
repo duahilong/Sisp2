@@ -11,8 +11,7 @@
 
 两条设计约定：
 
-- **只读**：本模块不执行任何写操作，最坏情况是启动一次 ``powershell`` 查询版本
-  （``sysTemp`` 目录会被创建，见 ``_add_setting_path_checks``）；
+- **只读**：本模块不执行任何写操作，最坏情况是启动一次 ``powershell`` 查询版本；
 - **不猜业务语义**：“参数够不够用”由 ``prepare()`` 用实际分区大小判断，
   这里只回答“有没有、能不能用”。
 
@@ -56,8 +55,6 @@ OPTIONAL_TOOLS: tuple[tuple[str, str], ...] = (
 SETTING_PATHS: tuple[tuple[str, str, str], ...] = (
     ("sysImageA", "系统 A 镜像", "file"),
     ("sysImageB", "系统 B 镜像", "file"),
-    ("sysBoot", "引导文件目录", "dir"),
-    ("sysTemp", "临时目录", "dir"),
 )
 
 _POWERSHELL_NAMES = ("powershell", "pwsh", "powershell.exe", "pwsh.exe")
@@ -264,10 +261,9 @@ def _add_setting_path_checks(
     add: Callable[[str, bool, str], None],
     settings: Mapping[str, Any],
 ) -> None:
-    """系统文件路径（镜像目录/默认 GHO/引导/临时目录）。
+    """系统文件路径（两个系统槽位的 GHO）。
 
-    ``sysTemp`` 不存在是正常的（执行时会自动创建），其余路径配错了必须报错，
-    否则真实写盘会在半路失败。
+    路径配错了必须报错，否则真实写盘会在半路失败。
     """
     problems: list[str] = []
     present: list[str] = []
@@ -276,14 +272,6 @@ def _add_setting_path_checks(
         if not value:
             continue
         target = Path(value).expanduser()
-        if key == "sysTemp":
-            try:
-                target.mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                problems.append(f"{label}={target} 不可用（{exc}）")
-            else:
-                present.append(f"{label}={target}")
-            continue
         exists = target.is_file() if kind == "file" else target.is_dir()
         kind_label = "文件" if kind == "file" else "目录"
         if exists:

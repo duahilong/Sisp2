@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import threading
 from pathlib import Path
@@ -69,13 +70,6 @@ def test_preflight_reports_missing_system_image(tmp_path) -> None:
     assert "系统 A 镜像" in item["message"]
 
 
-def test_preflight_creates_temp_dir_and_passes(tmp_path) -> None:
-    temp = tmp_path / "sisp-temp" / "nested"
-    item = _check(_preflight({"sysTemp": str(temp)}, tmp_path), CHECK_SETTING_PATHS)
-    assert item["passed"] is True
-    assert temp.is_dir()
-
-
 def test_preflight_rejects_wrong_path_kind(tmp_path) -> None:
     directory = tmp_path / "wim-dir"
     directory.mkdir()
@@ -113,16 +107,18 @@ def test_workflow_maps_settings_to_runner_options() -> None:
         dry_run=True,
         preflight_runner=lambda *, dry_run=False: {"results": []},
         settings_provider=lambda: {
+            # 临时目录 / 引导源目录的设置项已移除：老配置文件里就算还留着，
+            # 也不该再被翻译成执行器选项。
             "sysTemp": r"D:\temp",
             "sysBoot": r"D:\boot",
+            "sysImageA": r"D:\a.gho",
+            "releaseEfiLetter": False,
             "unrelated": "ignored",
         },
     )
     assert wf._runner_options() == {
-        "temp_dir": r"D:\temp",
-        "boot_source": r"D:\boot",
         # 布尔开关总是下发（False 也要传下去，否则关不掉释放行为）
-        "release_efi_letter": True,
+        "release_efi_letter": False,
     }
 
 
@@ -137,10 +133,10 @@ def test_workflow_preflight_receives_settings() -> None:
         service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
         dry_run=True,
         preflight_runner=preflight,
-        settings_provider=lambda: {"sysTemp": r"D:\temp"},
+        settings_provider=lambda: {"sysImageA": r"D:\a.gho"},
     )
     wf._run_preflight()
-    assert seen == [{"sysTemp": r"D:\temp"}]
+    assert seen == [{"sysImageA": r"D:\a.gho"}]
 
 
 def test_workflow_survives_broken_settings_provider() -> None:
@@ -237,11 +233,13 @@ def test_apply_image_uses_ghost_clone() -> None:
     assert not any(part.startswith("-rb") for part in command)
 
 
-def test_write_boot_uses_settings_boot_source() -> None:
+def test_write_boot_ignores_legacy_boot_source_option() -> None:
+    """引导文件目录设置已移除：即使 options 里还带着旧值也不生效。"""
     commands: list[list[str]] = []
     phase = _boot_phase(commands)
     phase.run(_ctx(options={"boot_source": "D:/boot"}))
-    assert commands[0] == ["bcdboot.exe", "D:/boot", "/s", "E:", "/f", "UEFI"]
+    windows = "F:" + chr(92) + "Windows"
+    assert commands[0] == ["bcdboot.exe", windows, "/s", "E:", "/f", "UEFI"]
 
 
 def test_write_boot_defaults_to_windows_dir() -> None:
@@ -252,15 +250,13 @@ def test_write_boot_defaults_to_windows_dir() -> None:
     assert commands[0] == ["bcdboot.exe", windows, "/s", "E:", "/f", "UEFI"]
 
 
-def test_runtime_env_creates_temp_dir(tmp_path) -> None:
-    from app.application.command_log import CommandLog
+def test_runtime_env_inherits_system_temp() -> None:
+    """临时目录设置已移除：子进程直接继承系统 TMP/TEMP。"""
     from app.application.runner_utils import runtime_env
 
-    temp = tmp_path / "scratch"
-    env = runtime_env({"temp_dir": str(temp)}, CommandLog(None))
-    assert temp.is_dir()
-    assert env["TMP"] == str(temp)
-    assert env["TEMP"] == str(temp)
+    env = runtime_env()
+    assert env["TMP"] == os.environ["TMP"]
+    assert env["TEMP"] == os.environ["TEMP"]
 
 
 def test_runner_accepts_runner_options_on_spec(
@@ -305,13 +301,17 @@ def test_runner_accepts_runner_options_on_spec(
         disk_number=1,
         task_payload=payload,
         drive_letters=letters,
+        # 旧的引导源选项即便传进来也不该影响 bcdboot 的命令行
         runner_options={"boot_source": "D:/boot"},
     )
     result = runner.run(spec, threading.Event())
 
+    windows = "F:" + chr(92) + "Windows"
     assert result.success is True, result.error
     assert any("mode=pload" in " ".join(command) for command in process.calls)
-    assert any("D:/boot" in command for command in process.calls)
+    bcdboot = next(command for command in process.calls if "bcdboot.exe" in command[0])
+    assert bcdboot[1] == windows
+    assert not any("D:/boot" in command for command in process.calls)
 
 
 @pytest.mark.parametrize("bad", ["", "   "])
@@ -320,9 +320,9 @@ def test_workflow_ignores_blank_setting_values(bad: str) -> None:
         service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
         dry_run=True,
         preflight_runner=lambda *, dry_run=False: {"results": []},
-        settings_provider=lambda: {"sysTemp": bad},
+        settings_provider=lambda: {"sysImageA": bad, "extGhost": bad},
     )
-    # 布尔开关总是在（默认 True），空字符串项不该混进来
+    # 执行器选项只剩布尔开关：空字符串项不该混进来
     assert wf._runner_options() == {"release_efi_letter": True}
 
 
@@ -331,7 +331,7 @@ def _noop(*_args: Any, **_kwargs: Any) -> WorkerResult:
 
 
 def test_diskpart_script_written_into_configured_temp_dir(tmp_path) -> None:
-    """sysTemp 不只改子进程 TMP/TEMP：自己的 diskpart 脚本也要放进去。"""
+    """DiskpartShell 的 temp_dir 注入缝仍在（生产上不再由设置提供）。"""
     from app.application.command_log import CommandLog
     from app.application.shell import DiskpartShell, ProcessShell
 

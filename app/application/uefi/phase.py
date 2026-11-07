@@ -53,8 +53,6 @@ class UefiBootPhase:
             message = str(exc)
             return PhaseOutcome.failed(PhaseResult.failed("boot", message), message=message)
 
-        if target.source_from_settings:
-            ctx.log.write(f"引导源目录来自界面设置：{target.source}")
         ctx.notify("boot", "running", "写入 UEFI 引导（bcdboot）")
         ctx.log.write(" ".join(command))
 

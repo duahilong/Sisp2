@@ -55,8 +55,6 @@ const FIELDS = [
   { section: 'system_files', key: 'sysImageA', kind: 'path', pick: 'file', effect: '下次任务生效', hint: '系统 A 的 GHO；留空 = 不提供这个版本。' },
   { section: 'system_files', key: 'sysImageBLabel', kind: 'text', effect: '下次任务生效', hint: '向导第 3 步按钮上的名字，例如 Windows 11 23H2。' },
   { section: 'system_files', key: 'sysImageB', kind: 'path', pick: 'file', effect: '下次任务生效', hint: '系统 B 的 GHO；留空 = 不提供这个版本。' },
-  { section: 'system_files', key: 'sysBoot', kind: 'path', pick: 'dir', effect: '下次任务生效', hint: '写引导时用的引导文件来源目录；留空 = 用还原出来的 Windows 目录。' },
-  { section: 'system_files', key: 'sysTemp', kind: 'path', pick: 'dir', effect: '下次任务生效', hint: '空 = 系统临时目录；diskpart 脚本也写这里。' },
 
   { section: 'safety', key: 'protectSystemDisk', kind: 'bool', effect: '立即生效', hint: '系统盘/引导盘一律拒绝写。' },
   { section: 'safety', key: 'releaseEfiLetter', kind: 'bool', effect: '下次任务生效', hint: '任务结束后摘掉 EFI 分区的临时盘符；关掉会让它一直占着一个盘符。' },
@@ -87,8 +85,6 @@ const LABELS = {
   sysImageA: '系统 A 镜像（GHO）',
   sysImageBLabel: '系统 B 名称',
   sysImageB: '系统 B 镜像（GHO）',
-  sysBoot: '引导文件目录',
-  sysTemp: '临时目录',
   protectSystemDisk: '保护系统盘',
   releaseEfiLetter: '任务结束后释放 EFI 盘符',
   logRetentionDays: '日志保留天数',

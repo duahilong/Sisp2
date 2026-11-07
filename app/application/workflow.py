@@ -608,20 +608,14 @@ class WorkflowController:
         return defaults
 
     def _runner_options(self) -> dict[str, Any]:
-        """把界面设置里的执行器可选项挑出来，随任务一起下发。"""
+        """把界面设置里的执行器可选项挑出来，随任务一起下发。
+
+        现在只剩布尔开关：临时目录与引导源目录都已固定用系统默认值，
+        不再作为可选项下发。布尔开关必须显式下发（``False`` 也要传），
+        否则执行器只能看到默认值 ``True``，开关就失效了。
+        """
         settings = self._settings()
-        options: dict[str, Any] = {}
-        for key, target in (
-            ("sysTemp", "temp_dir"),
-            ("sysBoot", "boot_source"),
-        ):
-            value = str(settings.get(key) or "").strip()
-            if value:
-                options[target] = value
-        # 布尔开关必须显式下发：`False` 会被上面的 `if value:` 过滤掉，
-        # 那样执行器只能看到默认值（True），开关就失效了。
-        options["release_efi_letter"] = bool(settings.get("releaseEfiLetter", True))
-        return options
+        return {"release_efi_letter": bool(settings.get("releaseEfiLetter", True))}
 
     def authorize_disks(
         self, disk_numbers: Iterable[int], *, dry_run: bool | None = None
