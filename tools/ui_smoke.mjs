@@ -679,7 +679,7 @@ async function main() {
     if (summary.firstPaint.segments === 0 && summary.firstPaint.tree === 0) {
       problems.push('主页面既没有分区块也没有磁盘节点');
     }
-    if (summary.steps.some((step) => step.settings && step.settings.rows < 20)) {
+    if (summary.steps.some((step) => step.settings && step.settings.rows < 19)) {
       problems.push('设置页渲染的行数过少');
     }
     const extraStep = summary.steps.find((step) => step.step2extra);

@@ -840,16 +840,6 @@ export async function preparePlans() {
 
 async function startInstall() {
   if (!canStart()) return;
-  const askConfirm = state.settings ? state.settings.confirmBeforeStart !== false : true;
-  if (!(state.info && state.info.dry_run) && askConfirm) {
-    const ok = await confirmDialog({
-      title: '开始真实写盘',
-      body: `<p>即将对磁盘 <b>${state.plans.map((item) => item.plan.disk_number).join(' / ')}</b> 重新分区并安装系统。</p>
-        <p style="color:var(--danger);margin-top:8px">开始后无法撤销，请确认这些盘里没有需要保留的数据。</p>`,
-      okText: '开始写盘',
-    });
-    if (!ok) return;
-  }
 
   state.wizard.phase = 'running';
   state.wizard.submittedAt = new Date().toISOString();

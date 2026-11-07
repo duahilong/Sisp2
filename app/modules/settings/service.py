@@ -41,7 +41,6 @@ DEFAULTS: dict[str, Any] = {
     "autoRefresh": True,
     "startView": "main",
     # 安装默认值
-    "confirmBeforeStart": True,
     "sysDefaultGb": 120,
     "efiDefaultMb": 100,
     "dataDefaultGb": "auto",
@@ -88,7 +87,6 @@ _BUILTIN_COMMANDS: dict[str, tuple[str, ...]] = {
 _BOOL_KEYS = {
     "rememberWindow",
     "autoRefresh",
-    "confirmBeforeStart",
     "protectSystemDisk",
     "releaseEfiLetter",
 }
