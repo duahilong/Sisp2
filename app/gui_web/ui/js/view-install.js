@@ -185,7 +185,7 @@ function stepDiskHtml() {
 
   return `<div class="wz-inner">
     <h3 class="wz-h">选择要装系统的硬盘</h3>
-    <p class="wz-p">可以一次选多块盘。系统盘、只读盘、在设置里排除的盘会置灰；真实写盘时后端还会再核一次磁盘身份（UniqueId / 序列号）。</p>
+    <p class="wz-p">可以一次选多块盘。系统盘、只读盘会置灰；真实写盘时后端会重扫一次并复核磁盘身份（有 UniqueId / 序列号就比标识，没有就比盘号 + 容量 + 型号）。</p>
     <div class="selbar">已选 <b id="selCount">${state.wizard.targets.length}</b> 块
       <button class="lnk" id="selAll">全选可安装</button>
       <button class="lnk" id="selNone">清空</button>
