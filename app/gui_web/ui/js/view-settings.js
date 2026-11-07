@@ -7,7 +7,8 @@
  * `settings.DEFAULTS` 的键逐个核对，后端新增设置而前端漏了会直接测试失败。
  *
  * 改动先写进 state.draft，点“保存设置”才 `PUT /api/settings`；
- * 保存后按三类生效时机提示：立即 / 下次任务 / 下次启动（见 Docs/配置说明.md）。
+ * 保存后按生效时机提示：立即 / 下次生成计划 / 下次任务 / 重启后 / 仅保存
+ * （与 `Docs/配置说明.md` 的“生效时机”一节一致）。
  */
 
 import { api, ApiError } from './api.js';
@@ -34,7 +35,7 @@ const OPTIONS = {
 
 /* kind: bool | enum | int | auto-int | path | text */
 const FIELDS = [
-  { section: 'general', key: 'language', kind: 'enum', effect: '重启后生效', hint: '目前只切换语言标记，界面文案仍是中文。' },
+  { section: 'general', key: 'language', kind: 'enum', effect: '仅保存', hint: '当前版本只保存这个值，界面固定简体中文。' },
   { section: 'general', key: 'theme', kind: 'enum', effect: '立即生效' },
   { section: 'general', key: 'density', kind: 'enum', effect: '立即生效' },
   { section: 'general', key: 'rememberWindow', kind: 'bool', effect: '下次启动生效', hint: '关掉后窗口每次都从默认大小开始。' },
@@ -48,8 +49,8 @@ const FIELDS = [
   { section: 'install', key: 'dataDefaultGb', kind: 'auto-int', effect: '下次生成计划生效', hint: '“自动”= 剩余空间全给数据分区。' },
   { section: 'install', key: 'imageDefaultIndex', kind: 'int', effect: '下次生成计划生效', hint: 'GHO 里的分区块序号（不是系统版本）；0 = 交给 Ghost 挑第一个。' },
 
-  { section: 'external', key: 'extGhost', kind: 'path', pick: 'file', effect: '下次任务生效', hint: '空 = 依次找 PATH 与 System32 里的 ghost64 / ghost32。' },
-  { section: 'external', key: 'extBcdboot', kind: 'path', pick: 'file', effect: '下次任务生效', hint: '空 = 依次找 PATH 与 System32 里的 bcdboot。' },
+  { section: 'external', key: 'extGhost', kind: 'path', pick: 'file', effect: '重启后生效', hint: '空 = 依次找 PATH 与 System32 里的 ghost64 / ghost32。' },
+  { section: 'external', key: 'extBcdboot', kind: 'path', pick: 'file', effect: '重启后生效', hint: '空 = 依次找 PATH 与 System32 里的 bcdboot。' },
 
   { section: 'system_files', key: 'sysImageALabel', kind: 'text', effect: '下次任务生效', hint: '向导第 3 步按钮上的名字，例如 Windows 10 22H2。' },
   { section: 'system_files', key: 'sysImageA', kind: 'path', pick: 'file', effect: '下次任务生效', hint: '系统 A 的 GHO；留空 = 不提供这个版本。' },
@@ -61,7 +62,7 @@ const FIELDS = [
   { section: 'safety', key: 'logRetentionDays', kind: 'int', effect: '下次清理生效', hint: '超过天数的任务日志会被删。' },
 
   { section: 'logging', key: 'logDir', kind: 'path', pick: 'dir', effect: '重启后生效', hint: '空 = 用户目录下的 Sisp 日志目录。' },
-  { section: 'logging', key: 'logLevel', kind: 'enum', effect: '立即生效' },
+  { section: 'logging', key: 'logLevel', kind: 'enum', effect: '重启后生效' },
 ];
 
 const FIELD_BY_KEY = new Map(FIELDS.map((field) => [field.key, field]));

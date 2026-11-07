@@ -34,7 +34,7 @@ GUI 默认监听 `127.0.0.1:8765`；可用 `--host`、`--port` 改变监听参�
 ```powershell
 python -m pip install -r requirements-build.txt
 python packaging/build.py
-# → dist/Sisp2.exe（图形界面，约 18 MB）
+# → dist/Sisp2.exe（图形界面，约 22 MB）
 ```
 
 exe 的参数与源码运行一致（`--dry-run` / `--serve` / `--settings` 等）；设置保存在 `%APPDATA%\Sisp`，没有额外的配置文件要维护。细节（提权、日志位置、体积、未签名等限制）见[打包说明](Docs/打包与分发.md)。
