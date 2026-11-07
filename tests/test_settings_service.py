@@ -69,11 +69,11 @@ def test_int_range_validation(store: SettingsStore) -> None:
 
 
 def test_bool_coercion() -> None:
-    assert coerce_value("typeToConfirm", "false") is False
-    assert coerce_value("typeToConfirm", "ON") is True
-    assert coerce_value("typeToConfirm", 0) is False
+    assert coerce_value("rememberWindow", "false") is False
+    assert coerce_value("rememberWindow", "ON") is True
+    assert coerce_value("rememberWindow", 0) is False
     with pytest.raises(SettingsError):
-        coerce_value("typeToConfirm", "maybe")
+        coerce_value("rememberWindow", "maybe")
 
 
 def test_data_default_accepts_auto_and_number() -> None:

@@ -42,7 +42,6 @@ DEFAULTS: dict[str, Any] = {
     "startView": "main",
     # 安装默认值
     "confirmBeforeStart": True,
-    "typeToConfirm": True,
     "sysDefaultGb": 120,
     "efiDefaultMb": 100,
     "dataDefaultGb": "auto",
@@ -92,7 +91,6 @@ _BOOL_KEYS = {
     "rememberWindow",
     "autoRefresh",
     "confirmBeforeStart",
-    "typeToConfirm",
     "protectSystemDisk",
     "releaseEfiLetter",
 }

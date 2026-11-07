@@ -520,8 +520,6 @@ table.grid{width:100%;border-collapse:separate;border-spacing:0;font-size:12px}
 .dt{font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:6px}
 .dm{display:block;font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dbar{height:6px;display:flex;border-radius:2px;overflow:hidden;margin-top:6px;background:#EEF2F7}
-.dright{flex:none;text-align:right;font-size:10.8px;color:var(--faint);max-width:170px;line-height:1.5}
-.dright b{display:block;font-family:var(--mono);font-size:11.5px;color:var(--ink2);font-weight:600}
 .tag{height:16px;line-height:16px;padding:0 5px;border-radius:2px;font-size:10px;font-family:var(--mono);font-weight:400;background:var(--ok-bg);color:var(--ok)}
 .tag.no{background:#EEF2F7;color:var(--muted)}
 
@@ -595,51 +593,37 @@ table.grid{width:100%;border-collapse:separate;border-spacing:0;font-size:12px}
 .vcard ul{margin:8px 0 0;padding:0;list-style:none;display:flex;flex-wrap:wrap;gap:4px}
 .vcard li{border:1px solid var(--line2);background:var(--panel2);border-radius:2px;padding:0 5px;height:17px;line-height:15px;font-family:var(--mono);font-size:10px;color:var(--faint)}
 
-/* 步骤 4：确认 */
-.sum{border:1px solid var(--line);border-radius:3px;overflow:hidden;max-width:780px}
-.sum table{width:100%;border-collapse:collapse;font-size:12px}
-.sum th{background:var(--chrome);height:22px;padding:0 10px;text-align:left;font-size:10.5px;letter-spacing:.04em;color:var(--muted);font-weight:600;border-bottom:1px solid var(--line)}
-.sum td{height:27px;padding:0 10px;border-bottom:1px solid #F0F4F8}
-.sum tr:last-child td{border-bottom:none}
-.sum td.k{width:96px;color:var(--muted)}
-.sum td.v{font-weight:600}
+/* 步骤 4：确认（两列自适应卡片 + 一行危险提示） */
+.wz-wide{max-width:1120px}
+.diskgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:10px;margin-top:12px}
+.pcard{border:1px solid var(--line);border-radius:4px;background:var(--panel);padding:10px 12px}
+.pcard-h{display:flex;align-items:baseline;gap:8px;padding-bottom:6px;border-bottom:1px solid #F0F4F8;min-width:0}
+.pcard-h .pn{font-size:12.5px;font-weight:700;color:var(--ink);white-space:nowrap}
+.pcard-h .pm{font-size:11px;color:var(--muted);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ptable{margin-top:2px}
+.pline{display:flex;align-items:center;gap:8px;height:26px;font-size:12px;border-bottom:1px solid #F4F7FA;min-width:0}
+.ptable .pline:last-child{border-bottom:none}
+.pln{color:var(--ink2);white-space:nowrap}
+.pls{margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--muted);white-space:nowrap}
+.lbadge.ghost{background:transparent;border:1px dashed var(--line2);color:var(--faint)}
+.pcard-f{display:flex;align-items:center;gap:8px;margin-top:5px;font-size:11.5px;color:var(--muted);min-width:0}
+.pcard-f .pmode{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--faint);white-space:nowrap}
+.warnline{margin:12px 0 0;align-items:center;flex-wrap:wrap}
+.warnline b{color:#7E241D}
+.warnline details{flex-basis:100%;margin-top:2px}
+.warnline summary{cursor:pointer;font-size:11.5px;color:#8A5A28}
+.warnline ul{margin:6px 0 0;padding:0 0 0 2px;list-style:none}
+.warnline li{font-size:11.5px;line-height:1.7;border-top:1px solid #F0DEDB;padding-top:3px;margin-top:3px}
+.warnline li:first-child{border-top:0;padding-top:0;margin-top:0}
 .checkrow{display:flex;align-items:flex-start;gap:8px;margin-top:13px;font-size:12px;color:var(--ink2);line-height:1.6;cursor:pointer}
 .checkrow input{margin-top:3px;width:14px;height:14px;accent-color:var(--accent)}
 .wz-startrow{display:flex;align-items:center;gap:12px;margin-top:18px}
-.startbtn{height:34px;padding:0 28px;font-size:13.5px;border-radius:3px}
-.startbtn:disabled{background:#CBD8E7;border-color:#BCCBDD;color:#fff;opacity:.85;box-shadow:none}
 .wz-startnote{font-size:11.5px;color:var(--faint)}
 
-/* 步骤 4：危险操作提示 */
-.dangeralert{
-  display:flex;gap:12px;margin-top:14px;padding:14px 16px;max-width:780px;
-  border:1px solid #E0A9A2;border-radius:4px;
-  background:linear-gradient(#FDF3F1,#FBE5E1);
-  box-shadow:inset 0 1px 0 #fff,0 1px 3px rgba(173,36,28,.08);
-}
-.da-ico{
-  flex:none;width:24px;height:24px;margin-top:1px;border-radius:50%;background:var(--danger);color:#fff;
-  font-size:15px;font-weight:700;line-height:24px;text-align:center;
-  box-shadow:0 1px 2px rgba(140,26,20,.35);
-}
-.da-body{min-width:0;flex:1}
-.da-t{font-size:14px;font-weight:700;color:#8E1C15;line-height:1.5}
-.da-t em{
-  font-style:normal;color:var(--danger);
-  text-decoration:underline;text-decoration-thickness:1.5px;text-underline-offset:2px;
-}
-.da-s{margin-top:5px;font-size:12px;line-height:1.75;color:#94443C}
-.da-s strong{color:#7E241D;font-weight:700}
-.da-list{
-  margin:9px 0 0;padding:8px 11px;list-style:none;border-radius:3px;
-  border:1px dashed #DFB2AC;background:rgba(255,255,255,.62);
-  font-size:11.5px;line-height:1.8;color:#7C4139;
-}
-.da-list li+li{border-top:1px solid #F0DEDB;margin-top:3px;padding-top:3px}
-.da-list b{color:#6E211B}
+/* 步骤 4：勾选确认 */
 .da-lost{display:block;color:#9A5F57;font-family:var(--mono);font-size:11px;margin-top:1px;word-break:break-all}
 .ackbar{
-  display:flex;align-items:flex-start;gap:9px;margin-top:12px;padding:11px 13px;max-width:780px;
+  display:flex;align-items:flex-start;gap:9px;margin-top:12px;padding:11px 13px;max-width:1120px;
   border:1.5px solid #D9E2EC;border-radius:4px;background:#fff;cursor:pointer;
   font-size:12.2px;line-height:1.6;color:var(--ink2);
   transition:border-color .12s,background .12s;
@@ -825,7 +809,6 @@ input.confirm.bad{border-color:var(--danger);box-shadow:0 0 0 2px var(--danger-b
 :root[data-theme="dark"] .chart,
 :root[data-theme="dark"] .log,
 :root[data-theme="dark"] .plog{background:#131C25}
-:root[data-theme="dark"] .dangeralert{background:linear-gradient(#2A1B19,#241614);border-color:#5A2E28}
 :root[data-theme="dark"] .ackbar{background:var(--panel)}
 
 /* 密度：设置里的 density 落到 <html data-density="compact"> */

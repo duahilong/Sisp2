@@ -1,11 +1,10 @@
-"""写盘闸门与“危险操作需输入确认”的回归测试。
+"""写盘闸门与确认流程的回归测试。
 
-覆盖两类“设置项终于接上了业务逻辑”的行为：
+覆盖两类行为：
 
 - ``protectSystemDisk`` 决定哪些盘不可选，并且
   ``SispService._require_write_allowed`` 在执行层再判一次（纵深防御）；
-- ``typeToConfirm`` 打开时，``WorkflowController.confirm`` 必须拿到匹配的
-  确认文本，否则拒绝真实执行。
+- 确认只需要界面勾选：``WorkflowController.confirm`` 不再要求额外输入盘号。
 """
 
 from __future__ import annotations
@@ -158,7 +157,7 @@ def test_execute_spec_runs_runner_for_clean_disk() -> None:
     assert calls == [1]
 
 
-# ------------------------------------------------------------------ 输入确认
+# ------------------------------------------------------------------ 确认授权
 # 计划会按 payload 重算“镜像能不能装机”（后缀 + 存在性 + Ghost 文件头），
 # 所以这里要一个真实存在、文件头合法的 GHO 占位文件。
 _FAKE_IMAGE_PATH = Path(tempfile.gettempdir()) / "sisp-test-fake-image.GHO"
@@ -187,13 +186,12 @@ def _wire(**kwargs: Any) -> WorkflowController:
     return WorkflowController(**kwargs)
 
 
-def _controller(type_to_confirm: bool) -> tuple[WorkflowController, list[str]]:
+def _controller() -> tuple[WorkflowController, list[str]]:
     service = _service(_summary(), allowed_disk_numbers=[1])
     wf = _wire(
         service=service,
         dry_run=False,
         preflight_runner=_preflight,
-        type_to_confirm=type_to_confirm,
         worker_interval=0.0,
     )
     wf.start(dry_run=False)
@@ -202,31 +200,9 @@ def _controller(type_to_confirm: bool) -> tuple[WorkflowController, list[str]]:
     return wf, [job.id for job in jobs]
 
 
-def test_confirm_requires_text_when_type_to_confirm_on() -> None:
-    wf, job_ids = _controller(type_to_confirm=True)
-    with pytest.raises(WorkflowError) as excinfo:
-        wf.confirm(job_ids)
-    assert "输入" in str(excinfo.value)
-
-
-def test_confirm_rejects_mismatched_text() -> None:
-    wf, job_ids = _controller(type_to_confirm=True)
-    with pytest.raises(WorkflowError) as excinfo:
-        wf.confirm(job_ids, confirm_text="9")
-    assert "不匹配" in str(excinfo.value)
-
-
-@pytest.mark.parametrize("text", ["1", " disk 1 ", "硬盘1", "TEST DISK"])
-def test_confirm_accepts_disk_number_or_model(text: str) -> None:
-    wf, job_ids = _controller(type_to_confirm=True)
-    wf.confirm(job_ids, confirm_text=text)
-    jobs = wf.wait_all(timeout=5)
-    assert jobs
-    assert all(job.status.value != "waiting_confirmation" for job in jobs)
-
-
-def test_confirm_without_text_when_gate_disabled() -> None:
-    wf, job_ids = _controller(type_to_confirm=False)
+def test_confirm_starts_jobs_without_extra_text() -> None:
+    """确认只需要勾选；多盘场景下不再要求逐盘输入盘号。"""
+    wf, job_ids = _controller()
     wf.confirm(job_ids)
     jobs = wf.wait_all(timeout=5)
     assert jobs
@@ -238,7 +214,6 @@ def test_settings_provider_updates_protection_live() -> None:
     """设置页关掉系统盘保护后，无需重启即可重新扫描出可选盘。"""
     settings: dict[str, Any] = {
         "protectSystemDisk": True,
-        "typeToConfirm": True,
     }
     service = _service(_summary(0, is_system=True), allowed_disk_numbers=[0])
     wf = _wire(
@@ -257,29 +232,6 @@ def test_settings_provider_updates_protection_live() -> None:
     assert service.protect_system_disk is False
     (disk,) = service.scan_protected_disks()
     assert disk.is_selectable is True
-
-
-def test_confirm_follows_live_type_to_confirm_setting() -> None:
-    settings: dict[str, Any] = {"typeToConfirm": True}
-    service = _service(_summary(), allowed_disk_numbers=[1])
-    wf = _wire(
-        service=service,
-        dry_run=False,
-        preflight_runner=_preflight,
-        type_to_confirm=False,
-        worker_interval=0.0,
-        settings_provider=lambda: dict(settings),
-    )
-    wf.start(dry_run=False)
-    jobs = wf.submit(wf.prepare([1], dry_run=False), require_confirmation=True)
-    job_ids = [job.id for job in jobs]
-
-    with pytest.raises(WorkflowError):
-        wf.confirm(job_ids)
-
-    settings["typeToConfirm"] = False
-    wf.confirm(job_ids)
-    assert all(job.status.value != "waiting_confirmation" for job in wf.wait_all(timeout=5))
 
 
 def test_refresh_disks_applies_live_protection_setting() -> None:
@@ -398,7 +350,7 @@ def test_gate_happy_path_returns_fresh_summary() -> None:
 
 
 # --------------------------------------- 确认时重新授权（刷新页面不再被白名单挡住）
-def _gui_controller(*, type_to_confirm: bool = True) -> WorkflowController:
+def _gui_controller() -> WorkflowController:
     """模拟 GUI：没有显式白名单，授权完全来自 prepare/confirm 的隐式加入。"""
     service = SispService(
         disk_scanner=lambda: [_summary()],
@@ -409,7 +361,6 @@ def _gui_controller(*, type_to_confirm: bool = True) -> WorkflowController:
         service=service,
         dry_run=False,
         preflight_runner=_preflight,
-        type_to_confirm=type_to_confirm,
         worker_interval=0.0,
     )
     controller.start(dry_run=False)
@@ -427,20 +378,8 @@ def test_confirm_regrants_allowlist_after_session_restart() -> None:
     controller.start(dry_run=False)  # 模拟页面刷新
     assert controller.service.allowed_disk_numbers == frozenset()
 
-    controller.confirm([jobs[0].id], confirm_text="1")
+    controller.confirm([jobs[0].id])
 
     finished = controller.wait_all(timeout=5)
     assert all(job.status.value != "waiting_confirmation" for job in finished)
     assert controller.service.allowed_disk_numbers == frozenset({1})
-
-
-def test_confirm_without_text_does_not_grant_allowlist() -> None:
-    """确认文本不对就不该产生授权（否则等于把闸门绕过）。"""
-    controller = _gui_controller()
-    jobs = controller.submit(controller.prepare([1], dry_run=False), require_confirmation=True)
-    controller.start(dry_run=False)
-
-    with pytest.raises(WorkflowError):
-        controller.confirm([jobs[0].id])
-
-    assert controller.service.allowed_disk_numbers == frozenset()

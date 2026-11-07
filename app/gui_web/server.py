@@ -130,7 +130,7 @@ def create_app(
     @app.post("/api/confirm")
     def confirm(body: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = body or {}
-        return api.confirm(payload.get("job_ids"), confirm_text=payload.get("confirm_text"))
+        return api.confirm(payload.get("job_ids"))
 
     @app.post("/api/cancel")
     def cancel(body: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -306,7 +306,6 @@ def build_api(dry_run: bool, settings_path: str | None = None):
             "bcdboot": settings.get("extBcdboot"),
         },
         protect_system_disk=bool(settings.get("protectSystemDisk", True)),
-        type_to_confirm=bool(settings.get("typeToConfirm", True)),
         # 预检与执行器可选项都从设置里取最新值（改完设置不用重建控制器）。
         settings_provider=store.get,
     )

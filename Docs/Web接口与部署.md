@@ -35,7 +35,7 @@ python -m app.gui_web.main --serve --port 8765
 | `GET /api/disks` | 重扫硬盘 |
 | `POST /api/prepare` | `{selection, dry_run}`；selection 为盘号数组或盘号到覆盖对象的映射（每盘覆盖支持 `c_size`、`data_size`、`data_partitions`、`win_gho`、`image_index`）；省略 selection 表示「本次扫描里所有可选定的盘」，显式传空数组仍然报错（`E_PREPARE`） |
 | `POST /api/submit` | 登记等待确认任务 |
-| `POST /api/confirm` | `{job_ids, confirm_text?}`；`typeToConfirm` 开启时 `confirm_text` 必须是盘号或磁盘型号 |
+| `POST /api/confirm` | `{job_ids}`；把等待确认的任务放行（授权来自界面上的勾选，不需要额外文本）|
 | `POST /api/cancel` | `{job_id}`，协作式取消 |
 | `GET /api/jobs` | 任务列表（首屏兜底，SSE 未连上时也能画出进度） |
 | `GET /api/jobs/{job_id}` | 单任务查询（含 `progress`） |

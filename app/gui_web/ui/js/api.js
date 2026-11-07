@@ -61,7 +61,7 @@ export const api = {
   // 计划与任务
   prepare: (selection, dryRun) => post('/api/prepare', { selection, dry_run: dryRun }),
   submit: () => post('/api/submit'),
-  confirm: (jobIds, confirmText) => post('/api/confirm', { job_ids: jobIds, confirm_text: confirmText }),
+  confirm: (jobIds) => post('/api/confirm', { job_ids: jobIds }),
   cancel: (jobId) => post('/api/cancel', jobId ? { job_id: jobId } : {}),
   jobs: () => get('/api/jobs'),
   job: (jobId) => get(`/api/jobs/${encodeURIComponent(jobId)}`),

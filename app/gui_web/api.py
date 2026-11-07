@@ -168,13 +168,9 @@ class WebApi:
             return err("E_SUBMIT", str(exc))
         return ok([job.to_dict() for job in jobs])
 
-    def confirm(
-        self,
-        job_ids: list[str] | None = None,
-        confirm_text: str | None = None,
-    ) -> dict[str, Any]:
+    def confirm(self, job_ids: list[str] | None = None) -> dict[str, Any]:
         try:
-            jobs = self._wf.confirm(job_ids, confirm_text=confirm_text)
+            jobs = self._wf.confirm(job_ids)
         except Exception as exc:  # noqa: BLE001
             return err("E_CONFIRM", str(exc))
         return ok([job.to_dict() for job in jobs])

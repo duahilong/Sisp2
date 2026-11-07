@@ -194,6 +194,15 @@ async function main() {
     await client.send('Page.enable');
     await client.send('Runtime.enable');
     await client.send('Log.enable');
+    // async 函数里抛出的错误不会进 Runtime.exceptionThrown，但它恰好是“页面卡在
+    // 正在生成执行计划…”这类 silent 故障的典型原因，所以单独收集一次。
+    await client.send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `window.__rejections = [];
+        window.addEventListener('unhandledrejection', (event) => {
+          const reason = event.reason;
+          window.__rejections.push(String((reason && (reason.stack || reason.message)) || reason));
+        });`,
+    });
     await client.send('Emulation.setDeviceMetricsOverride', {
       width: WIDTH, height: HEIGHT, deviceScaleFactor: 1, mobile: false,
     });
@@ -602,9 +611,9 @@ async function main() {
       let planReady = false;
       for (let i = 0; i < 100 && !planReady; i += 1) {
         await sleep(200);
-        planReady = await evaluate(`Boolean(document.querySelector('#startBtn')) || Boolean(document.querySelector('#wzBody .warnbox'))`);
+        planReady = await evaluate(`Boolean(document.querySelector('#wzBody .pcard')) || Boolean(document.querySelector('#wzBody .warnbox'))`);
       }
-      if (!planReady) problems.push('第 4 步没等到执行计划（20 秒内既没有 #startBtn 也没有错误提示）');
+      if (!planReady) problems.push('第 4 步没等到执行计划（20 秒内既没有计划卡片也没有错误提示）');
       await sleep(300);
       summary.shots.push(await shoot('07-install-step4'));
       summary.steps.push({
@@ -612,8 +621,9 @@ async function main() {
           const body = document.querySelector('#wzBody') || { innerText: '' };
           const text = String(body.innerText || '');
           return JSON.stringify({
-            rows: document.querySelectorAll('#wzBody .sum table tr').length,
-            start: (document.querySelector('#startBtn') || {}).disabled,
+            cards: document.querySelectorAll('#wzBody .pcard').length,
+            partRows: document.querySelectorAll('#wzBody .pcard .pline').length,
+            start: (document.querySelector('#wzNext') || {}).disabled,
             error: (document.querySelector('#wzBody .warnbox') || {}).innerText || '',
             planDataRows: (text.match(/数据分区/g) || []).length,
             planUnalloc: text.indexOf('未分配') >= 0,  // 永远是 false：最后一项吃满
@@ -713,6 +723,12 @@ async function main() {
       if (!step4.planLetters) problems.push('第 4 步没有显示计划盘符');
       if (step4.planUnalloc) problems.push('第 4 步不该出现“未分配”（最后一个分区永远吃满）');
       if (!step4.planAuto) problems.push('第 4 步应把最后一个分区显示为“剩余空间（约 X GB）”');
+    }
+
+    const rejections = JSON.parse(await evaluate(`JSON.stringify(window.__rejections || [])`));
+    summary.rejections = rejections;
+    for (const item of rejections) {
+      problems.push(`未处理的 Promise 拒绝: ${String(item).split('\n')[0]}`);
     }
 
     console.log(JSON.stringify({ ok: problems.length === 0, problems, ...summary }, null, 2));

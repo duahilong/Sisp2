@@ -112,8 +112,7 @@ function renderFoot() {
     else if (!state.plans.length) reason = reason || '正在生成执行计划…';
     else if (!state.plans.every((item) => item.plan.executable)) reason = reason || '有阻断项，先解决再开始';
   }
-  if (step === 4 && !state.wizard.ack) reason = reason || '请勾选“我明白这些分区会被删除”';
-  if (step === 4 && needsTypedConfirm() && !confirmTextOk()) reason = reason || '请按提示输入确认文本';
+  if (step === 4 && !state.wizard.ack) reason = reason || '请先勾选“我明白…会被全部删除”的确认框';
 
   next.disabled = Boolean(reason);
   next.title = reason || '';
@@ -127,7 +126,7 @@ function hintText(step) {
   if (step === 3) return images.loading ? '正在读取系统版本…' : '每块盘选一个系统版本，装完再写 UEFI 引导';
   if (step === 4) return state.info && state.info.dry_run
     ? '当前是演练模式：点开始只会走一遍计划，不会真的写盘'
-    : '点开始后先做五道安全检查，任何一道不通过都会拒绝写盘';
+    : '点开始后先跑一轮预检，任何一项不通过都会拒绝写盘';
   return '';
 }
 
@@ -167,19 +166,16 @@ function stepDiskHtml() {
     if (picked) cls.push('on');
     if (!selectable) cls.push('off');
     const bars = segments(disk).map((seg) => `<i style="width:${(seg.ratio * 100).toFixed(2)}%;background:${seg.color}"></i>`).join('');
-    const right = selectable
-      ? `<span>可安装</span><b>${esc(fmtSize(disk.size_bytes))}</b>`
-      : `<span>${esc(protectionText(disk) || '不可操作')}</span><b>${esc(fmtSize(disk.size_bytes))}</b>`;
+    const lockText = selectable ? '' : ` · ${esc(protectionText(disk) || '不可操作')}`;
     return `<button class="${cls.join(' ')}" data-disk="${number}" ${selectable ? '' : 'disabled'}>
       <span class="cb"></span>
       <span class="dmain">
-        <span class="dt">磁盘 ${number} · ${esc(disk.model || '未知型号')}
+        <span class="dt">磁盘 ${number} · ${esc(disk.model || '未知型号')} · ${esc(fmtSize(disk.size_bytes))}
           <span class="tag${selectable ? '' : ' no'}">${selectable ? '可选' : '已锁定'}</span>
         </span>
-        <span class="dm">${esc(disk.partition_style || '')} · ${esc(disk.bus_type || '')} · ${(disk.partitions || []).length} 个分区</span>
+        <span class="dm">${esc(disk.partition_style || '')} · ${esc(disk.bus_type || '')} · ${(disk.partitions || []).length} 个分区${lockText}</span>
         <span class="dbar">${bars}</span>
       </span>
-      <span class="dright">${right}</span>
     </button>`;
   }).join('');
 
@@ -253,7 +249,7 @@ function extraRowsHtml(target) {
         <input type="number" min="${MIN_EXTRA_GB}" step="1" value="${esc(extra.sizeGb)}"
           data-size="extra" data-index="${index}" data-disk="${target.diskNumber}" readonly>
         <span class="unit">GB</span>
-        <span class="szsub">${esc(dataFs())} · 剩余容量自动占满</span>
+        <span class="szsub">${esc(dataFs())} · 剩余自动占满</span>
         <button class="rm" data-remove="${index}" data-disk="${target.diskNumber}" title="删除这个分区">✕</button>
       </div>`).join('');
 }
@@ -666,23 +662,60 @@ export async function loadImages() {
 }
 
 /* ---- 第 4 步 ---- */
-function needsTypedConfirm() {
-  return Boolean(state.settings && state.settings.typeToConfirm) && !(state.info && state.info.dry_run);
+/* 不再要求手输盘号：界面上只有一处勾选，后端 confirm() 也不再校验文本。 */
+
+/** 一行分区：盘符徒标 + 角色名 + 尺寸 / 文件系统。 */
+function partRowHtml(role, letter, size, fileSystem) {
+  const text = String(letter || '').trim();
+  const color = fsColor(fileSystem || (role === 'efi' ? 'FAT32' : 'NTFS'));
+  const badge = text
+    ? `<span class="lbadge" style="background:${color}">${esc(text)}</span>`
+    : '<span class="lbadge ghost">·</span>';
+  return `<div class="pline">${badge}<span class="pln">${esc(roleLabel(role))}</span>
+    <span class="pls">${esc(size || '')}${fileSystem ? ` · ${esc(fileSystem)}` : ''}</span></div>`;
 }
 
-function acceptedTexts(plan) {
-  const number = Number(plan.disk_number);
-  const model = String((plan.identity && plan.identity.model) || '').trim();
-  const words = [String(number), `disk ${number}`, `disk${number}`, `硬盘${number}`, `硬盘 ${number}`];
-  if (model) words.push(model);
-  return words.map((word) => word.replace(/\s+/g, ' ').trim().toLowerCase());
-}
-
-function confirmTextOk() {
-  const text = ($('#confirmText') && $('#confirmText').value ? $('#confirmText').value : '')
-    .replace(/\s+/g, ' ').trim().toLowerCase();
-  if (!text) return false;
-  return state.plans.every((item) => acceptedTexts(item.plan).includes(text));
+/**
+ * 每块盘一张卡：磁盘 / 型号 / 容量一行，分区几行，镜像一行，脚本默认折叠。
+ *
+ * 只用一次的信息不再重复：盘符并在各自分区行，模式提到页脚，MSR 行删掉
+ * （`convert gpt` 的临时产物，执行器会删，日志里有）。
+ */
+function planCardsHtml() {
+  const mode = state.info && state.info.dry_run ? '演练（不写盘）' : '真实写盘';
+  return state.plans.map((item) => {
+    const plan = item.plan;
+    const disk = item.disk || diskOf(plan.disk_number);
+    const letters = plan.drive_letters || {};
+    const targets = state.wizard.targets.find((t) => Number(t.diskNumber) === Number(plan.disk_number));
+    // 分区行以执行计划里的 partition_plan 为准（后端解析后的真实大小 + 盘符）；
+    // 只有老后端没有这个字段时才退回按配置估算。
+    const planned = Array.isArray(plan.partition_plan) ? plan.partition_plan : [];
+    const info = (item.spec && item.spec.task_payload && item.spec.task_payload.partition_info) || {};
+    const efiMb = Number(info.efi_size_mb) || 0;
+    const cGb = Number(info.c_size_gb) || (targets ? Number(targets.sysGb) : 0);
+    const dataGb = Number(info.data_size_gb) || (targets ? Number(targets.dataGb) : 0);
+    const rows = planned.length
+      ? planned.map((part) => partRowHtml(part.role, part.letter, part.size_display, part.file_system)).join('')
+      : [
+        partRowHtml('efi', letters.efi, efiMb > 0 ? `${Math.round(efiMb)} MB` : '设置默认', 'FAT32'),
+        partRowHtml('windows', letters.windows, cGb > 0 ? `${cGb} GB` : '设置默认', 'NTFS'),
+        partRowHtml('data', letters.data || letters.data0, dataGb > 0 ? `${dataGb} GB` : '剩余空间', String(info.data_fs || 'NTFS')),
+      ].join('');
+    return `<div class="pcard" data-disk="${esc(plan.disk_number)}">
+      <div class="pcard-h">
+        <span class="pn">磁盘 ${esc(plan.disk_number)}</span>
+        <span class="pm">${esc(plan.model || (disk && disk.model) || '未知型号')} · ${esc(plan.size_display || fmtSize(disk ? disk.size_bytes : 0))}</span>
+      </div>
+      <div class="ptable">${rows}</div>
+      <div class="pcard-f"><span>镜像 ${esc(versionText(targets))}</span><span class="pmode">${esc(mode)}</span></div>
+      <details class="scriptbox" data-script-disk="${esc(plan.disk_number)}">
+        <summary class="lnk" data-load-script="${esc(plan.disk_number)}">查看 diskpart 脚本</summary>
+        <div class="scriptnote">只读预览：与真实执行器同一套生成器。分区验收不通过时，镜像与引导都不会执行。</div>
+        <pre class="mono scriptpre" hidden></pre>
+      </details>
+    </div>`;
+  }).join('');
 }
 
 function stepConfirmHtml() {
@@ -697,52 +730,6 @@ function stepConfirmHtml() {
     return '<div class="wz-inner"><div class="empty-hint">正在生成执行计划…</div></div>';
   }
 
-  const summaries = state.plans.map((item) => {
-    const plan = item.plan;
-    const disk = item.disk || diskOf(plan.disk_number);
-    const letters = plan.drive_letters || {};
-    const targets = state.wizard.targets.find((t) => Number(t.diskNumber) === Number(plan.disk_number));
-    // 分区行以执行计划里的 partition_plan 为准（后端解析后的真实大小 + 盘符）；
-    // 只有老后端没有这个字段时才退回按配置估算。
-    const planned = Array.isArray(plan.partition_plan) ? plan.partition_plan : [];
-    const info = (item.spec && item.spec.task_payload && item.spec.task_payload.partition_info) || {};
-    const efiMb = Number(info.efi_size_mb) || 0;
-    const cGb = Number(info.c_size_gb) || (targets ? Number(targets.sysGb) : 0);
-    const dataGb = Number(info.data_size_gb) || (targets ? Number(targets.dataGb) : 0);
-    // 数据分区恒为 NTFS；`info.data_fs` 只是把后端算出来的值原样显示。
-    const dataFs = String(info.data_fs || 'NTFS');
-    const partRows = planned.length
-      ? planned.map((part) => `<tr><td class="k">${esc(roleLabel(part.role))}</td><td>${esc(part.size_display || '')} · ${esc(part.file_system || '')}${part.letter ? ` · 盘符 ${esc(part.letter)}:` : ''}</td></tr>`).join('')
-      : [
-        `<tr><td class="k">EFI 分区</td><td>${efiMb > 0 ? `${Math.round(efiMb)} MB` : '设置默认'} · FAT32</td></tr>`,
-        `<tr><td class="k">系统分区</td><td>${cGb > 0 ? `${cGb} GB` : '设置默认'} · NTFS</td></tr>`,
-        `<tr><td class="k">数据分区</td><td>${dataGb > 0 ? `${dataGb} GB` : '剩余空间'} · ${esc(dataFs)}</td></tr>`,
-      ].join('');
-    // convert gpt 会在盘首自动塞一个约 16 MB 的 MSR（Windows 的行为，不是我们的命令）。
-    // 执行器建分区前会按 GPT 类型找到它并删掉，这里如实说明，免得用户看 diskpart 日志时困惑。
-    const msrRow = '<tr><td class="k">MSR 分区</td><td>约 16 MB · 由 <code>convert gpt</code> 自动生成，执行时删除，最终布局不留</td></tr>';
-    const letterText = Object.keys(letters)
-      .filter((role) => letters[role])
-      .map((role) => `${roleLabel(role)} ${letters[role]}:`)
-      .join(' / ') || '由后端分配';
-    return `<div class="sum" style="margin-bottom:10px">
-      <table>
-        <tr><td class="k">磁盘</td><td class="v">磁盘 ${esc(plan.disk_number)} · ${esc(plan.model || '')}</td></tr>
-        <tr><td class="k">容量</td><td>${esc(plan.size_display || fmtSize(disk ? disk.size_bytes : 0))}</td></tr>
-        ${partRows}
-        ${msrRow}
-        <tr><td class="k">计划盘符</td><td>${esc(letterText)}</td></tr>
-        <tr><td class="k">镜像</td><td>${esc(versionText(targets))}</td></tr>
-        <tr><td class="k">模式</td><td>${plan.dry_run ? '演练（不写盘）' : '<b style="color:var(--danger)">真实写盘</b>'}</td></tr>
-      </table>
-      <div class="scriptbox" data-script-disk="${esc(plan.disk_number)}">
-        <button class="tbtn" data-load-script="${esc(plan.disk_number)}">查看分区阶段将执行的 diskpart 脚本</button>
-        <div class="scriptnote">只读预览：与真实执行器同一套生成器。分区验收不通过时，下面的镜像与引导都不会执行。</div>
-        <pre class="mono scriptpre" hidden></pre>
-      </div>
-    </div>`;
-  }).join('');
-
   const lost = state.plans.map((item) => {
     const disk = item.disk || diskOf(item.plan.disk_number);
     return `<li><b>磁盘 ${esc(item.plan.disk_number)}</b>
@@ -754,40 +741,27 @@ function stepConfirmHtml() {
   const warnings = state.plans.flatMap((item) => (item.plan.warnings || [])
     .map((text) => `磁盘 ${item.plan.disk_number}：${text}`));
 
-  const checks = state.plans.length ? (state.plans[0].plan.checks || []) : [];
+  // 阻断项必须放在这里：按钮为什么禁用要写明，否则用户只看到一块禁用的按钮。
+  const notes = [
+    ...blockers.map((text) => `<div><b>阻断项</b>：${esc(text)}</div>`),
+    ...warnings.map((text) => `<div>${esc(text)}</div>`),
+  ].join('');
+  const numbers = state.plans.map((item) => item.plan.disk_number).join(' / ');
 
-  return `<div class="wz-inner">
+  return `<div class="wz-inner wz-wide">
     <h3 class="wz-h">确认并开始</h3>
-    <p class="wz-p">下面这些都来自后端生成的执行计划，盘符是真实分配结果。点“开始安装”后，会先把任务排队，再做确认。</p>
-    ${summaries}
-    <div class="dangeralert">
-      <span class="da-ico">!</span>
-      <div class="da-body">
-        <div class="da-t">这 ${state.plans.length} 块盘上的分区会被<em>全部删除</em>并重新分区</div>
-        <div class="da-s">分区表、卷标、盘上的全部文件都会消失，<strong>无法撤销</strong>。确认这些盘里没有还要用的数据。</div>
-        <ul class="da-list">${lost}</ul>
-      </div>
+    <p class="wz-p">这些来自后端生成的执行计划，盘符是真实分配结果。</p>
+    <div class="diskgrid">${planCardsHtml()}</div>
+    <div class="warnbox warnline">
+      <span class="wi">!</span>
+      <span>磁盘 <b>${esc(numbers)}</b> 会被重新分区，盘上原有数据全部丢失，无法撤销</span>
+      <details class="lossbox"><summary>查看将丢失的分区</summary><ul>${lost}</ul></details>
     </div>
-    ${blockers.length ? `<div class="warnbox" style="margin-top:12px"><span class="wi">!</span>
-      <div><b>阻断项（必须先解决）</b><br>${blockers.map(esc).join('<br>')}</div></div>` : ''}
-    ${warnings.length ? `<div class="warnbox" style="margin-top:12px"><span class="wi">!</span>
-      <div>${warnings.map(esc).join('<br>')}</div></div>` : ''}
-    ${checks.length ? `<div class="sum" style="margin-top:12px"><table>
-      <tr><td class="k">计划检查</td><td>${checks.map((check) => `${check.passed ? '✓' : '×'} ${esc(check.label || check.name || '')}`).join(' · ')}</td></tr>
-    </table></div>` : ''}
+    ${notes ? `<div class="warnbox"><span class="wi">!</span><div>${notes}</div></div>` : ''}
     <label class="ackbar${state.wizard.ack ? ' on' : ''}" id="ackBar">
       <input type="checkbox" id="ackBox" ${state.wizard.ack ? 'checked' : ''}>
-      <span>我明白磁盘 <strong>${state.plans.map((item) => item.plan.disk_number).join(' / ')}</strong> 上的分区会被全部删除，并且已经备份了需要的数据。</span>
+      <span>我明白磁盘 <strong>${esc(numbers)}</strong> 上的分区会被全部删除，并且已经备份了需要的数据。</span>
     </label>
-    ${needsTypedConfirm() ? `<div class="fieldrow">
-      <label>输入确认：</label>
-      <input class="confirm" id="confirmText" placeholder="盘号或型号" autocomplete="off">
-      <span class="hint">设置里开了“危险操作需输入确认”</span>
-    </div>` : ''}
-    <div class="wz-startrow">
-      <button class="tbtn danger startbtn" id="startBtn" ${canStart() ? '' : 'disabled'}>开始安装</button>
-      <span class="wz-startnote">${state.info && state.info.dry_run ? '演练模式：不会真的写盘' : '真实写盘 · 中途断电会留下半成品'}</span>
-    </div>
   </div>`;
 }
 
@@ -802,9 +776,7 @@ function versionText(target) {
 function canStart() {
   if (!state.plans.length) return false;
   if (!state.plans.every((item) => item.plan.executable)) return false;
-  if (!state.wizard.ack) return false;
-  if (needsTypedConfirm() && !confirmTextOk()) return false;
-  return true;
+  return state.wizard.ack;
 }
 
 function bindStepConfirm() {
@@ -821,45 +793,33 @@ function bindStepConfirm() {
       state.wizard.ack = ack.checked;
       const bar = $('#ackBar');
       if (bar) bar.classList.toggle('on', ack.checked);
-      const start = $('#startBtn');
-      if (start) start.disabled = !canStart();
       renderFoot();
     });
   }
-  const text = $('#confirmText');
-  if (text) {
-    text.addEventListener('input', () => {
-      const start = $('#startBtn');
-      if (start) start.disabled = !canStart();
-      renderFoot();
+  // 脚本默认折叠：展开时才去请求（首次成功后在 box.dataset.loaded 上记一笔）。
+  for (const box of $$('#wzBody details.scriptbox')) {
+    box.addEventListener('toggle', () => {
+      if (box.open) void loadPartitionScript(box.querySelector('summary'));
     });
-  }
-  const start = $('#startBtn');
-  if (start) start.addEventListener('click', () => { void startInstall(); });
-  for (const button of $$('[data-load-script]')) {
-    button.addEventListener('click', () => { void loadPartitionScript(button); });
   }
 }
 
-async function loadPartitionScript(button) {
-  const diskNumber = Number(button.dataset.loadScript);
-  const box = button.closest('.scriptbox');
+async function loadPartitionScript(summary) {
+  const diskNumber = Number(summary.dataset.loadScript);
+  const box = summary.closest('.scriptbox');
   const pre = box ? box.querySelector('.scriptpre') : null;
-  if (!pre) return;
-  button.disabled = true;
-  button.textContent = '正在读取脚本…';
+  if (!pre || box.dataset.loaded) return;
+  box.dataset.loaded = '1';
+  pre.hidden = false;
+  pre.textContent = '正在读取脚本…';
   try {
     const items = await api.partitionPreview(diskNumber);
     const item = (items || []).find((entry) => Number(entry.disk_number) === diskNumber) || (items || [])[0];
     pre.textContent = item ? item.script : '没有拿到脚本文本';
-    pre.hidden = false;
-    button.textContent = '收起 / 重新读取脚本';
   } catch (exc) {
+    // 失败时清掉标记：收起再展开可以重试。
+    box.dataset.loaded = '';
     pre.textContent = exc instanceof ApiError ? exc.message : String(exc);
-    pre.hidden = false;
-    button.textContent = '重试读取脚本';
-  } finally {
-    button.disabled = false;
   }
 }
 
@@ -882,7 +842,8 @@ export async function preparePlans() {
 
 async function startInstall() {
   if (!canStart()) return;
-  if (!(state.info && state.info.dry_run)) {
+  const askConfirm = state.settings ? state.settings.confirmBeforeStart !== false : true;
+  if (!(state.info && state.info.dry_run) && askConfirm) {
     const ok = await confirmDialog({
       title: '开始真实写盘',
       body: `<p>即将对磁盘 <b>${state.plans.map((item) => item.plan.disk_number).join(' / ')}</b> 重新分区并安装系统。</p>
@@ -911,8 +872,7 @@ async function startInstall() {
   renderInstall();
 
   try {
-    const text = ($('#confirmText') && $('#confirmText').value) || undefined;
-    const confirmed = await api.confirm(state.wizard.jobIds, text);
+    const confirmed = await api.confirm(state.wizard.jobIds);
     for (const job of confirmed) pushLog(`任务 ${job.id}：${jobStatusText(job.status)}`, '', 'install');
     toast('已开始安装');
   } catch (exc) {

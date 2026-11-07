@@ -119,7 +119,7 @@ export function setNav(view) {
   }
   $('#tbRefresh').disabled = view !== 'main';
   $('#tbHint').textContent = view === 'install'
-    ? '安装向导写盘前会先过五道安全检查'
+    ? '安装向导写盘前会先过一轮预检，任何一项不通过都会拒绝写盘'
     : '只读查看 · 改动磁盘请用「系统安装」';
 }
 

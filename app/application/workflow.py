@@ -418,7 +418,6 @@ class WorkflowController:
         partition_defaults: Mapping[str, Any] | None = None,
         tool_paths: Mapping[str, str] | None = None,
         protect_system_disk: bool = True,
-        type_to_confirm: bool = False,
         settings_provider: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._dry_run = bool(dry_run)
@@ -445,10 +444,8 @@ class WorkflowController:
             for key, value in (tool_paths or {}).items()
             if str(value).strip()
         }
-        # 安全开关：protectSystemDisk 决定系统盘/引导盘是否“不可选”，
-        # typeToConfirm 决定真实执行前是否必须手输盘号/型号。
+        # 安全开关：protectSystemDisk 决定系统盘/引导盘是否“不可选”。
         self._protect_system_disk = bool(protect_system_disk)
-        self._type_to_confirm = bool(type_to_confirm)
         # 界面设置提供者：预检、执行器可选项都从这里取最新设置。
         self._settings_provider = settings_provider
         # 上一次 prepare() 因“无显式白名单”而隐式加入的盘号；下次 prepare/start 时撤销。
@@ -515,8 +512,6 @@ class WorkflowController:
             if value != self._protect_system_disk:
                 self._protect_system_disk = value
                 changed = True
-        if "typeToConfirm" in settings:
-            self._type_to_confirm = bool(settings.get("typeToConfirm"))
         if changed:
             # 执行层重算保护原因时看的是 service 上的开关，要保持一致。
             self._service.protect_system_disk = self._protect_system_disk
@@ -625,7 +620,7 @@ class WorkflowController:
         整盘安装走 ``prepare()``，它会顺手授权选中的盘；而修复引导是单盘操作，
         不经过 ``prepare()``，如果这里不授权，真实执行永远会被
         “不在白名单内”挡掉（演练模式不看白名单，所以本地测不出来）。
-        用户在主页面选中磁盘 + 输入确认文本，就是与 CLI ``--allow-disks`` 等价的授权。
+        用户在界面上勾选磁盘并确认，就是与 CLI ``--allow-disks`` 等价的授权。
         """
         numbers = [int(number) for number in disk_numbers]
         active_dry_run = self._resolve_dry_run(dry_run)
@@ -1101,16 +1096,11 @@ class WorkflowController:
                 raise WorkflowError(str(exc)) from exc
         return jobs
 
-    def confirm(
-        self,
-        job_ids: Sequence[str] | None = None,
-        *,
-        confirm_text: str | None = None,
-    ) -> list[Job]:
+    def confirm(self, job_ids: Sequence[str] | None = None) -> list[Job]:
         """确认等待中的任务；存在阻断项时拒绝执行。
 
-        ``typeToConfirm`` 打开时，真实任务还必须提供 ``confirm_text``（盘号或
-        型号），否则拒绝——防止手滑点错盘。
+        确认动作本身（界面勾选“明白分区会被删除”）即为授权，不再要求额外
+        手输盘号：多盘场景下盘号各不相同，逐盘输入的闸门无法成立。
         """
         jobs = self._select_jobs(job_ids)
         waiting = [job for job in jobs if job.status == JobStatus.WAITING_CONFIRMATION]
@@ -1126,10 +1116,7 @@ class WorkflowController:
             )
             raise WorkflowError(f"计划存在阻断项，拒绝执行：{details}")
 
-        if self._type_to_confirm:
-            self._require_confirm_text(waiting, confirm_text)
-
-        # 用户确认（勾选 + 输盘号）本身就是授权：这里重新补齐隐式白名单。
+        # 用户确认（勾选“明白分区会被删除”）本身就是授权：这里重新补齐隐式白名单。
         # 否则“刷新页面（新会话）/再 prepare 别的盘”会把之前那次 prepare 的隐式授权
         # 撤掉，已排队的任务确认时报“不在允许写盘的白名单内（当前白名单: 空）”。
         real_disks = [job.disk_number for job in waiting if not bool(job.spec.dry_run)]
@@ -1162,43 +1149,6 @@ class WorkflowController:
         return self._manager.wait_all(timeout=timeout)
 
     # ------------------------------------------------------------------ 内部
-    @staticmethod
-    def confirm_keywords(job: Job) -> tuple[str, ...]:
-        """``typeToConfirm`` 认可的关键词：盘号或型号（大小写、空格不敏感）。"""
-        number = int(job.plan.disk_number)
-        identity = getattr(job.spec, "expected_identity", None) or {}
-        model = str(identity.get("model") or "").strip()
-        keywords = [str(number), f"disk {number}", f"disk{number}", f"硬盘{number}", f"硬盘 {number}"]
-        if model:
-            keywords.append(model)
-        return tuple(keywords)
-
-    def _require_confirm_text(
-        self,
-        jobs: Sequence[Job],
-        confirm_text: str | None,
-    ) -> None:
-        """校验 ``typeToConfirm`` 的手输确认文本。"""
-        real_jobs = [job for job in jobs if not bool(getattr(job.spec, "dry_run", False))]
-        if not real_jobs:
-            return
-        text = " ".join(str(confirm_text or "").split()).casefold()
-        if not text:
-            raise WorkflowError(
-                "已开启“危险操作需输入确认”：请在确认时输入盘号（如 1）或磁盘型号。"
-            )
-        for job in real_jobs:
-            accepted = {
-                " ".join(keyword.split()).casefold()
-                for keyword in self.confirm_keywords(job)
-                if keyword
-            }
-            if text not in accepted:
-                raise WorkflowError(
-                    f"确认文本与硬盘 {job.plan.disk_number} 不匹配"
-                    f"（可输入盘号或型号：{'、'.join(sorted(accepted))}）。"
-                )
-
     def _require_session(self) -> SessionState:
         if self._session is None:
             raise WorkflowError("工作流尚未启动，请先调用 start()")
