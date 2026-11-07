@@ -45,8 +45,6 @@ DEFAULTS: dict[str, Any] = {
     "sysDefaultGb": 120,
     "efiDefaultMb": 100,
     "dataDefaultGb": "auto",
-    # GHO 内部的分区块序号（0 = 用 Ghost 默认的 1）
-    "imageDefaultIndex": 0,
     # 外部程序（空 = 依次找 PATH 与 System32）；diskpart 固定用系统自带，不开放设置。
     "extGhost": "",
     # 写引导用的 bcdboot.exe；留空则用 System32 里的。
@@ -105,7 +103,6 @@ _ENUM_KEYS: dict[str, tuple[str, ...]] = {
 _INT_RANGES: dict[str, tuple[int, int]] = {
     "sysDefaultGb": (60, 2000),
     "efiDefaultMb": (64, 1024),
-    "imageDefaultIndex": (0, 99),
     "logRetentionDays": (1, 3650),
 }
 

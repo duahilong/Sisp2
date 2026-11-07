@@ -213,7 +213,6 @@ def _ctx(options=None, letters=None):
         parts=plan_partitions(payload, letters={"efi": "E", "windows": "F", "data": "G"}),
         letters=letters or {"efi": "E", "windows": "F", "data": "G"},
         image_path=r"D:\images	est.GHO",
-        image_index=1,
         cancel=threading.Event(),
         log=CommandLog(None),
         options=options or {},
@@ -275,7 +274,7 @@ def test_runner_accepts_runner_options_on_spec(
             # 单测用小尺寸：显式放宽后端下限（C ≥ 60 GB）
             "allow_small_partitions": True,
         },
-        "image_info": {"image_path": str(image), "image_index": 1},
+        "image_info": {"image_path": str(image)},
     }
     letters = {"efi": "E", "windows": "F", "data": "G"}
     parts = plan_partitions(payload, letters=letters)
@@ -411,16 +410,17 @@ def test_default_system_image_from_settings() -> None:
     wf.start(dry_run=True)
     payload = wf.session.task_payload
     assert payload["image_info"]["image_path"] == str(Path(r"D:\\sisp-test\\test.GHO"))
-    assert payload["image_info"]["image_index"] == 3
+    # 分区块序号不开放设置：载荷里只有路径，执行层固定写 ``:1``；
+    # 旧设置键即使还残留在注册表里也读不到。
+    assert "image_index" not in payload["image_info"]
 
 
 def test_settings_image_is_the_only_source() -> None:
     """``sysImageA`` 是镜像路径的唯一来源：会话载荷里就是设置里那一份。"""
-    wf = _controller({"sysImageA": r"D:\sisp-test\test.GHO", "imageDefaultIndex": 1})
+    wf = _controller({"sysImageA": r"D:\sisp-test\test.GHO"})
     wf.start(dry_run=True)
     info = wf.session.task_payload["image_info"]
     assert info["image_path"] == str(Path(r"D:\sisp-test\test.GHO"))
-    assert info["image_index"] == 1
 
 
 def test_default_system_image_falls_back_to_slot_b() -> None:
@@ -442,7 +442,8 @@ def test_default_system_image_prefers_slot_a() -> None:
     )
 
 
-def test_image_default_index_zero_keeps_ghost_default() -> None:
+def test_legacy_image_index_setting_is_ignored() -> None:
+    """旧设置 ``imageDefaultIndex`` 已删除，残留的键进不了载荷。"""
     wf = _controller({"sysImageA": r"D:\images	est.GHO", "imageDefaultIndex": 0})
     wf.start(dry_run=True)
     assert "image_index" not in wf.session.task_payload["image_info"]

@@ -239,7 +239,6 @@ class WindowsDiskRunner:
             parts=parts or (),
             letters=letters,
             image_path=self._image_path(payload),
-            image_index=to_int((payload.get("image_info") or {}).get("image_index")) or 1,
             cancel=cancel_event,
             log=log,
             options=options,

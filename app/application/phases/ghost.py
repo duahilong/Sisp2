@@ -52,7 +52,6 @@ class GhostImagePhase:
             str(ctx.image_path),
             ghost_disk=disk,
             partition=partition,
-            block_index=ctx.image_index or 1,
         )
 
     # ------------------------------------------------------------------ 执行
@@ -87,7 +86,6 @@ class GhostImagePhase:
                     exit=code,
                     engine="ghost",
                     image=ctx.image_path,
-                    index=ctx.image_index,
                     seconds=round(elapsed, 1),
                 ),
                 message=f"应用镜像失败（Ghost 退出码 {code}）",
@@ -98,10 +96,9 @@ class GhostImagePhase:
         return PhaseOutcome.succeeded(
             PhaseResult.ok(
                 "image",
-                f"已用 Ghost 还原 {name}（分区块 {ctx.image_index or 1}）到 {disk}:{partition}",
+                f"已用 Ghost 还原 {name} 到 {disk}:{partition}",
                 engine="ghost",
                 image=ctx.image_path,
-                index=ctx.image_index,
                 seconds=round(elapsed, 1),
                 tail=tail(output, 1200),
             )

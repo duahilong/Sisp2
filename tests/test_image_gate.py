@@ -137,7 +137,7 @@ def _controller(image_path: str) -> WorkflowController:
             # 单测用小尺寸测算术：后端下限（C ≥ 60 GB）显式放宽
             "allow_small_partitions": True,
         },
-        settings_provider=lambda: {"sysImageA": image_path, "imageDefaultIndex": 1},
+        settings_provider=lambda: {"sysImageA": image_path},
     )
 
 
@@ -254,8 +254,8 @@ def test_prepare_reflects_live_settings_image(tmp_path):
     iso = tmp_path / "win11.iso"
     iso.write_bytes(b"iso")
     good = _gho(tmp_path)
+    settings: dict[str, Any] = {"sysImageA": str(iso)}
 
-    settings: dict[str, Any] = {"sysImageA": str(iso), "imageDefaultIndex": 1}
     controller = _settings_controller(settings, str(iso))
     controller.start(dry_run=True)
 
@@ -277,7 +277,6 @@ def test_per_disk_overrides_beat_settings_defaults(tmp_path):
 
     settings: dict[str, Any] = {
         "sysImageA": str(wim),
-        "imageDefaultIndex": 1,
         "efiDefaultMb": 100,
         "sysDefaultGb": 100,
         "dataDefaultGb": 200,
@@ -301,7 +300,7 @@ def test_image_path_is_normalized_for_ghost(tmp_path):
     slashed = str(wim).replace("\\", "/")
     assert "/" in slashed or _Path(wim).drive  # 单字符路径在 Linux 上无分隔符，跳过
 
-    controller = _settings_controller({"sysImageA": slashed, "imageDefaultIndex": 1}, slashed)
+    controller = _settings_controller({"sysImageA": slashed}, slashed)
     controller.start(dry_run=True)
     prepared = controller.prepare([1])[0]
 

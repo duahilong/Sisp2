@@ -28,7 +28,7 @@ const GB = 1024 ** 3;
 const images = {
   loading: false,
   error: '',
-  versions: [],      // [{id, label, path, ok, reason, block_index, size_display}]
+  versions: [],      // [{id, label, path, ok, reason, size_display}]
   defaultPath: '',   // 第一个可用版本，默认选中它
 };
 
@@ -581,9 +581,9 @@ function stepVersionHtml() {
     if (images.error) {
       hint = `<span class="errmsg">${esc(images.error)}</span>`;
     } else if (chosen) {
-      // 只显示 Ghost 自己的判定：文件头对不对、分区块几号。
+      // 只显示 Ghost 自己的判定：文件头对不对、大小多少。
       hint = chosen.ok
-        ? `<span class="szsub ok">Ghost 分区块 #${esc(String(chosen.block_index || 1))} · ${esc(chosen.size_display || '大小未知')}</span>`
+        ? `<span class="szsub ok">Ghost 镜像 · ${esc(chosen.size_display || '大小未知')}</span>`
         : `<span class="errmsg">${esc(chosen.reason || '不是有效的 Ghost 镜像')}</span>`;
     } else if (current) {
       hint = `<span class="szsub">${esc(current)}</span>`;
@@ -616,7 +616,6 @@ function bindStepVersion() {
       const target = targetOf(Number(chip.dataset.disk));
       if (!target || target.imagePath === chip.dataset.path) return;
       target.imagePath = chip.dataset.path;
-      target.imageIndex = null;
       const version = versionByPath(target.imagePath);
       target.imageLabel = version ? version.label : '';
       state.wizard.ack = false;
@@ -768,7 +767,6 @@ function stepConfirmHtml() {
 function versionText(target) {
   if (!target) return '设置默认';
   if (target.imageLabel) return target.imageLabel;
-  if (target.imageIndex) return `GHO 分区块 #${target.imageIndex}`;
   if (target.imagePath) return target.imagePath;
   return '设置默认';
 }

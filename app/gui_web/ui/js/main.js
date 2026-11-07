@@ -46,7 +46,7 @@ function render() {
       wiz.ack,
       wiz.error,
       state.plans.length,
-      wiz.targets.map((target) => `${target.diskNumber}:${target.sysGb}:${target.dataGb}:${target.imageIndex}`).join(','),
+      wiz.targets.map((target) => `${target.diskNumber}:${target.sysGb}:${target.dataGb}:${target.imagePath}`).join(','),
     ].join('|');
     const busy = ['running', 'done', 'failed'].includes(wiz.phase);
     if (busy || sig !== installSig) {

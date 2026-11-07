@@ -44,7 +44,6 @@ const FIELDS = [
   { section: 'install', key: 'sysDefaultGb', kind: 'int', effect: '下次生成计划生效', hint: '向导第 2 步的初始值，可以在那一步改。' },
   { section: 'install', key: 'efiDefaultMb', kind: 'int', effect: '下次生成计划生效', hint: 'EFI（ESP）分区大小，最小 64 MB；向导第 2 步只显示不可改。' },
   { section: 'install', key: 'dataDefaultGb', kind: 'auto-int', effect: '下次生成计划生效', hint: '“自动”= 剩余空间全给数据分区。' },
-  { section: 'install', key: 'imageDefaultIndex', kind: 'int', effect: '下次生成计划生效', hint: 'GHO 里的分区块序号（不是系统版本）；0 = 交给 Ghost 挑第一个。' },
 
   { section: 'external', key: 'extGhost', kind: 'path', pick: 'file', effect: '重启后生效', hint: '空 = 依次找 PATH 与 System32 里的 ghost64 / ghost32。' },
   { section: 'external', key: 'extBcdboot', kind: 'path', pick: 'file', effect: '重启后生效', hint: '空 = 依次找 PATH 与 System32 里的 bcdboot。' },
@@ -73,7 +72,6 @@ const LABELS = {
   confirmBeforeStart: '真实写盘前二次确认',
   sysDefaultGb: '系统分区默认大小',
   efiDefaultMb: 'EFI 分区大小',
-  imageDefaultIndex: 'GHO 分区块序号',
   dataDefaultGb: '数据分区默认大小',
   extGhost: 'Ghost 路径',
   extBcdboot: 'bcdboot 路径',

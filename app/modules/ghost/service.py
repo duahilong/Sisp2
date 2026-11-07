@@ -9,6 +9,7 @@ Ghost 11.x 的三条硬规则（来自实测与原型项目）：
 
 1. ``dst`` 用 Ghost 自己的编号——**磁盘从 1 开始、分区从 1 开始**；
 2. ``src=<文件>:N`` 的 ``N`` 是镜像内部的**分区块序号**，不是目标分区号；
+   这里固定写 ``IMAGE_BLOCK_INDEX``（第 1 块），不开放设置。
 3. 失败原因写在**当前工作目录**的 ``ghosterr.txt``；退出码非 0 只能说明"失败了"，
    说不清为什么，所以执行时要把 ``cwd`` 指到日志目录再回头读这个文件。
 """
@@ -24,8 +25,8 @@ GHO_SUFFIXES: tuple[str, ...] = (".gho", ".ghs")
 # 所有 Ghost 镜像的文件头都是这两个字节（实测 ``test.GHO`` / ``Intel_WIN11.GHO``）。
 GHO_MAGIC = b"\xfe\xef"
 
-# 0 = 让 Ghost 用它自己的默认值（分区块 1）
-DEFAULT_BLOCK_INDEX = 1
+# Ghost 命令里源镜像的块号：固定第 1 块（GHO 的常规情况），不开放设置。
+IMAGE_BLOCK_INDEX = 1
 
 
 def ghost_command(
@@ -34,7 +35,6 @@ def ghost_command(
     *,
     ghost_disk: int,
     partition: int,
-    block_index: int = DEFAULT_BLOCK_INDEX,
 ) -> list[str]:
     """拼 Ghost 还原命令（纯拼装，不执行）。
 
@@ -51,12 +51,9 @@ def ghost_command(
     part = int(partition)
     if disk < 1 or part < 1:
         raise ValueError(f"Ghost 目标是 1 基编号，收到 dst={disk}:{part}")
-    index = int(block_index)
-    if index < 1:
-        raise ValueError(f"分区块序号必须 ≥ 1，收到 {block_index}")
     return [
         str(ghost_exe),
-        f"-clone,mode=pload,src={gho_path}:{index},dst={disk}:{part}",
+        f"-clone,mode=pload,src={gho_path}:{IMAGE_BLOCK_INDEX},dst={disk}:{part}",
         "-sure",
         "-batch",
         "-ntexact",
@@ -96,7 +93,6 @@ def sniff_gho(path: str | Path) -> dict[str, Any]:
         "ok": True,
         "exists": True,
         "size_bytes": size,
-        "block_index": DEFAULT_BLOCK_INDEX,
         "reason": "Ghost 分区块镜像",
     }
 
@@ -108,9 +104,9 @@ def parse_ghosterr(text: str, limit: int = 600) -> str:
 
 
 __all__ = [
-    "DEFAULT_BLOCK_INDEX",
     "GHO_MAGIC",
     "GHO_SUFFIXES",
+    "IMAGE_BLOCK_INDEX",
     "ghost_command",
     "parse_ghosterr",
     "sniff_gho",

@@ -45,7 +45,6 @@ _SETTINGS: dict[str, Any] = {
     # 计划会按 payload 重算镜像可用性（后缀 + 存在性 + Ghost 文件头），
     # 所以这里用一个真实存在的 .GHO 占位文件。
     "sysImageA": str(_FAKE_IMAGE_PATH),
-    "imageDefaultIndex": 1,
 }
 _PARTITION_DEFAULTS: dict[str, Any] = {
     "efi_size_mb": 300,

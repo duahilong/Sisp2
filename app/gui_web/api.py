@@ -257,7 +257,6 @@ class WebApi:
                             "reason": info.get("reason", ""),
                             "size_bytes": info.get("size_bytes"),
                             "size_display": info.get("size_display"),
-                            "block_index": info.get("block_index", 1),
                         }
                     )
                 versions.append(entry)

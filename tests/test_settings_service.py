@@ -234,12 +234,11 @@ def test_partition_info_uses_efi_default(store: SettingsStore) -> None:
     assert store.partition_info()["efi_size_mb"] == 300
 
 
-def test_image_default_index_range(store: SettingsStore) -> None:
-    assert store.get()["imageDefaultIndex"] == 0
-    for bad in (-1, 100):
-        with pytest.raises(SettingsError):
-            coerce_value("imageDefaultIndex", bad)
-    assert coerce_value("imageDefaultIndex", 3) == 3
+def test_image_default_index_is_gone(store: SettingsStore) -> None:
+    """分区块序号不再开放设置：旧键既不在默认值里，也不能再写进来。"""
+    assert "imageDefaultIndex" not in store.get()
+    with pytest.raises(SettingsError):
+        store.update({"imageDefaultIndex": 3})
 
 
 # ------------------------------------------------- 两个系统槽位（A / B）

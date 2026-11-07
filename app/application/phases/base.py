@@ -33,7 +33,6 @@ class PhaseContext:
     parts: Sequence[PlannedPartition]
     letters: Mapping[str, str]
     image_path: str | None
-    image_index: int
     cancel: threading.Event
     log: CommandLog
     options: Mapping[str, Any] = field(default_factory=dict)

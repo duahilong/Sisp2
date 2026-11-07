@@ -52,7 +52,6 @@ def _ctx(*, letters=None, options=None, on_step=None) -> PhaseContext:
         parts=(),
         letters={"efi": "E", "windows": "F", "data": "G"} if letters is None else letters,
         image_path=None,
-        image_index=1,
         cancel=threading.Event(),
         log=CommandLog(None),
         options=options or {},

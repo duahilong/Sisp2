@@ -40,19 +40,19 @@ def test_build_drops_blank_values() -> None:
             "data_fs": "   ",
             "data_partitions": [],
         },
-        image_info={"image_path": "  ", "image_index": None},
+        image_info={"image_path": "  "},
     )
     assert payload == {"partition_info": {"c_size_gb": 60}}
 
 
 def test_build_keeps_zero_and_auto() -> None:
-    """``0`` 与 ``"auto"`` 都是有效值：前者是“第 0 个版本”，后者是“吃掉剩余空间”。"""
+    """``0`` 与 ``"auto"`` 都是有效值：分区块序号固定 1，``"auto"`` 是“吃掉剩余空间”。"""
     payload = build_task_payload(
         partition_info={"c_size_gb": 60, "data_size_gb": "auto"},
-        image_info={"image_index": 0},
+        image_info={"image_path": "D:/images/test.GHO"},
     )
     assert payload["partition_info"]["data_size_gb"] == "auto"
-    assert payload["image_info"]["image_index"] == 0
+    assert payload["image_info"]["image_path"] == "D:/images/test.GHO"
 
 
 def test_build_replaces_whole_section_over_base() -> None:

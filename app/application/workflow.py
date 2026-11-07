@@ -167,8 +167,7 @@ def _merge_payload(
 
     支持的最小键集（其余键透传）：
     ``efi_size`` / ``efi_size_mb``、``c_size`` / ``c_size_gb``、
-    ``data_size`` / ``data_size_gb``、``data_partitions``、``win_gho``、
-    ``image_index``。
+    ``data_size`` / ``data_size_gb``、``data_partitions``、``win_gho``。
 
     ``data_partitions`` 存在时**取代** ``data_size_gb``（向导里加了 E 分区走
     这条），每项都必须显式给出 ``size_gb``。
@@ -214,15 +213,6 @@ def _merge_payload(
         if isinstance(image_info, dict):
             # 归一化：用户/脚本可能写成 D:/x/test.GHO，统一成展开后的字符串。
             image_info["image_path"] = str(Path(win_gho.strip()).expanduser())
-
-    # 界面第 3 步：GHO 内部的分区块序号（多数镜像是 1）。
-    image_index = overrides.get("image_index")
-    if image_index not in (None, ""):
-        value = _as_number(image_index)
-        if value is not None and value >= 1:
-            image_info = payload.setdefault("image_info", {})
-            if isinstance(image_info, dict):
-                image_info["image_index"] = int(value)
 
     return payload
 
@@ -326,25 +316,18 @@ def _apply_partition_defaults(
 
 
 def _image_from_settings(settings: Mapping[str, Any] | None) -> dict[str, Any]:
-    """设置页的系统槽位 + 「默认镜像版本」→ ``image_info``。
+    """设置页的系统槽位 → ``image_info``。
 
     两个槽位（A/B）是并列的版本，默认用**第一个填了路径的**；向导第 3 步里
     每块盘可以改成另一个，逐盘覆盖在 ``_merge_payload`` 里合并，晚于这里。
 
-    ``image_index`` 只在 >0 时写入：0 表示“用第一个版本”，交给执行层的
-    ``or 1`` 兜底，载荷里不必出现一个等于默认值的键。
+    载荷里只有路径：GHO 的分区块序号固定用 Ghost 的默认值（第 1 块），
+    不再开放设置。
     """
     versions = configured_versions(settings)
     if not versions:
         return {}
-    info: dict[str, Any] = {"image_path": versions[0]["path"]}
-    try:
-        index = int((settings or {}).get("imageDefaultIndex") or 0)
-    except (TypeError, ValueError):
-        index = 0
-    if index > 0:
-        info["image_index"] = index
-    return info
+    return {"image_path": versions[0]["path"]}
 
 
 def _apply_image_defaults(

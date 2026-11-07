@@ -46,7 +46,7 @@ PAYLOAD = {
         "data_size_gb": "auto",
         "allow_small_partitions": True,
     },
-    "image_info": {"image_path": "D:/images/test.GHO", "image_index": 1},
+    "image_info": {"image_path": "D:/images/test.GHO"},
 }
 LETTERS = {"efi": "E", "windows": "F", "data": "G"}
 
@@ -64,7 +64,6 @@ def _ctx(tmp_path, *, parts=None, letters=None, options=None, cancel=False, on_s
         parts=parts or _parts(),
         letters=letters or LETTERS,
         image_path=str(image),
-        image_index=1,
         cancel=threading.Event(),
         log=CommandLog(None),
         options=options or {},
@@ -472,7 +471,7 @@ def test_real_runner_fills_job_progress(tmp_path):
     image.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
     payload = {
         "partition_info": dict(PAYLOAD["partition_info"]),
-        "image_info": {"image_path": str(image), "image_index": 1},
+        "image_info": {"image_path": str(image)},
     }
     parts = _parts(payload)
     runner = WindowsDiskRunner(

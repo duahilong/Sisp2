@@ -53,7 +53,7 @@ export const state = {
 
   wizard: {
     step: 1,
-    targets: [],      // {diskNumber, sysGb, dataGb, imagePath, imageIndex, imageLabel}
+    targets: [],      // {diskNumber, sysGb, dataGb, imagePath, imageLabel}
     ack: false,
     phase: 'form',    // form | running | done | failed
     jobIds: [],
@@ -231,7 +231,6 @@ export function addTarget(diskNumber) {
     dataGb: sizes.dataGb,
     extras: [],        // 额外数据分区（E）：[{sizeGb, fs}]，最多 MAX_EXTRAS 个
     imagePath: '',
-    imageIndex: null,
     imageLabel: '',
   });
   state.wizard.targets.sort((a, b) => a.diskNumber - b.diskNumber);
@@ -372,7 +371,6 @@ export function selectionPayload() {
       entry.data_size = 'auto';
     }
     if (target.imagePath) entry.win_gho = target.imagePath;
-    if (target.imageIndex) entry.image_index = Number(target.imageIndex);
     selection[target.diskNumber] = entry;
   }
   return selection;

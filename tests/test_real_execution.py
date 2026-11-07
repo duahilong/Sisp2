@@ -49,7 +49,7 @@ _PAYLOAD: dict[str, Any] = {
         "data_size_gb": "auto",
         "allow_small_partitions": True,
     },
-    "image_info": {"image_path": r"D:\images	est.GHO", "image_index": 1},
+    "image_info": {"image_path": r"D:\images	est.GHO"},
 }
 
 
@@ -99,7 +99,6 @@ class _FakeService:
 _PARTITION_DEFAULTS: dict[str, Any] = dict(_PAYLOAD["partition_info"])
 _SETTINGS: dict[str, Any] = {
     "sysImageA": _PAYLOAD["image_info"]["image_path"],
-    "imageDefaultIndex": 1,
 }
 
 
@@ -399,7 +398,7 @@ def test_runner_reports_missing_image_without_touching_disks(tmp_path):
         disk_number=1,
         task_payload={
             "partition_info": _PAYLOAD["partition_info"],
-            "image_info": {"image_path": str(tmp_path / "missing.GHO"), "image_index": 1},
+            "image_info": {"image_path": str(tmp_path / "missing.GHO")},
         },
         drive_letters={"efi": "E", "windows": "F", "data": "G"},
     )
@@ -423,7 +422,7 @@ def test_runner_fails_cleanly_when_diskpart_cannot_start(tmp_path):
         disk_number=1,
         task_payload={
             "partition_info": _PAYLOAD["partition_info"],
-            "image_info": {"image_path": str(image), "image_index": 1},
+            "image_info": {"image_path": str(image)},
         },
         drive_letters={"efi": "E", "windows": "F", "data": "G"},
     )
@@ -444,7 +443,7 @@ def test_runner_rejects_incomplete_letters(tmp_path):
         disk_number=1,
         task_payload={
             "partition_info": _PAYLOAD["partition_info"],
-            "image_info": {"image_path": str(image), "image_index": 1},
+            "image_info": {"image_path": str(image)},
         },
         drive_letters={"efi": "E"},
     )
@@ -463,7 +462,7 @@ def test_runner_honours_pre_cancelled_event(tmp_path):
         disk_number=1,
         task_payload={
             "partition_info": _PAYLOAD["partition_info"],
-            "image_info": {"image_path": str(image), "image_index": 1},
+            "image_info": {"image_path": str(image)},
         },
         drive_letters={"efi": "E", "windows": "F", "data": "G"},
     )
@@ -939,7 +938,7 @@ def test_runner_keeps_efi_letter_when_switch_off(
     image.write_bytes(b"x")
     payload = {
         "partition_info": _PAYLOAD["partition_info"],
-        "image_info": {"image_path": str(image), "image_index": 1},
+        "image_info": {"image_path": str(image)},
     }
     letters = {"efi": "E", "windows": "F", "data": "G"}
     parts = plan_partitions(payload, letters=letters)
@@ -970,7 +969,7 @@ def test_runner_releases_efi_letter_even_when_image_fails(
     image.write_bytes(b"x")
     payload = {
         "partition_info": _PAYLOAD["partition_info"],
-        "image_info": {"image_path": str(image), "image_index": 1},
+        "image_info": {"image_path": str(image)},
     }
     letters = {"efi": "E", "windows": "F", "data": "G"}
     parts = plan_partitions(payload, letters=letters)
@@ -1091,7 +1090,7 @@ def _payload(image, **partition_overrides):
     info.update(partition_overrides)
     return {
         "partition_info": info,
-        "image_info": {"image_path": str(image), "image_index": 1},
+        "image_info": {"image_path": str(image)},
     }
 
 
@@ -1467,7 +1466,7 @@ def test_runner_refuses_tiny_layout_before_touching_disk(
         task_payload={
             # 没有 allow_small_partitions：3 GB 的系统分区必须被拒
             "partition_info": {"efi_size_mb": 100, "c_size_gb": 3, "data_size_gb": "auto"},
-            "image_info": {"image_path": str(image), "image_index": 1},
+            "image_info": {"image_path": str(image)},
         },
         drive_letters={"efi": "E", "windows": "F", "data": "G"},
     )

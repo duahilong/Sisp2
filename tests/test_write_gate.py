@@ -172,7 +172,7 @@ _DEFAULT_PARTITIONS: dict[str, Any] = {
     # 单测用小尺寸：显式放宽后端下限（C ≥ 60 GB）
     "allow_small_partitions": True,
 }
-_DEFAULT_SETTINGS: dict[str, Any] = {"sysImageA": _FAKE_IMAGE, "imageDefaultIndex": 1}
+_DEFAULT_SETTINGS: dict[str, Any] = {"sysImageA": _FAKE_IMAGE}
 
 
 def _preflight(*, dry_run: bool = False) -> dict[str, Any]:

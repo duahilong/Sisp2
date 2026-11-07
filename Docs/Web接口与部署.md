@@ -33,7 +33,7 @@ python -m app.gui_web.main --serve --port 8765
 | `GET /api/info` | 版本、平台、会话 dry-run |
 | `POST /api/session` | `{dry_run?}`；重启会话并清空 WebApi 事件缓冲 |
 | `GET /api/disks` | 重扫硬盘 |
-| `POST /api/prepare` | `{selection, dry_run}`；selection 为盘号数组或盘号到覆盖对象的映射（每盘覆盖支持 `c_size`、`data_size`、`data_partitions`、`win_gho`、`image_index`）；省略 selection 表示「本次扫描里所有可选定的盘」，显式传空数组仍然报错（`E_PREPARE`） |
+| `POST /api/prepare` | `{selection, dry_run}`；selection 为盘号数组或盘号到覆盖对象的映射（每盘覆盖支持 `c_size`、`data_size`、`data_partitions`、`win_gho`）；省略 selection 表示「本次扫描里所有可选定的盘」，显式传空数组仍然报错（`E_PREPARE`） |
 | `POST /api/submit` | 登记等待确认任务 |
 | `POST /api/confirm` | `{job_ids}`；把等待确认的任务放行（授权来自界面上的勾选，不需要额外文本）|
 | `POST /api/cancel` | `{job_id}`，协作式取消 |
@@ -41,7 +41,7 @@ python -m app.gui_web.main --serve --port 8765
 | `GET /api/jobs/{job_id}` | 单任务查询（含 `progress`） |
 | `GET /api/jobs/{job_id}/log?tail=200` | 任务日志尾部；只允许 `logDir` 下的 `.log` 文件，越界返回 `E_PATH` |
 | `POST /api/partition/preview` | `{disk_number?}`；返回**真实会执行的三段 diskpart 脚本**（只读，需先 `/api/prepare`；与执行器同源生成） |
-| `POST /api/images` | 不带 `path` 时返回设置里的两个系统槽位 `{versions: [{id, label, path, ok, exists, reason, size_display, block_index}], default}`（每个都读文件头 `FE EF`）；带 `path` 时只校验那一个 GHO（返回 `magic_ok`/`block_index`）。`directory` 参数仅兼容旧请求体，已不再使用。全部是纯文件读取，不 spawn 任何进程 |
+| `POST /api/images` | 不带 `path` 时返回设置里的两个系统槽位 `{versions: [{id, label, path, ok, exists, reason, size_display}], default}`（每个都读文件头 `FE EF`）；带 `path` 时只校验那一个 GHO（返回 `magic_ok`）。`directory` 参数仅兼容旧请求体，已不再使用。全部是纯文件读取，不 spawn 任何进程 |
 | `GET /api/boot/report` | 扫描各盘的 Windows 目录与 ESP，返回可修复性报告 |
 | `POST /api/boot/repair` | `{disk_number}`；临时盘符挂 ESP → `bcdboot … /f UEFI` → 重新扫描，结束必定释放盘符；真实模式受写盘闸门约束 |
 | `POST /api/events/poll` | `{cursor, limit}`，游标轮询补发 |

@@ -75,10 +75,9 @@ class PartitionInfo(TypedDict, total=False):
 
 
 class ImageInfo(TypedDict, total=False):
-    """``payload["image_info"]`` 的形状：Ghost 镜像路径与分区块序号。"""
+    """``payload["image_info"]`` 的形状。"""
 
     image_path: str
-    image_index: int
 
 
 class TaskPayload(TypedDict, total=False):

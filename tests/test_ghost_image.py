@@ -48,7 +48,7 @@ PAYLOAD = {
         # 单测用小尺寸：显式放宽后端下限（C ≥ 60 GB）
         "allow_small_partitions": True,
     },
-    "image_info": {"image_path": "D:/images/test.GHO", "image_index": 1},
+    "image_info": {"image_path": "D:/images/test.GHO"},
 }
 LETTERS = {"efi": "E", "windows": "F", "data": "G"}
 
@@ -57,7 +57,7 @@ def _parts(payload=None):
     return plan_partitions(payload or PAYLOAD, letters=LETTERS)
 
 
-def _ctx(tmp_path, *, parts=None, image=None, index=1, options=None, cancel=False):
+def _ctx(tmp_path, *, parts=None, image=None, options=None, cancel=False):
     gho = image or (tmp_path / "test.GHO")
     if not Path(gho).exists():
         Path(gho).write_bytes(GHO_MAGIC + b"\x01\x00" * 32)
@@ -66,7 +66,6 @@ def _ctx(tmp_path, *, parts=None, image=None, index=1, options=None, cancel=Fals
         parts=parts if parts is not None else _parts(),
         letters=LETTERS,
         image_path=str(gho),
-        image_index=index,
         cancel=_cancelled() if cancel else threading.Event(),
         log=CommandLog(None),
         options=options or {},
@@ -117,11 +116,12 @@ def test_ghost_command_shape() -> None:
     assert not any(part.startswith("-rb") for part in command)
 
 
-def test_ghost_command_uses_block_index() -> None:
+def test_ghost_command_always_uses_first_block() -> None:
+    """分区块序号不做设置：src 的后缀固定是 ``:1``（Ghost 的默认块）。"""
     command = ghost_command(
-        "ghost64.exe", "D:/img/test.GHO", ghost_disk=1, partition=2, block_index=3
+        "ghost64.exe", "D:/img/test.GHO", ghost_disk=1, partition=2
     )
-    assert "src=D:/img/test.GHO:3," in command[1]
+    assert "src=D:/img/test.GHO:1," in command[1]
 
 
 @pytest.mark.parametrize(
@@ -131,7 +131,6 @@ def test_ghost_command_uses_block_index() -> None:
         {"gho_path": ""},
         {"ghost_disk": 0},
         {"partition": 0},
-        {"block_index": 0},
     ],
 )
 def test_ghost_command_rejects_bad_input(kwargs: dict) -> None:
@@ -165,7 +164,7 @@ def test_ghost_target_keeps_windows_number_with_extra_data_partition() -> None:
             ],
             "allow_small_partitions": True,
         },
-        "image_info": {"image_path": "D:/images/test.GHO", "image_index": 1},
+        "image_info": {"image_path": "D:/images/test.GHO"},
     }
     parts = _parts(payload)
     assert [part.role for part in parts] == ["efi", "windows", "data", "data2"]
@@ -182,7 +181,7 @@ def test_ghost_target_rejects_bad_plan() -> None:
             "data_size_gb": "auto",
             "allow_small_partitions": True,
         },
-        "image_info": {"image_path": "D:/images/test.GHO", "image_index": 1},
+        "image_info": {"image_path": "D:/images/test.GHO"},
     }
     parts = list(_parts(payload))
     swapped = [parts[1], parts[0], *parts[2:]]
@@ -196,7 +195,6 @@ def test_sniff_gho_accepts_magic(tmp_path) -> None:
     gho.write_bytes(GHO_MAGIC + b"\x00" * 16)
     info = sniff_gho(gho)
     assert info["ok"] is True
-    assert info["block_index"] == 1
     assert info["size_bytes"] == 18
 
 
@@ -263,7 +261,7 @@ def test_phase_command_and_success(tmp_path) -> None:
     result = outcome.results[0]
     assert result.key == "image"
     assert result.details["engine"] == "ghost"
-    assert result.details["index"] == 1
+    assert result.details["image"].endswith("test.GHO")
 
 
 def test_phase_failure_reads_ghosterr(tmp_path) -> None:
@@ -361,7 +359,7 @@ def _problems(payload, **kwargs):
 
 
 def _payload(path: str) -> dict:
-    return {"image_info": {"image_path": path, "image_index": 1}}
+    return {"image_info": {"image_path": path}}
 
 
 def test_plan_accepts_valid_gho(tmp_path) -> None:

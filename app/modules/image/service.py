@@ -122,7 +122,6 @@ def inspect_image(path: str | Path) -> dict[str, Any]:
             "reason": sniffed.get("reason", ""),
             "size_bytes": sniffed.get("size_bytes"),
             "size_display": _size_display(sniffed.get("size_bytes")),
-            "block_index": sniffed.get("block_index", 1),
         }
     if suffix in ISO_SUFFIXES:
         raise ImageError(f"{target.name} 是 ISO：Ghost 只能还原 .GHO，请先封装成 GHO")
