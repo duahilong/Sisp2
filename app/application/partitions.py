@@ -61,7 +61,7 @@ MIN_EXTRA_DATA_GB = 1
 # 界面永远不发这个字段，普通用户也看不到，只给测试/文档用。
 ALLOW_SMALL_KEY = "allow_small_partitions"
 
-# C 之后最多再加一个数据分区（E）。盘符池、verify 判据都按这个上限设计。
+# C 之后最多再加一个数据分区（E）。盘符池、引导校验都按这个上限设计。
 MAX_DATA_PARTITIONS = 2
 
 # MSR（Microsoft Reserved）分区的 GPT 类型；``convert gpt`` 会自动建一个 16 MB 的。

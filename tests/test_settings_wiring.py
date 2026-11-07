@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 import threading
 from pathlib import Path
@@ -172,17 +173,28 @@ def _image_phase(commands: list[list[str]], **kwargs):
     return GhostImagePhase(shell, ghost="ghost64.exe", cwd=kwargs.get("cwd"))
 
 
+# 引导校验脚本的"合格"输出：写引导之后探针要能查到这两个文件
+_PROBE_OK = json.dumps(
+    {
+        "boot_file": r"E:\EFI\Microsoft\Boot\bootmgfw.efi",
+        "system_file": r"F:\Windows\System32\config\SYSTEM",
+    }
+)
+
+
 def _boot_phase(commands: list[list[str]]):
     from app.application.command_log import CommandLog
-    from app.application.phases.system import BootPhase
     from app.application.shell import ProcessShell
+    from app.application.uefi import UefiBootPhase
 
     def fake_run(command, timeout, *, env=None, cwd=None):
         commands.append(list(command))
+        if str(command[0]).lower().startswith("powershell"):
+            return 0, _PROBE_OK, 0.1
         return 0, "ok", 0.1
 
     shell = ProcessShell(log=CommandLog(None), runner=fake_run)
-    return BootPhase(shell, bcdboot="bcdboot.exe")
+    return UefiBootPhase(shell, bcdboot="bcdboot.exe")
 
 
 def _ctx(options=None, letters=None):
@@ -272,9 +284,21 @@ def test_runner_accepts_runner_options_on_spec(
     letters = {"efi": "E", "windows": "F", "data": "G"}
     parts = plan_partitions(payload, letters=letters)
     shell = fake_shell(query_handler=lambda disk: make_snapshot(parts), msr=None)
-    process = fake_process()
+
+    def handler(command, timeout, env):
+        if str(command[0]).lower().startswith("powershell"):
+            return 0, _PROBE_OK, 0.1
+        return 0, "ok", 0.1
+
+    process = fake_process(handler=handler)
+    from app.application.uefi import UefiBootPhase
+
     runner = make_runner(
-        shell=shell, process=process, ghost="ghost64.exe", bcdboot="bcdboot.exe"
+        shell=shell,
+        process=process,
+        ghost="ghost64.exe",
+        bcdboot="bcdboot.exe",
+        uefi=UefiBootPhase(process, bcdboot="bcdboot.exe"),
     )
 
     spec = SimpleNamespace(

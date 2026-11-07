@@ -1,4 +1,4 @@
-"""编排：分区组 → 系统组 → 校验组，以及"失败后谁跳过"的唯一实现。
+"""编排：分区组 → 系统组，以及"失败后谁跳过"的唯一实现。
 
 **为什么必须有这一层**：以前"分区失败就把镜像/引导记成 skipped"这条语义散在
 ``_partition_phase`` / ``_fail_diskpart`` 里，分区阶段被迫认识下游步骤的名字。
@@ -28,7 +28,6 @@ from app.application.partitions import (
 from app.application.phases.base import PhaseContext, PhaseOutcome, PhaseResult
 from app.application.phases.partition import EfiLetterReleaser, PartitionPhase
 from app.application.phases.system import SystemPhase
-from app.application.phases.verify import BootVerifyPhase
 from app.application.steps import (
     GROUP_OF,
     STEP_KEYS,
@@ -64,19 +63,17 @@ class PipelineResult:
 
 
 class JobPipeline:
-    """把三个互不依赖的阶段按组串起来。"""
+    """把两个互不依赖的阶段按组串起来。"""
 
     def __init__(
         self,
         *,
         partition: PartitionPhase,
         system: SystemPhase,
-        verify: BootVerifyPhase | None = None,
         cleanup: EfiLetterReleaser | None = None,
     ) -> None:
         self.partition = partition
         self.system = system
-        self.verify = verify
         self.cleanup = cleanup
 
     # ------------------------------------------------------------------ 前置
@@ -144,14 +141,14 @@ class JobPipeline:
         if ctx.cancelled():
             self._skip_groups(
                 result,
-                ("system", "verify"),
+                ("system",),
                 "任务已取消（分区已建好，镜像未应用）",
                 ctx,
             )
             result.failure = "任务已取消（分区已建好，镜像未应用）"
             return result
 
-        # ===== 组 2：写入系统（镜像 + 引导）=====
+        # ===== 组 2：写入系统（镜像 + 引导并校验）=====
         system = self.system.run(ctx)
         for item in system.results:
             result.add(item, ctx)
@@ -160,14 +157,6 @@ class JobPipeline:
             if not system.cancelled:
                 self._skip_after(result, "system", system, ctx)
             return result
-
-        # ===== 组 3：装机结果校验 =====
-        if self.verify is not None:
-            checked = self.verify.run(ctx)
-            for item in checked.results:
-                result.add(item, ctx)
-            if not checked.ok:
-                result.failure = checked.message
         return result
 
     # ------------------------------------------------------------------ 收尾
@@ -232,7 +221,7 @@ def _reason_text(group: str) -> str:
     if group == "partition":
         return "分区验收未通过，未写入任何镜像"
     if group == "system":
-        return "写入系统未完成，未做装机校验"
+        return "写入系统未完成（镜像/引导未成功）"
     return "前一步失败"
 
 

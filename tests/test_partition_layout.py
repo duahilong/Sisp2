@@ -4,7 +4,7 @@
 
 1. **默认布局与旧行为逐字相同**——不加额外分区时生成的 diskpart 脚本一个字符
    都不能变，否则等于把 235 个已通过的真机路径重新赌一遍；
-2. 加了 E 之后，布局 / 盘符 / 容量 / verify 判据仍然自洽（4 个分区、4 个盘符、
+2. 加了 E 之后，布局 / 盘符 / 容量判据仍然自洽（4 个分区、4 个盘符、
    未分配空间可显示）。
 """
 
@@ -36,7 +36,6 @@ from app.application.partitions import (
     unallocated_bytes,
     wipe_lines,
 )
-from app.application.real_runner import _verify_verdict
 from app.application.service import SispService
 from app.application.workflow import WorkflowController
 from app.drive_letters import build_drive_letter_allocations
@@ -640,53 +639,6 @@ def test_drive_letters_report_short_pool() -> None:
         build_drive_letter_allocations([1], [letter for letter in "EFGHIJKLMNOPQRSTUVWXY"], {1: 1})
     assert "可用盘符不足" in str(excinfo.value)
     assert "4 个盘符" in str(excinfo.value)
-
-
-# --------------------------------------------------------------------- verify
-
-
-def _verify_payload(count: int) -> dict[str, Any]:
-    return {
-        "partition_style": "GPT",
-        "partitions": [
-            {"number": index + 1, "size_bytes": GIB, "drive_letter": None}
-            for index in range(count)
-        ],
-        "boot_file": r"G:\EFI\Microsoft\Boot\bootmgfw.efi",
-        "system_file": r"H:\Windows\System32\config\SYSTEM",
-    }
-
-
-def test_verify_requires_planned_partition_count() -> None:
-    ok, message, _ = _verify_verdict(_verify_payload(3), min_partitions=4)
-    assert ok is False
-    assert "期望 4 个" in message
-
-
-def test_verify_rejects_leftover_msr_partition() -> None:
-    """``convert gpt`` 自动建的 MSR 必须在建分区前删掉；多出来一个就判失败。"""
-    payload = _verify_payload(4)
-    payload["partitions"].append(
-        {
-            "number": 5,
-            "size_bytes": 16 * 1024 * 1024,
-            "drive_letter": None,
-            "type": "Reserved",
-            "gpt_type": f"{{{MSR_GPT}}}",
-        }
-    )
-    ok, message, details = _verify_verdict(payload, min_partitions=4)
-    assert ok is False
-    assert "保留分区（MSR）" in message
-    assert "预期布局是 EFI + C + D(+E)" in message
-    assert details["problems"]
-
-    # 只有 MSR 类型/名称，没有多余分区时也照样拦
-    payload2 = _verify_payload(4)
-    payload2["partitions"][0]["type"] = "Reserved"
-    ok2, message2, _ = _verify_verdict(payload2, min_partitions=4)
-    assert ok2 is False
-    assert "保留分区" in message2
 
 
 # --------------------------------------------------------------------- 工作流接入

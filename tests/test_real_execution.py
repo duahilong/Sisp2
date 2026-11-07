@@ -1188,7 +1188,7 @@ def test_partition_step_details_carry_verification(
     assert layout.details["problems"] == []
     assert layout.details["efi_partition"] == 1
     assert layout.details["partitions"]
-    # 进度键固定为 7 步（含 layout）
+    # 进度键固定为 6 步（含 layout）
     assert [step.key for step in result.steps] == [
         "efi",
         "windows",
@@ -1196,7 +1196,6 @@ def test_partition_step_details_carry_verification(
         "layout",
         "image",
         "boot",
-        "verify",
     ]
 
 
@@ -1275,8 +1274,8 @@ def test_cancelled_job_reports_cancelled_even_if_executor_fails():
     assert job.result is not None and "已取消" in (job.result.error or "")
 
 # ------------------------------------------------------ 进度事件（job.step）
-# 真实写盘的 7 个步骤：分区组（含独立的「分区验收」）+ 系统组 + 校验组
-_STAGES = ("efi", "windows", "data", "layout", "image", "boot", "verify")
+# 真实写盘的 6 个步骤：分区组（含独立的「分区验收」）+ 系统组（镜像 + 引导）
+_STAGES = ("efi", "windows", "data", "layout", "image", "boot")
 
 
 def _step_manager() -> tuple[JobManager, Job, list[tuple[str, str]]]:
@@ -1349,7 +1348,7 @@ def test_step_events_are_broadcast_for_every_stage():
     assert job.to_dict()["progress"]["percent"] == 100
 
 
-# ------------------------------------------------- 执行器失败分支（Ghost/bcdboot/verify/超时）
+# ------------------------------------------------- 执行器失败分支（Ghost/bcdboot/超时）
 def _whole_disk_spec(tmp_path):
     image = tmp_path / "tiny.GHO"
     image.write_bytes(b"x")
@@ -1380,10 +1379,10 @@ def test_runner_reports_ghost_failure(
     image_step = next(step for step in result.steps if step.key == "image")
     assert image_step.failed is True
     assert "87" in image_step.message
-    # 引导与校验都记为“没执行”，分区步骤仍是通过的
+    # 引导记为"没执行"，分区步骤仍是通过的
     statuses = {step.key: step.status for step in result.steps}
     assert statuses["efi"] == "ok" and statuses["layout"] == "ok"
-    assert statuses["boot"] == "skipped" and statuses["verify"] == "skipped"
+    assert statuses["boot"] == "skipped"
     assert "跳过引导" in next(step for step in result.steps if step.key == "boot").message
 
 
@@ -1398,7 +1397,12 @@ def test_runner_reports_bcdboot_failure_and_releases_letter(
             return 2, "BFSVC Error: Could not open the BCD template store.", 0.1
         return 0, "ok", 0.1
 
-    runner = make_runner(shell=shell, process=fake_process(handler=handler))
+    from app.application.uefi import UefiBootPhase
+
+    process = fake_process(handler=handler)
+    runner = make_runner(
+        shell=shell, process=process, uefi=UefiBootPhase(process, bcdboot="bcdboot.exe")
+    )
 
     result = runner.run(spec, threading.Event())
 
@@ -1408,22 +1412,24 @@ def test_runner_reports_bcdboot_failure_and_releases_letter(
     assert "2" in boot.message
     # bcdboot 失败也必须释放 EFI 临时盘符
     assert shell.released == [(2, 1, "E")]
-    assert next(step for step in result.steps if step.key == "verify").status == "skipped"
+    # 引导没写成，就不该再假装校验过
+    assert [step.key for step in result.steps].count("boot") == 1
 
 
-def test_runner_reports_verify_rejection(
-    tmp_path, make_runner, fake_shell, fake_process, fake_verify, make_snapshot
+def test_runner_reports_boot_verification_rejection(
+    tmp_path, make_runner, fake_shell, fake_process, fake_uefi, make_snapshot
 ) -> None:
+    """引导写成功、但盘上查不到 bootmgfw.efi → 仍然判失败（不能六步全绿）。"""
     spec = _whole_disk_spec(tmp_path)
     shell = _ok_shell(fake_shell, make_snapshot, spec.task_payload)
-    verify = fake_verify(ok=False, message="EFI 分区里没有 bootmgfw.efi（bcdboot 没写进去）")
-    runner = make_runner(shell=shell, process=fake_process(), verify=verify)
+    uefi = fake_uefi(ok=False, message="EFI 分区里没有 bootmgfw.efi（bcdboot 没写进去）")
+    runner = make_runner(shell=shell, process=fake_process(), uefi=uefi)
 
     result = runner.run(spec, threading.Event())
 
     assert result.success is False
     assert "bootmgfw.efi" in (result.error or "")
-    assert next(step for step in result.steps if step.key == "verify").failed is True
+    assert next(step for step in result.steps if step.key == "boot").failed is True
 
 
 def test_runner_reports_diskpart_timeout(

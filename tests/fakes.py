@@ -159,15 +159,16 @@ def build_snapshot(
     }
 
 
-class FakeVerify:
-    """``BootVerifyPhase`` 替身：默认返回"校验通过"。
+class FakeUefiBoot:
+    """``UefiBootPhase`` 替身：默认返回"写引导 + 校验都成功"。
 
-    任务级测试（分区/镜像/引导）不关心装机校验的细节，用它可以只看编排；
-    校验本身的判据由 ``test_image_gate_verify.py`` 直接测 ``BootVerifyPhase``。
+    任务级测试（分区/镜像/引导）不关心引导细节，用它可以只看编排；
+    写引导与校验本身的判据由 ``test_uefi_boot.py`` 直接测 ``UefiBootPhase``
+    / ``BootProbe`` / ``BcdbootWriter``。
     """
 
     def __init__(self, ok: bool = True, message: str = "ok", details: Any = None) -> None:
-        self.group = "verify"
+        self.group = "system"
         self.ok = ok
         self.message = message
         self.details = details or {}
@@ -178,8 +179,8 @@ class FakeVerify:
 
         self.calls += 1
         if self.ok:
-            return PhaseOutcome.succeeded(PhaseResult.ok("verify", self.message, **self.details))
+            return PhaseOutcome.succeeded(PhaseResult.ok("boot", self.message, **self.details))
         return PhaseOutcome.failed(
-            PhaseResult.failed("verify", self.message, **self.details),
+            PhaseResult.failed("boot", self.message, **self.details),
             message=self.message,
         )

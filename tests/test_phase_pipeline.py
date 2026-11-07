@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
 
@@ -26,7 +27,7 @@ from app.application.partitions import (
 from app.application.phases.base import PhaseContext, PhaseOutcome, PhaseResult
 from app.application.phases.ghost import GhostImagePhase
 from app.application.phases.partition import PartitionPhase
-from app.application.phases.system import BootPhase, SystemPhase
+from app.application.phases.system import SystemPhase
 from app.application.pipeline import JobPipeline
 from app.application.steps import (
     GROUP_OF,
@@ -35,7 +36,8 @@ from app.application.steps import (
     group_progress,
     phases_payload,
 )
-from tests.fakes import FakeDiskpartShell, FakeProcess, FakeVerify, build_snapshot
+from app.application.uefi import UefiBootPhase
+from tests.fakes import FakeDiskpartShell, FakeProcess, FakeUefiBoot, build_snapshot
 
 PAYLOAD = {
     "partition_info": {
@@ -71,18 +73,18 @@ def _ctx(tmp_path, *, parts=None, letters=None, options=None, cancel=False, on_s
 
 
 # ---------------------------------------------------------------- 步骤契约
-def test_step_contract_has_seven_steps_with_layout():
-    """「分区验收」是独立一步：分区组 4 步 + 系统组 2 步 + 校验组 1 步。"""
-    assert STEP_KEYS == ("efi", "windows", "data", "layout", "image", "boot", "verify")
+def test_step_contract_has_six_steps_with_layout():
+    """「分区验收」是独立一步：分区组 4 步 + 系统组 2 步（引导与校验合一步）。"""
+    assert STEP_KEYS == ("efi", "windows", "data", "layout", "image", "boot")
     assert STEP_GROUPS["partition"] == ("efi", "windows", "data", "layout")
     assert GROUP_OF["layout"] == "partition"
     assert GROUP_OF["image"] == "system"
-    assert GROUP_OF["verify"] == "verify"
+    assert GROUP_OF["boot"] == "system"
 
 
 def test_phases_payload_is_declarative():
     phases = phases_payload()
-    assert [phase["key"] for phase in phases] == ["partition", "system", "verify"]
+    assert [phase["key"] for phase in phases] == ["partition", "system"]
     assert phases[0]["title"] == "硬盘分区"
     assert phases[0]["steps"] == ["efi", "windows", "data", "layout"]
     assert phases[0]["stop_on_failure"] is True
@@ -93,7 +95,7 @@ def test_group_progress_ignores_extra_steps():
     groups = group_progress(["efi", "windows", "data", "layout", "diskpart_preview"], None)
     assert groups["partition"]["percent"] == 100
     assert groups["system"]["percent"] == 0
-    assert groups["verify"]["percent"] == 0
+    assert "verify" not in groups
 
 
 # ---------------------------------------------------------------- 分区阶段独立
@@ -190,16 +192,15 @@ class _RecordingPhase:
         )
 
 
-def _pipeline(tmp_path, *, partition, system, verify=None):
+def _pipeline(tmp_path, *, partition, system):
     return JobPipeline(
         partition=partition,
         system=system,
-        verify=verify,
     )
 
 
 def test_pipeline_skips_system_when_partition_fails(tmp_path):
-    """分区失败 → 系统组一次都不调用，镜像/引导/校验都标 skipped。"""
+    """分区失败 → 系统组一次都不调用，镜像/引导都标 skipped。"""
     partition = _RecordingPhase(
         "partition",
         ok=False,
@@ -207,23 +208,21 @@ def test_pipeline_skips_system_when_partition_fails(tmp_path):
         results=(PhaseResult.failed("layout", "分区验收不通过：大小不符"),),
     )
     system = _RecordingPhase("system")
-    verify = _RecordingPhase("verify")
-    pipeline = _pipeline(tmp_path, partition=partition, system=system, verify=verify)
+    pipeline = _pipeline(tmp_path, partition=partition, system=system)
 
     result = pipeline.run(_ctx(tmp_path))
 
     assert result.ok is False
     assert system.calls == 0
-    assert verify.calls == 0
     statuses = {item.key: item.status for item in result.results}
     assert statuses["layout"] == "failed"
     assert statuses["image"] == "skipped"
     assert statuses["boot"] == "skipped"
-    assert statuses["verify"] == "skipped"
     assert "未执行" in next(item for item in result.results if item.key == "image").message
 
 
-def test_pipeline_skips_verify_when_system_fails(tmp_path):
+def test_pipeline_stops_after_system_failure(tmp_path):
+    """系统组失败就是终点：引导（含校验）失败后没有任何后续步骤。"""
     partition = _RecordingPhase(
         "partition",
         results=(
@@ -237,16 +236,14 @@ def test_pipeline_skips_verify_when_system_fails(tmp_path):
         "system", ok=False, message="写引导失败（bcdboot 退出码 2）",
         results=(PhaseResult.ok("image"), PhaseResult.failed("boot", "bcdboot 失败")),
     )
-    verify = _RecordingPhase("verify")
-    pipeline = _pipeline(tmp_path, partition=partition, system=system, verify=verify)
+    pipeline = _pipeline(tmp_path, partition=partition, system=system)
 
     result = pipeline.run(_ctx(tmp_path))
 
     assert result.ok is False
-    assert verify.calls == 0
     statuses = {item.key: item.status for item in result.results}
     assert statuses["boot"] == "failed"
-    assert statuses["verify"] == "skipped"
+    assert len(result.results) == len(STEP_KEYS)
 
 
 def test_pipeline_cancel_after_partition_skips_system(tmp_path):
@@ -297,12 +294,24 @@ def test_service_preview_uses_same_generator():
 
 
 # ---------------------------------------------------------------- 系统组仍可独立用
+def _bcdboot_ok(command, timeout, env):
+    """bcdboot 成功 + 校验脚本返回“两个文件都在”。"""
+    if command[0].endswith("bcdboot.exe"):
+        return 0, "boot files updated", 0.1
+    return 0, json.dumps(
+        {
+            "boot_file": "E:\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
+            "system_file": "F:\\Windows\\System32\\config\\SYSTEM",
+        }
+    ), 0.1
+
+
 def test_system_phase_runs_with_only_process_shell(tmp_path):
     parts = _parts()
-    process = FakeProcess()
+    process = FakeProcess(handler=_bcdboot_ok)
     system = SystemPhase(
         GhostImagePhase(process, ghost="ghost64.exe"),
-        BootPhase(process, bcdboot="bcdboot.exe"),
+        UefiBootPhase(process, bcdboot="bcdboot.exe"),
     )
     outcome = system.run(_ctx(tmp_path, parts=parts))
 
@@ -311,18 +320,20 @@ def test_system_phase_runs_with_only_process_shell(tmp_path):
     assert process.calls[0][0].endswith("ghost64.exe")
     assert "-clone,mode=pload" in process.calls[0][1]
     assert process.calls[1][0].endswith("bcdboot.exe")
+    assert process.calls[2][0].startswith("powershell")
 
 
-def test_verify_phase_can_be_swapped(tmp_path):
-    """校验组是可替换的：装配一个替身进 pipeline，不碰 PowerShell。"""
-    partition = _RecordingPhase("partition", results=(PhaseResult.ok("layout"),))
-    system = _RecordingPhase("system", results=(PhaseResult.ok("image"), PhaseResult.ok("boot")))
-    verify = FakeVerify(ok=False, message="EFI 分区里没有 bootmgfw.efi")
-    result = _pipeline(tmp_path, partition=partition, system=system, verify=verify).run(_ctx(tmp_path))
+def test_system_phase_accepts_swapped_boot(tmp_path):
+    """引导阶段可替换：装配一个替身进 SystemPhase，不碰 bcdboot / PowerShell。"""
+    parts = _parts()
+    process = FakeProcess()
+    boot = FakeUefiBoot(ok=False, message="EFI 分区里没有 bootmgfw.efi")
+    system = SystemPhase(GhostImagePhase(process, ghost="ghost64.exe"), boot)
+    outcome = system.run(_ctx(tmp_path, parts=parts))
 
-    assert result.ok is False
-    assert "bootmgfw.efi" in (result.failure or "")
-    assert verify.calls == 1
+    assert outcome.ok is False
+    assert "bootmgfw.efi" in outcome.message
+    assert boot.calls == 1
 
 
 # ---------------------------------------------------------------- API 预览
@@ -335,7 +346,7 @@ def test_prepare_returns_declarative_phases(tmp_path):
         "/api/prepare", json={"selection": {"1": {"c_size": 20, "data_size": 30}}}
     ).json()["data"]
     phases = prepared[0]["plan"]["phases"]
-    assert [phase["key"] for phase in phases] == ["partition", "system", "verify"]
+    assert [phase["key"] for phase in phases] == ["partition", "system"]
     assert phases[0]["steps"] == ["efi", "windows", "data", "layout"]
 
 
@@ -405,8 +416,7 @@ def test_pipeline_reports_every_step_through_on_step(tmp_path):
     system = _RecordingPhase(
         "system", results=(PhaseResult.ok("image"), PhaseResult.ok("boot"))
     )
-    verify = _RecordingPhase("verify", results=(PhaseResult.ok("verify"),))
-    pipeline = _pipeline(tmp_path, partition=partition, system=system, verify=verify)
+    pipeline = _pipeline(tmp_path, partition=partition, system=system)
     ctx, events = _recording_ctx(tmp_path)
 
     pipeline.run(ctx)
@@ -431,11 +441,11 @@ def test_pipeline_reports_skipped_steps_through_on_step(tmp_path):
     statuses = {key: status for key, status, _ in events}
     assert statuses["layout"] == "failed"
     assert statuses["image"] == "skipped"
-    assert statuses["verify"] == "skipped"
+    assert "verify" not in statuses
 
 
 def test_precheck_missing_tools_reports_all_steps(tmp_path):
-    """缺系统工具时七个步骤都标 skipped，并且都上报进度。"""
+    """缺系统工具时六个步骤都标 skipped，并且都上报进度。"""
     pipeline = _pipeline(
         tmp_path, partition=_RecordingPhase("partition"), system=_RecordingPhase("system")
     )
@@ -449,10 +459,10 @@ def test_precheck_missing_tools_reports_all_steps(tmp_path):
 
 
 def test_real_runner_fills_job_progress(tmp_path):
-    """真实执行器（替身壳）+ JobManager：进度必须是 7/7、分组进度齐全。
+    """真实执行器（替身壳）+ JobManager：进度必须是 6/6、分组进度齐全。
 
     这是 VM 上真实写盘暴露出来的回归：状态是 ok、步骤结果是全的，但
-    ``job.progress`` 里 ``completed`` 为空、三组进度全 0（阶段只产出结果，
+    ``job.progress`` 里 ``completed`` 为空、分组进度全 0（阶段只产出结果，
     没人把它翻译成进度事件）。
     """
     from app.application.jobs import ExecutionPlan, JobManager, JobSpec, JobStatus
@@ -467,8 +477,8 @@ def test_real_runner_fills_job_progress(tmp_path):
     parts = _parts(payload)
     runner = WindowsDiskRunner(
         shell=FakeDiskpartShell(query_handler=lambda disk: build_snapshot(parts)),
-        process=FakeProcess(),
-        verify=FakeVerify(),
+        process=FakeProcess(handler=_bcdboot_ok),
+        uefi=FakeUefiBoot(),
         log_dir=str(tmp_path),
     )
     manager = JobManager(executor=runner.run)
@@ -491,4 +501,4 @@ def test_real_runner_fills_job_progress(tmp_path):
     groups = job.progress["groups"]
     assert groups["partition"]["done"] is True
     assert groups["system"]["percent"] == 100
-    assert groups["verify"]["percent"] == 100
+    assert "verify" not in groups

@@ -1,10 +1,9 @@
 """阶段契约：``PhaseContext`` / ``PhaseResult`` / ``PhaseOutcome``。
 
-一次真实写盘被拆成三组互不依赖的阶段：
+一次真实写盘被拆成两组互不依赖的阶段：
 
     partition  → 清盘 / 删 MSR / 建分区 / 分区验收（layout）
-    system     → 应用镜像（Ghost） / 写引导（bcdboot）
-    verify     → 装机结果校验（引导文件 + 系统文件）
+    system     → 应用镜像（Ghost） / 写引导并校验（bcdboot + 文件检查）
 
 阶段之间只通过这里的类型交换信息：**没有 ``self``、没有共享可变 dict**。
 分区阶段说"我做完了、盘动过、ESP 是第 k 个分区"；装机阶段只管读自己的入参。

@@ -232,7 +232,7 @@ class PartitionPhase:
         """分区失败：``efi`` 记为失败，同组其余步骤补 ``skipped``。
 
         "失败归到 efi 步骤"是历史行为（四段 diskpart 的分区组在界面上是 3 个
-        子步骤），保持不改；装机组与校验组的 ``skipped`` 由编排层统一补——
+        子步骤），保持不改；系统组的 ``skipped`` 由编排层统一补——
         分区阶段不需要知道它们叫什么。
         """
         details: dict[str, Any] = {}

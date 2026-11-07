@@ -4,10 +4,11 @@
 ``jobs.py`` 反向 import 执行器才能算出"6 步进度"，步骤键成了跨层隐式协议。
 现在这里是零依赖的纯数据：
 
-- ``STEP_KEYS``：一次真实写盘的全部步骤（7 步）；
+- ``STEP_KEYS``：一次真实写盘的全部步骤（6 步）；
 - ``STEP_GROUPS``：步骤分组——**分区组**（EFI / C / D / 分区验收）与
-  **系统组**（镜像 / 引导）、**校验组**（装机结果校验）。分区与装机由此在
-  契约层面就是两件事；
+  **系统组**（镜像 / 引导并校验）。分区与装机由此在契约层面就是两件事；
+  写引导与校验引导合成同一个 ``boot`` 步骤，因为两者用的是同一组盘符、
+  必须紧邻发生（见 :mod:`app.application.uefi`）。
 - ``phases_payload()``：给 ``POST /api/prepare`` 的声明式编排，前端按它渲染，
   不再硬编码一份步骤表。
 """
@@ -21,24 +22,20 @@ from typing import Any
 # 以前它被塞在 ``data`` 步骤的 details 里，进度条上看不出来，失败原因也藏在日志。
 PARTITION_STEPS: tuple[str, ...] = ("efi", "windows", "data", "layout")
 SYSTEM_STEPS: tuple[str, ...] = ("image", "boot")
-VERIFY_STEPS: tuple[str, ...] = ("verify",)
 
 STEP_GROUPS: dict[str, tuple[str, ...]] = {
     "partition": PARTITION_STEPS,
     "system": SYSTEM_STEPS,
-    "verify": VERIFY_STEPS,
 }
-GROUP_ORDER: tuple[str, ...] = ("partition", "system", "verify")
+GROUP_ORDER: tuple[str, ...] = ("partition", "system")
 GROUP_TITLES: dict[str, str] = {
     "partition": "硬盘分区",
     "system": "写入系统",
-    "verify": "装机校验",
 }
-# 分区组失败后不再执行后面的组——这是产品语义，不是实现细节。
+# 分组失败后不再执行后面的组——这是产品语义，不是实现细节。
 GROUP_STOP_ON_FAILURE: dict[str, bool] = {
     "partition": True,
     "system": True,
-    "verify": False,
 }
 
 STEP_TITLES: dict[str, str] = {
@@ -47,8 +44,7 @@ STEP_TITLES: dict[str, str] = {
     "data": "创建数据分区",
     "layout": "分区验收（对照计划）",
     "image": "应用 GHO 镜像（Ghost）",
-    "boot": "写入 UEFI 引导",
-    "verify": "装机结果校验（引导文件 + 系统文件）",
+    "boot": "写入 UEFI 引导并校验",
 }
 STEP_KEYS: tuple[str, ...] = tuple(STEP_TITLES)
 GROUP_OF: dict[str, str] = {
@@ -123,7 +119,6 @@ __all__ = [
     "STEP_KEYS",
     "STEP_TITLES",
     "SYSTEM_STEPS",
-    "VERIFY_STEPS",
     "following_groups",
     "group_progress",
     "phases_payload",

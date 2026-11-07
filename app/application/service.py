@@ -574,14 +574,7 @@ class SispService:
             ),
             StepResult(
                 key="boot",
-                title="写入 UEFI 引导",
-                status=STEP_SKIPPED,
-                message="dry-run 未执行",
-                details={},
-            ),
-            StepResult(
-                key="verify",
-                title=STEP_TITLES["verify"],
+                title=STEP_TITLES["boot"],
                 status=STEP_SKIPPED,
                 message="dry-run 未执行",
                 details={},

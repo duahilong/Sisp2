@@ -40,8 +40,7 @@ from app.application.partitions import (
 from app.application.phases.base import PhaseContext, PhaseOutcome, PhaseResult
 from app.application.phases.ghost import GhostImagePhase
 from app.application.phases.partition import EfiLetterReleaser, PartitionPhase
-from app.application.phases.system import BootPhase, SystemPhase
-from app.application.phases.verify import BootVerifyPhase, verify_verdict
+from app.application.phases.system import SystemPhase
 from app.application.pipeline import JobPipeline, PipelineResult
 from app.application.runner_utils import (
     RunnerError,
@@ -66,6 +65,7 @@ from app.application.shell import (
     find_program,
 )
 from app.application.steps import STEP_KEYS, STEP_TITLES
+from app.application.uefi import BootProbe, UefiBootPhase
 from app.models import STEP_FAILED, STEP_OK, STEP_SKIPPED, StepResult, WorkerResult
 
 _LOGGER = logging.getLogger(__name__)
@@ -75,7 +75,6 @@ _FS_TOKENS = {"ntfs": "ntfs"}
 
 # 兼容旧名字（外部脚本与测试在用）。
 _partition_verdict = partition_verdict
-_verify_verdict = verify_verdict
 
 
 def data_fs_token(payload: Mapping[str, Any]) -> str:
@@ -116,7 +115,8 @@ class WindowsDiskRunner:
     - ``shell``：``DiskpartShell`` 形状的对象（分区阶段用），不传就按本次任务的
       日志/临时目录现造；
     - ``process``：``ProcessShell`` 形状的对象（Ghost/bcdboot/校验用）；
-    - ``verify``：``BootVerifyPhase`` 形状的对象（``.run(ctx)``），不传用默认实现；
+    - ``uefi``：``UefiBootPhase`` 形状的对象（``.run(ctx)``），写引导 + 校验，
+      不传用默认实现（bcdboot 由 ``self.bcdboot`` 决定）；
     - ``pipeline_factory``：``(ctx) -> JobPipeline``，给需要换掉整个编排的测试用。
 
     这些缝让测试"注入替身"而不是"给 runner 的私有方法赋值"——后者在实现搬家
@@ -134,7 +134,7 @@ class WindowsDiskRunner:
         allow_real_disk: bool = False,
         shell: Any = None,
         process: Any = None,
-        verify: Any = None,
+        uefi: Any = None,
         pipeline_factory: Any = None,
     ) -> None:
         # 真实写盘授权：默认关闭。生产入口 build_real_runner() 会显式打开；
@@ -149,7 +149,7 @@ class WindowsDiskRunner:
         self.powershell = powershell or find_program("powershell.exe")
         self._shell = shell
         self._process = process
-        self._verify = verify
+        self._uefi = uefi
         self._pipeline_factory = pipeline_factory
 
     # ------------------------------------------------------------------ 入口
@@ -194,16 +194,19 @@ class WindowsDiskRunner:
             return self._pipeline_factory(ctx)
         shell = self._build_shell(ctx.log, ctx.options, ctx.env or {})
         process = self._build_process(ctx.log, ctx.env or {})
-        verify = self._verify or BootVerifyPhase(process, powershell=self.powershell)
+        uefi = self._uefi or UefiBootPhase(
+            process,
+            bcdboot=self.bcdboot,
+            probe=BootProbe(process, powershell=self.powershell),
+        )
         # ghosterr.txt 落在日志目录（没有就落到本次任务的临时目录）。
         cwd = existing_dir(self.log_dir) or existing_dir(ctx.options.get("temp_dir"))
         return JobPipeline(
             partition=PartitionPhase(shell),
             system=SystemPhase(
                 GhostImagePhase(process, ghost=self.ghost, cwd=cwd),
-                BootPhase(process, bcdboot=self.bcdboot),
+                uefi,
             ),
-            verify=verify,
             cleanup=EfiLetterReleaser(shell),
         )
 
@@ -386,7 +389,6 @@ __all__ = [
     "WindowsDiskRunner",
     "_CommandLog",
     "_partition_verdict",
-    "_verify_verdict",
     "build_real_runner",
     "create_partition_lines",
     "data_fs_token",
@@ -397,6 +399,5 @@ __all__ = [
     "preview_segments",
     "preview_text",
     "prune_runner_logs",
-    "verify_verdict",
     "wipe_lines",
 ]

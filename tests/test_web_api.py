@@ -492,7 +492,7 @@ def _fake_job(job_id: str, log_path: str) -> SimpleNamespace:
     return SimpleNamespace(
         id=job_id,
         result=SimpleNamespace(
-            steps=[SimpleNamespace(key="verify", status="ok", details={"log_path": log_path})]
+            steps=[SimpleNamespace(key="boot", status="ok", details={"log_path": log_path})]
         ),
     )
 

@@ -54,7 +54,7 @@ STEP_RUNNING = "running"
 
 
 def _step_keys() -> tuple[str, ...]:
-    """真实写盘的步骤键（``efi/windows/data/layout/image/boot/verify``）。
+    """真实写盘的步骤键（``efi/windows/data/layout/image/boot``）。
 
     从 :mod:`app.application.steps` 取：步骤契约是纯数据，进度层不再反向
     import 执行器（以前 ``jobs`` 依赖 ``real_runner.STEP_TITLES``）。
@@ -63,7 +63,7 @@ def _step_keys() -> tuple[str, ...]:
 
 
 def _step_total() -> int:
-    """一次真实写盘的总步数（七步，含独立的「分区验收」）。"""
+    """一次真实写盘的总步数（六步，含独立的「分区验收」）。"""
     return len(STEP_KEYS)
 
 
@@ -482,8 +482,8 @@ class JobManager:
                     "current": current,
                     "percent": min(percent, 100),
                     "message": message,
-                    # 声明式分组进度：前端按"硬盘分区 / 写入系统 / 装机校验"三段渲染，
-                    # 分区失败时后面两段可以直接标成"未执行"。
+                    # 声明式分组进度：前端按"硬盘分区 / 写入系统"两段渲染，
+                    # 分区失败时后面一段可以直接标成"未执行"。
                     "groups": group_progress(completed, current),
                 }
                 job.updated_at = _now()

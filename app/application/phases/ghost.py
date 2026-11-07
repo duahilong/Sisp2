@@ -6,7 +6,7 @@
 2. 失败原因除了退出码，还要看 ``ghosterr.txt``（Ghost 写进当前工作目录）。
 
 其余约定完全不变：只吃 :class:`PhaseContext`，不 import diskpart、不查分区表、
-不认识 ``image/boot/verify`` 之外的步骤；分区做没做对由编排层决定要不要进来。
+不认识 ``image/boot`` 之外的步骤；分区做没做对由编排层决定要不要进来。
 """
 
 from __future__ import annotations

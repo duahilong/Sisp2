@@ -79,7 +79,7 @@ python -m app.gui_web.main --serve --port 8765
 - `role` 与 `drive_letters` 的键一一对应；`data2` 只有加了额外数据分区（E）才出现。
 - `partition_plan` 是界面第 4 步的直接数据源（真实大小、文件系统、盘符），不要自己再算。
 - `unallocated_bytes` 是按计划建完分区后剩下的未分配空间：最后一个数据分区永远 `auto`（不带 `size=`），所以正常情况下是 0，只可能剩下 GPT 首尾那点对齐余量。
-- 同一份布局也决定了容量预检（`LAYOUT_SLACK_MB = 3`：GPT 盘首/盘尾各 1 MB + 1 MB 冗余）与 `verify` 的期望分区数（**等于** `len(partition_plan)`：MSR 已删，多一个或少一个都算失败）。
+- 同一份布局也决定了容量预检（`LAYOUT_SLACK_MB = 3`：GPT 盘首/盘尾各 1 MB + 1 MB 冗余）与 `layout`（分区验收）的期望分区数（**等于** `len(partition_plan)`：MSR 已删，多一个或少一个都算失败）。
 
 
 ## Host 校验与安全
@@ -100,7 +100,7 @@ SSE 首帧为 `snapshot`，包含 `poll_events(cursor, 1000)` 返回的可用补
  "progress":{"total":6,"completed":["efi"],"current":"windows","percent":33,"message":"正在安装系统分区"}}
 ```
 
-`key` 取 `STEP_TITLES` 的键（`efi/windows/data/image/boot/verify`），`status` 是
+`key` 取 `STEP_TITLES` 的键（`efi/windows/data/layout/image/boot`），`status` 是
 `running` 或步骤结果（`ok`/`failed`/`skipped`）。同一份 `progress` 也会写进
 `Job.progress`，随 `GET /api/jobs` 一起返回，所以前端断开重连后不用重放事件也能
 把进度条摆对。

@@ -18,9 +18,8 @@ export const STEP_LABELS = {
   // 「分区验收」是独立一步：分区组自己验收，不要求镜像/引导已写入
   layout: '分区验收（对照计划）',
   image: '应用系统镜像',
-  boot: '写入 UEFI 引导',
-  // 装机结果校验：引导文件 + 系统文件（与上面的分区验收是两件事）
-  verify: '装机结果校验（引导文件 + 系统文件）',
+  // 写引导与校验是同一步：bcdboot 写完立刻查引导文件与系统文件
+  boot: '写入 UEFI 引导并校验',
 };
 
 export const JOB_STATUS_TEXT = {

@@ -119,8 +119,8 @@ const out = {
     const fit = fitLayout(totalGb, sysGb, extrasGb);
     return fit.sysGb >= 60 && fit.dataGb >= 20 && fit.extrasGb.every((gb) => gb >= 1);
   }),
-  // ---------------------------------------------- 阶段编排（分区 / 装机 / 校验）
-  // 后端给了 plan.phases 就按它分组；老后端没有时回退内置 7 步表
+  // ---------------------------------------------- 阶段编排（分区 / 装机）
+  // 后端给了 plan.phases 就按它分组；老后端没有时回退内置 6 步表
   phases_from_plan: phaseGroups({
     phases: [
       { key: 'partition', title: '硬盘分区', steps: ['efi', 'windows', 'data', 'layout'], stop_on_failure: true },
@@ -132,21 +132,21 @@ const out = {
   progress_groups: (() => {
     const groups = phaseGroups(null);
     const phases = progressByPhase(
-      { total: 7, completed: ['efi', 'windows', 'data', 'layout'], current: 'image', percent: 57 },
+      { total: 6, completed: ['efi', 'windows', 'data', 'layout'], current: 'image', percent: 67 },
       groups,
       { efi: 'ok', windows: 'ok', data: 'ok', layout: 'ok', image: 'running' }
     );
     return phases.map((phase) => [phase.key, phase.percent, phase.status]);
   })(),
-  // 分区验收失败 → 系统组与校验组都“未执行”
+  // 分区验收失败 → 系统组“未执行”
   skipped_after_layout: (() => {
     const groups = phaseGroups(null);
     return skippedByFailure('layout', groups);
   })(),
-  // 校验阶段失败不影响任何后续组（它是最后一组）
-  skipped_after_verify: (() => {
+  // 引导（最后一组）失败不影响任何后续组
+  skipped_after_boot: (() => {
     const groups = phaseGroups(null);
-    return skippedByFailure('verify', groups);
+    return skippedByFailure('boot', groups);
   })(),
   // 验收面板：problems 非空 → 不通过；warnings 只提示
   verdict_ok: layoutVerdict({ partition_style: 'GPT', problems: [], warnings: ['ESP 盘符未关联'],
@@ -184,10 +184,10 @@ EXPECTED = {
     "fit_even_split": True,
     "fit_keeps_mins": True,
     "phases_from_plan": ["partition", "system"],
-    "phases_fallback": [["partition", 4], ["system", 2], ["verify", 1]],
-    "progress_groups": [["partition", 100, "done"], ["system", 0, "running"], ["verify", 0, "idle"]],
-    "skipped_after_layout": ["system", "verify"],
-    "skipped_after_verify": [],
+    "phases_fallback": [["partition", 4], ["system", 2]],
+    "progress_groups": [["partition", 100, "done"], ["system", 0, "running"]],
+    "skipped_after_layout": ["system"],
+    "skipped_after_boot": [],
 }
 
 

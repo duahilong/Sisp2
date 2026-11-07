@@ -2,8 +2,8 @@
 
 - :mod:`app.application.phases.partition` —— 只认识 ``DiskpartShell``；
 - :mod:`app.application.phases.ghost` —— 只认识 ``ProcessShell``（Ghost 写 GHO）；
-- :mod:`app.application.phases.system` —— 组合：镜像 + bcdboot；
-- :mod:`app.application.phases.verify` —— 装机结果校验（引导文件 + 系统文件）。
+- :mod:`app.application.phases.system` —— 组合：镜像 + 引导（引导实现在
+  :mod:`app.application.uefi`）。
 
 编排（谁先跑、失败后谁跳过）在 :mod:`app.application.pipeline`。
 """

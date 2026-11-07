@@ -72,7 +72,7 @@ def ghost_tool_present(monkeypatch):
 from tests.fakes import (
     FakeDiskpartShell,
     FakeProcess,
-    FakeVerify,
+    FakeUefiBoot,
     build_snapshot,
 )
 
@@ -90,9 +90,9 @@ def fake_process():
 
 
 @pytest.fixture
-def fake_verify():
-    """``FakeVerify`` 工厂（默认校验通过）。"""
-    return FakeVerify
+def fake_uefi():
+    """``FakeUefiBoot`` 工厂（默认写引导 + 校验都成功）。"""
+    return FakeUefiBoot
 
 
 @pytest.fixture
@@ -102,7 +102,7 @@ def make_snapshot():
 
 
 @pytest.fixture
-def make_runner(fake_shell, fake_process, fake_verify):
+def make_runner(fake_shell, fake_process, fake_uefi):
     """用替身拼一个 ``WindowsDiskRunner``（不注入就现造默认替身）。"""
     from app.application.real_runner import WindowsDiskRunner
 
@@ -110,7 +110,7 @@ def make_runner(fake_shell, fake_process, fake_verify):
         *,
         shell: Any = None,
         process: Any = None,
-        verify: Any = None,
+        uefi: Any = None,
         **kwargs: Any,
     ):
         # 外部工具路径给死值：否则测试会跟着“本机装没装 ghost64”飘。
@@ -120,7 +120,7 @@ def make_runner(fake_shell, fake_process, fake_verify):
         return WindowsDiskRunner(
             shell=shell if shell is not None else fake_shell(),
             process=process if process is not None else fake_process(),
-            verify=verify if verify is not None else fake_verify(),
+            uefi=uefi if uefi is not None else fake_uefi(),
             **kwargs,
         )
 

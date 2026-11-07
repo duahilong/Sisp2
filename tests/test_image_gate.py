@@ -1,41 +1,26 @@
-"""① 镜像可应用性闸门 与 ② verify「装完能不能开机」判据。
+"""镜像可应用性闸门：不该让它开始的形态在计划期就阻断。
 
-这两个改动都是为了防止同一个后果：**盘已经清空，才发现镜像不能用 / 装不进去**。
-所以测试重点不是“顺利路径”，而是每种“不该让它开始”的形态都要变成阻断项，
-以及 verify 在引导文件/系统文件缺失时必须判失败。
+改动动机：**盘已经清空，才发现镜像不能用 / 装不进去**。所以测试重点不是
+“顺利路径”，而是每种“不该让它开始”的形态都要变成阻断项。
+
+引导校验（写引导 + 查引导文件/系统文件）与它同属“装完能不能开机”，
+但代码搬到了 :mod:`app.application.uefi`，测试在 ``tests/test_uefi_boot.py``。
 """
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 from typing import Any
 
 from app.application.contracts import DiskInfo
-from app.application.phases.base import PhaseContext
-from app.application.phases.verify import BootVerifyPhase
-from app.application.real_runner import _verify_verdict
 from app.application.workflow import WorkflowController, _image_problems
 from app.models import WorkerResult
 from app.preflight import CHECK_IMAGE_TYPE, run_preflight_checks
 
 _GIB = 1024**3
 
-# 期望布局就是 EFI + C + D：``convert gpt`` 自动建的 16 MB MSR 会被执行器删掉，
-# 所以 verify 只认 3 个分区（多一个 Reserved 就判失败，见 test_partition_layout）。
-_OK_VERIFY_PAYLOAD: dict[str, Any] = {
-    "partition_style": "GPT",
-    "partitions": [
-        {"number": 1, "size_bytes": 100 * 1024**2, "type": "System"},
-        {"number": 2, "size_bytes": 120 * _GIB, "drive_letter": "G"},
-        {"number": 3, "size_bytes": 300 * _GIB, "drive_letter": "J"},
-    ],
-    "boot_file": r"F:\EFI\Microsoft\Boot\bootmgfw.efi",
-    "system_file": r"G:\Windows\System32\config\SYSTEM",
-}
 
-
-# --------------------------------------------------------- ① 镜像可应用性闸门
+# --------------------------------------------------------- 镜像可应用性闸门
 def _gho(tmp_path, name: str = "win11.GHO"):
     gho = tmp_path / name
     gho.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
@@ -208,108 +193,6 @@ def test_preflight_accepts_applicable_image(tmp_path):
     )
     results = {item["name"]: item for item in report["results"]}
     assert results[CHECK_IMAGE_TYPE]["passed"] is True
-
-
-# ------------------------------------------------- ② verify：装完能不能开机
-def test_verify_verdict_accepts_ready_disk():
-    ok, message, details = _verify_verdict(_OK_VERIFY_PAYLOAD)
-    assert ok is True
-    assert "bootmgfw.efi" in message
-    assert details["boot_file"].endswith("bootmgfw.efi")
-    assert details["system_file"].endswith("SYSTEM")
-    assert details["problems"] == []
-
-
-def test_verify_verdict_fails_without_boot_file():
-    payload = dict(_OK_VERIFY_PAYLOAD, boot_file=None)
-    ok, message, details = _verify_verdict(payload)
-    assert ok is False
-    assert "bootmgfw" in message
-    assert any("EFI" in problem for problem in details["problems"])
-
-
-def test_verify_verdict_fails_without_system_file():
-    """镜像只应用了一半（或只拷了引导文件）时必须判失败，而不是“六步全绿”。"""
-    payload = dict(_OK_VERIFY_PAYLOAD, system_file=None)
-    ok, message, _ = _verify_verdict(payload)
-    assert ok is False
-    assert "系统文件" in message
-
-
-def test_verify_verdict_requires_gpt_and_three_partitions():
-    mbr = dict(_OK_VERIFY_PAYLOAD, partition_style="MBR")
-    ok, message, _ = _verify_verdict(mbr)
-    assert ok is False
-    assert "GPT" in message
-
-    two_parts = dict(_OK_VERIFY_PAYLOAD, partitions=_OK_VERIFY_PAYLOAD["partitions"][:2])
-    ok, message, _ = _verify_verdict(two_parts)
-    assert ok is False
-    assert "分区数" in message
-
-
-class _StubLog:
-    def __init__(self) -> None:
-        self.blocks: list[str] = []
-
-    def write(self, message: str) -> None:
-        pass
-
-    def block(self, title: str, text: str) -> None:
-        self.blocks.append(title)
-
-    def flush(self) -> None:
-        pass
-
-
-def test_verify_script_receives_letters(monkeypatch):
-    """verify 要靠 EFI/Windows 盘符去查文件，所以必须把它们传进 PowerShell 环境。"""
-    import threading
-
-    from app.application.command_log import CommandLog
-    from app.application.partitions import plan_partitions
-    from app.application.shell import ProcessShell
-
-    captured: dict[str, Any] = {}
-
-    def fake_run(command, **kwargs):
-        captured["env"] = kwargs.get("env") or {}
-        return SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps(_OK_VERIFY_PAYLOAD).encode("utf-8"),
-            stderr=b"",
-        )
-
-    monkeypatch.setattr("app.application.shell.subprocess.run", fake_run)
-    payload = {
-        "partition_info": {
-            "efi_size_mb": 100,
-            "c_size_gb": 120,
-            "data_size_gb": "auto",
-            "allow_small_partitions": True,
-        }
-    }
-    letters = {"efi": "F", "windows": "G", "data": "H"}
-    parts = plan_partitions(payload, letters=letters)
-    shell = ProcessShell(
-        log=CommandLog(None), allow_real_disk=False, source="verify-test"
-    )
-    phase = BootVerifyPhase(shell, powershell="powershell.exe")
-    ctx = PhaseContext(
-        disk_number=1,
-        parts=parts,
-        letters=letters,
-        image_path=None,
-        image_index=1,
-        cancel=threading.Event(),
-        log=CommandLog(None),
-    )
-    outcome = phase.run(ctx)
-
-    assert outcome.ok is True
-    assert outcome.results[-1].status == "ok"
-    assert captured["env"]["VIX_EFI_LETTER"] == "F"
-    assert captured["env"]["VIX_WINDOWS_LETTER"] == "G"
 
 
 def test_every_preflight_check_has_a_stable_key():
