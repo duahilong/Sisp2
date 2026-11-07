@@ -46,8 +46,11 @@ CHECK_FREE_SPACE = "临时目录可用空间检查"
 CHECK_TOOLS = "外部工具可用性检查"
 CHECK_SETTING_PATHS = "设置路径有效性检查"
 
-# 界面设置里的可选外部工具：配了就必须存在，没配就跳过（bcdboot 是系统自带的）。
-OPTIONAL_TOOLS: tuple[tuple[str, str], ...] = (("extGhost", "ghost64"),)
+# 界面设置里的可选外部工具：配了就必须存在，没配就跳过。
+OPTIONAL_TOOLS: tuple[tuple[str, str], ...] = (
+    ("extGhost", "ghost64"),
+    ("extBcdboot", "bcdboot"),
+)
 
 # 界面设置里的系统文件路径：(键名, 中文名, 期望类型)
 SETTING_PATHS: tuple[tuple[str, str, str], ...] = (

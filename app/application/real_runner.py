@@ -142,6 +142,7 @@ class WindowsDiskRunner:
         # 会被 app.safety_guard 拦下（2026-11-06 清盘事故的直接防线）。
         self.allow_real_disk = bool(allow_real_disk)
         self.log_dir = log_dir
+        # diskpart 固定用系统自带的（不再由界面设置提供）；保留参数只供测试注入。
         self.diskpart = diskpart or find_program("diskpart.exe")
         # 装机只走 Ghost：ghost64 优先，取不到退 ghost32。
         self.ghost = ghost or find_program("ghost64.exe") or find_program("ghost32.exe")
@@ -358,15 +359,21 @@ def build_real_runner(
     log_dir: str | os.PathLike[str] | None = None,
     diskpart: str | None = None,
     ghost: str | None = None,
+    bcdboot: str | None = None,
 ) -> WindowsDiskRunner:
     """工厂函数；``WorkflowController`` 用它给未注入服务的会话配默认执行器。
 
-    ``diskpart`` / ``ghost`` 由界面设置（``extDiskpart`` / ``extGhost``）传入；
-    空值或 ``None`` 时回退到 PATH / System32 探测。
+    ``ghost`` / ``bcdboot`` 由界面设置（``extGhost`` / ``extBcdboot``）传入；
+    空值或 ``None`` 时回退到 PATH / System32 探测。``diskpart`` 只为测试注入
+    而留，生产路径上永远是系统自带的那个。
     """
     # 生产入口：这里是唯一显式打开"真实写盘"的地方。
     return WindowsDiskRunner(
-        log_dir=log_dir, diskpart=diskpart, ghost=ghost, allow_real_disk=True
+        log_dir=log_dir,
+        diskpart=diskpart,
+        ghost=ghost,
+        bcdboot=bcdboot,
+        allow_real_disk=True,
     )
 
 

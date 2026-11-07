@@ -302,8 +302,8 @@ def build_api(dry_run: bool, settings_path: str | None = None):
         log_dir=log_dir,
         partition_defaults=store.partition_info(),
         tool_paths={
-            "diskpart": settings.get("extDiskpart"),
             "ghost": settings.get("extGhost"),
+            "bcdboot": settings.get("extBcdboot"),
         },
         protect_system_disk=bool(settings.get("protectSystemDisk", True)),
         type_to_confirm=bool(settings.get("typeToConfirm", True)),

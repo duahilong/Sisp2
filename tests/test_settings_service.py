@@ -116,14 +116,14 @@ def test_probe_state_machine(tmp_path: Path) -> None:
 
     store = SettingsStore(
         tmp_path / "settings.json",
-        which=lambda name: "C:/Windows/system32/diskpart.exe" if name == "diskpart" else None,
+        which=lambda name: "C:/Windows/system32/bcdboot.exe" if name.startswith("bcdboot") else None,
     )
     json_path = store.path
 
     # 未设置 → na
     assert store.probe("extGhost").state == "na"
     # 系统自带 → builtin
-    assert store.probe("extDiskpart").state == "builtin"
+    assert store.probe("extBcdboot").state == "builtin"
 
     store.update({"extGhost": str(exe), "logDir": str(folder)})
     assert store.probe("extGhost").state == "ok"
@@ -148,7 +148,7 @@ def test_probe_can_check_a_draft_value(tmp_path: Path) -> None:
 
     store = SettingsStore(
         tmp_path / "settings.json",
-        which=lambda name: "C:/Windows/system32/diskpart.exe" if name == "diskpart" else None,
+        which=lambda name: "C:/Windows/system32/bcdboot.exe" if name.startswith("bcdboot") else None,
     )
     store.update({"extGhost": str(saved)})
 
@@ -162,7 +162,7 @@ def test_probe_can_check_a_draft_value(tmp_path: Path) -> None:
     store.update({"extGhost": ""})
     assert store.probe("extGhost", "").state == "na"
     # 草稿是空值时依然走内置命令回退
-    assert store.probe("extDiskpart", "").state == "builtin"
+    assert store.probe("extBcdboot", "").state == "builtin"
     # 非路径键传什么都不影响
     assert store.probe("theme", str(saved)).state == "na"
 

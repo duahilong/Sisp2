@@ -361,7 +361,7 @@ class WebApi:
         settings = self._settings.get()
         return BootRepairer(
             self._gate,
-            diskpart=str(settings.get("extDiskpart") or "") or None,
+            bcdboot=str(settings.get("extBcdboot") or "") or None,
             temp_dir=str(settings.get("sysTemp") or "") or None,
             log_dir=self._log_root,
             dry_run=self._service_dry_run(),

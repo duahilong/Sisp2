@@ -615,19 +615,25 @@ def test_partition_defaults_snapshot_used_without_settings():
 def test_tool_paths_reach_default_real_runner():
     controller = _wire(
         dry_run=False,
-        tool_paths={"diskpart": r"C:\tools\diskpart.exe", "ghost": r"C:\tools\ghost64.exe", "": ""},
+        tool_paths={
+            "ghost": r"C:\tools\ghost64.exe",
+            "bcdboot": r"C:\tools\bcdboot.exe",
+            "": "",
+        },
     )
 
     runner = controller.service._real_runner
 
-    assert runner.diskpart == r"C:\tools\diskpart.exe"
     assert runner.ghost == r"C:\tools\ghost64.exe"
+    assert runner.bcdboot == r"C:\tools\bcdboot.exe"
+    # diskpart 不再由设置提供：永远是系统探测到的那个
+    assert runner.diskpart != r"C:\tools\diskpart.exe"
 
 
 def test_build_real_runner_accepts_tool_paths():
-    runner = build_real_runner(diskpart=r"C:\d\diskpart.exe", ghost=r"C:\d\ghost64.exe")
+    runner = build_real_runner(ghost=r"C:\d\ghost64.exe", bcdboot=r"C:\d\bcdboot.exe")
 
-    assert (runner.diskpart, runner.ghost) == (r"C:\d\diskpart.exe", r"C:\d\ghost64.exe")
+    assert (runner.ghost, runner.bcdboot) == (r"C:\d\ghost64.exe", r"C:\d\bcdboot.exe")
 
 
 def test_prepare_does_not_accumulate_implicit_allowlist():

@@ -361,6 +361,7 @@ class BootRepairer:
         self._which = which or shutil.which
         self._scanner = scanner or scan
         self.bcdboot = bcdboot or self._which("bcdboot.exe")
+        # diskpart 固定用系统自带的；参数只供测试注入（界面已不提供这个设置）。
         self.diskpart = diskpart or self._which("diskpart.exe")
         self.temp_dir = temp_dir
         self.log_dir = log_dir

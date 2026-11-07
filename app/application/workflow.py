@@ -438,7 +438,8 @@ class WorkflowController:
         self._real_runner = real_runner
         # 界面设置的默认分区参数：只补业务配置没写的字段，不覆盖配置。
         self._partition_defaults = dict(partition_defaults or {})
-        # 外部工具路径（extDiskpart / extGhost）；空值交给 runner 自身探测。
+        # 外部工具路径（extGhost / extBcdboot）；空值交给 runner 自身探测。
+        # diskpart 固定用系统自带，不再从设置读。
         self._tool_paths = {
             str(key): str(value).strip()
             for key, value in (tool_paths or {}).items()
@@ -473,8 +474,8 @@ class WorkflowController:
         if runner is None:
             runner = build_real_runner(
                 log_dir=self._log_dir,
-                diskpart=self._tool_paths.get("diskpart"),
                 ghost=self._tool_paths.get("ghost"),
+                bcdboot=self._tool_paths.get("bcdboot"),
             )
         return SispService(
             dry_run=bool(self._dry_run),
