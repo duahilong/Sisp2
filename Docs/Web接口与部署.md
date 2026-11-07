@@ -21,7 +21,7 @@ python -m app.gui_web.main --serve --port 8765
 - 后端只监听回环地址，且父进程消失时自己退出；
 - 提权被取消时退回进程内服务（普通权限），此时真实写盘会被预检拦住。
 
-有效 GUI dry-run 是 `--dry-run OR settings.dryRunByDefault`；两者默认均为 false。该值在启动时锁定为硬上限，`POST /api/session` 传 `dry_run:false` 或 `POST /api/prepare` 传 `dry_run:false` 都不能升级为真实执行。`POST /api/session` 与 `POST /api/prepare` 的 `dry_run` 可省略，省略表示**沿用进程模式**（前端刷新会话时不再把强制演练悄悄降级成真实模式）。服务必须单进程单 worker，因为任务和缓冲状态保存在内存。端口被占用入口返回 4；FastAPI 自动文档地址默认为 `http://127.0.0.1:8765/docs`（地址随 host/port 改变）。
+有效 GUI dry-run 只来自命令行 `--dry-run`（设置里的默认演练开关已移除）。该值在启动时锁定为硬上限，`POST /api/session` 传 `dry_run:false` 或 `POST /api/prepare` 传 `dry_run:false` 都不能升级为真实执行。`POST /api/session` 与 `POST /api/prepare` 的 `dry_run` 可省略，省略表示**沿用进程模式**（前端刷新会话时不再把强制演练悄悄降级成真实模式）。服务必须单进程单 worker，因为任务和缓冲状态保存在内存。端口被占用入口返回 4；FastAPI 自动文档地址默认为 `http://127.0.0.1:8765/docs`（地址随 host/port 改变）。
 
 ## 路由
 
@@ -41,17 +41,17 @@ python -m app.gui_web.main --serve --port 8765
 | `GET /api/jobs/{job_id}` | 单任务查询（含 `progress`） |
 | `GET /api/jobs/{job_id}/log?tail=200` | 任务日志尾部；只允许 `logDir` 下的 `.log` 文件，越界返回 `E_PATH` |
 | `POST /api/partition/preview` | `{disk_number?}`；返回**真实会执行的三段 diskpart 脚本**（只读，需先 `/api/prepare`；与执行器同源生成） |
-| `POST /api/images` | `{directory?, path?}`：给 `directory` 列镜像目录（`kind: gho/iso/legacy`、`installable`、`note`），给 `path` 校验单个 GHO（读文件头 `FE EF`，返回 `magic_ok`/`block_index`）。全部是纯文件读取，不 spawn 任何进程 |
+| `POST /api/images` | 不带 `path` 时返回设置里的两个系统槽位 `{versions: [{id, label, path, ok, exists, reason, size_display, block_index}], default}`（每个都读文件头 `FE EF`）；带 `path` 时只校验那一个 GHO（返回 `magic_ok`/`block_index`）。`directory` 参数仅兼容旧请求体，已不再使用。全部是纯文件读取，不 spawn 任何进程 |
 | `GET /api/boot/report` | 扫描各盘的 Windows 目录与 ESP，返回可修复性报告 |
 | `POST /api/boot/repair` | `{disk_number}`；临时盘符挂 ESP → `bcdboot … /f UEFI` → 重新扫描，结束必定释放盘符；真实模式受写盘闸门约束 |
 | `POST /api/events/poll` | `{cursor, limit}`，游标轮询补发 |
 | `GET /api/events?cursor=N` | SSE 事件流；可读 `Last-Event-ID` |
 | `GET /api/settings`、`PUT /api/settings`、`DELETE /api/settings` | 读取、patch 更新、重置设置；patch 任一项非法整体拒绝 |
 | `POST /api/settings/export`、`POST /api/settings/import` | 导出/导入设置（封套 `{"version":1,"settings":{…}}`；导入任一字段非法则整体拒绝） |
-| `POST /api/settings/probe` | `{key}` 路径探测 |
+| `POST /api/settings/probe` | `{key, path?}` 路径探测；给 `path` 时探测这个“草稿值”（设置页选完还没保存），不给就探测已保存值 |
 | `POST /api/settings/probe_all` | 探测路径设置 |
 | `POST /api/settings/open_folder` | 打开设置文件夹（Windows） |
-| `POST /api/dialog/pick` | `{key, kind}` 原生文件/目录选择；需有 pywebview 窗口 |
+| `POST /api/dialog/pick` | `{key, kind}` 弹原生文件/目录选择框（`file` / `dir` / `save`）。由本进程用 System.Windows.Forms / `IFileOpenDialog` 弹，**不依赖 pywebview 窗口**（桌面模式下窗口在父进程，API 在提权子进程）；只返回 `{path}`，**不写入设置**，由界面放进草稿等“保存设置” |
 
 业务路由以同步 `def` 实现，由 FastAPI 在线程池运行。
 
@@ -156,7 +156,7 @@ ui/
   `{settings, warnings, sections, pathKeys}`。`tests/test_ui_assets.py` 会拿
   `settings.DEFAULTS` 逐个对账，后端加键而前端没加会直接失败。
 - 前端只负责界面和用户操作，不直接执行磁盘命令；所有写盘都要过后端
-  `POST /api/prepare → submit → confirm` 的五道闸门。协议、路由、Host 校验、事件缓冲
+  `POST /api/prepare → submit → confirm` 的四道闸门。协议、路由、Host 校验、事件缓冲
   和部署限制见本文后面的「路由」「Host 校验」章节。
 
 ### 静态检查与冒烟
