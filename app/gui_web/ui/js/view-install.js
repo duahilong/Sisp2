@@ -14,7 +14,7 @@ import {
   fmtSize, segments, fsColor, isSelectable,
   protectionText, clamp, MIN_SYS_GB, MIN_DATA_GB, MIN_EXTRA_GB, MAX_EXTRAS,
   toGb, fromGb, extraColor, extraLetter, fitLayout, autoPartitionRole,
-  phaseGroups, progressByPhase, skippedByFailure, layoutVerdict,
+  phaseGroups, progressByPhase, skippedByFailure, layoutVerdict, mergePlanNotes,
 } from './derive.js';
 import {
   state, diskOf, targetOf, targetError, autoPartitionBytes, syncAutoPartition, addTarget, removeTarget,
@@ -718,6 +718,11 @@ function planCardsHtml() {
   }).join('');
 }
 
+/** 行尾的磁盘标记；单盘时写成“磁盘 2”，多盘时“磁盘 1 / 2”。 */
+function diskTag(disks) {
+  return `<span class="ntag">磁盘 ${disks.map((number) => esc(number)).join(' / ')}</span>`;
+}
+
 function stepConfirmHtml() {
   if (state.wizard.error) {
     return `<div class="wz-inner">
@@ -736,15 +741,10 @@ function stepConfirmHtml() {
       <span class="da-lost">${esc(lostPartitionsText(disk))}</span></li>`;
   }).join('');
 
-  const blockers = state.plans.flatMap((item) => (item.plan.blockers || [])
-    .map((text) => `磁盘 ${item.plan.disk_number}：${text}`));
-  const warnings = state.plans.flatMap((item) => (item.plan.warnings || [])
-    .map((text) => `磁盘 ${item.plan.disk_number}：${text}`));
-
   // 阻断项必须放在这里：按钮为什么禁用要写明，否则用户只看到一块禁用的按钮。
   const notes = [
-    ...blockers.map((text) => `<div><b>阻断项</b>：${esc(text)}</div>`),
-    ...warnings.map((text) => `<div>${esc(text)}</div>`),
+    ...mergePlanNotes(state.plans, 'blockers').map((row) => `<div><b>阻断项</b>：${esc(row.body)}${diskTag(row.disks)}</div>`),
+    ...mergePlanNotes(state.plans, 'warnings').map((row) => `<div>${esc(row.body)}${diskTag(row.disks)}</div>`),
   ].join('');
   const numbers = state.plans.map((item) => item.plan.disk_number).join(' / ');
 

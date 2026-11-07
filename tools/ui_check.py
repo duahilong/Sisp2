@@ -46,7 +46,7 @@ _EXPORT_LIST_RE = re.compile(r"""export\s*\{([^}]*)\}""", re.S)
 _EXPORT_STAR_RE = re.compile(r"""export\s*\*""")
 
 DERIVE_SCRIPT = """
-import { fmtSize, fsClass, segments, checkSizes, checkLayout, unallocatedBytes, partShortName, fitLayout, reserveGb, autoPartitionRole, phaseGroups, progressByPhase, skippedByFailure, layoutVerdict } from './derive.js';
+import { fmtSize, fsClass, segments, checkSizes, checkLayout, unallocatedBytes, partShortName, fitLayout, reserveGb, autoPartitionRole, phaseGroups, progressByPhase, skippedByFailure, layoutVerdict, mergePlanNotes } from './derive.js';
 
 const GB = 1024 ** 3;
 const esp = { partition_number: 1, size_bytes: 100 * 1024 * 1024,
@@ -152,6 +152,15 @@ const out = {
   verdict_ok: layoutVerdict({ partition_style: 'GPT', problems: [], warnings: ['ESP 盘符未关联'],
     partitions: [{ number: 1, label: 'EFI', size_bytes: 100 * 1024 * 1024, mounted_letter: 'E', file_system: 'FAT32' }] }),
   verdict_bad: layoutVerdict({ problems: ['第 2 个分区（Windows）大小不符'], warnings: [], partitions: [] }),
+  // 多盘重复提示：同一句话只留一行，行尾列盘号
+  notes_warnings: mergePlanNotes([
+    { plan: { disk_number: 1, warnings: ['取消为协作式：当前步骤完成后才会停止', '破坏性操作：将清空目标硬盘全部数据'], blockers: [] } },
+    { plan: { disk_number: 2, warnings: [' 取消为协作式：当前步骤完成后才会停止 '], blockers: ['未找到 Ghost 可执行文件'] } },
+  ], 'warnings'),
+  notes_blockers: mergePlanNotes([
+    { plan: { disk_number: 1, warnings: [], blockers: ['未找到 Ghost 可执行文件'] } },
+    { plan: { disk_number: 2, warnings: [], blockers: ['未找到 Ghost 可执行文件'] } },
+  ], 'blockers'),
 };
 console.log(JSON.stringify(out));
 """
@@ -188,6 +197,11 @@ EXPECTED = {
     "progress_groups": [["partition", 100, "done"], ["system", 0, "running"]],
     "skipped_after_layout": ["system"],
     "skipped_after_boot": [],
+    "notes_warnings": [
+        {"body": "取消为协作式：当前步骤完成后才会停止", "disks": [1, 2]},
+        {"body": "破坏性操作：将清空目标硬盘全部数据", "disks": [1]},
+    ],
+    "notes_blockers": [{"body": "未找到 Ghost 可执行文件", "disks": [1, 2]}],
 }
 
 

@@ -481,6 +481,28 @@ export function skippedByFailure(stepKey, groups) {
   return list.slice(index + 1).map((item) => item.key);
 }
 
+/** 把每块盘的 blockers / warnings 按内容合并：同一句话只留一行，行尾列盘号。
+ *
+ * 后端是逐盘给提示的，多盘时同一句会重复 N 遍；确认页只需要一句整体提醒，
+ * 细节（哪块盘）由行尾的盘号回答。纯函数，便于在 node 里直接测。
+ */
+export function mergePlanNotes(plans, key) {
+  const groups = new Map();
+  for (const item of Array.isArray(plans) ? plans : []) {
+    const plan = (item && item.plan) || item || {};
+    const disk = Number(plan.disk_number);
+    const list = Array.isArray(plan[key]) ? plan[key] : [];
+    for (const text of list) {
+      const body = String(text).trim();
+      if (!body) continue;
+      if (!groups.has(body)) groups.set(body, []);
+      const disks = groups.get(body);
+      if (!disks.includes(disk)) disks.push(disk);
+    }
+  }
+  return [...groups].map(([body, disks]) => ({ body, disks }));
+}
+
 /** 「分区验收」步骤的 details → 验收面板数据。 */
 export function layoutVerdict(details) {
   const info = details && typeof details === 'object' ? details : {};
