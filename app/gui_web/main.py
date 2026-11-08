@@ -290,13 +290,18 @@ def build_api(dry_run: bool, settings_path: str | None = None):
     # 演练模式只由命令行 --dry-run 决定（设置里不再有这个开关）。
     effective_dry_run = bool(dry_run)
 
-    log_dir = str(settings.get("logDir") or "").strip() or None
+    # 设置里留空时也要有日志目录：否则任务跑完一份 disk-runner-*.log 都没有，
+    # 界面上的日志面板永远是空的（%APPDATA%\\Sisp\\logs）。
+    log_dir = str(settings.get("logDir") or "").strip()
+    if not log_dir:
+        from app.application.command_log import default_log_dir
+
+        log_dir = str(default_log_dir())
     level = str(settings.get("logLevel", "info")).lower()
     configure_logging(log_dir, level)
-    if log_dir:
-        from app.application.real_runner import prune_runner_logs
+    from app.application.real_runner import prune_runner_logs
 
-        prune_runner_logs(log_dir, int(settings.get("logRetentionDays", 30)))
+    prune_runner_logs(log_dir, int(settings.get("logRetentionDays", 30)))
     wf = WorkflowController(
         dry_run=effective_dry_run,
         log_dir=log_dir,

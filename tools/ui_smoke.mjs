@@ -676,6 +676,11 @@ async function main() {
               finished: cards.length > 0 && cards.every((card) => /已完成|失败|已取消/.test(String(card.innerText || ''))),
               head: first ? String((first.querySelector('.jc-h') || {}).innerText || '').slice(0, 80) : '',
               text: first ? String(first.innerText || '').slice(0, 320) : '',
+              arrow: (function () {
+                const row = first ? first.querySelector('.phases .phrow details > summary') : null;
+                if (!row) return '';
+                return String(getComputedStyle(row, '::before').content || '');
+              })(),
             });
           })()`)),
         });
@@ -797,6 +802,11 @@ async function main() {
       if (!progressStep.logs) problems.push('进度页没有可折叠的日志块');
       if (!progressStep.cancelDanger && !progressStep.finished) {
         problems.push('取消按钮不是醒目样式（.tbtn.danger）');
+      }
+      // 折叠箭头必须是真正的三角字符：写成 CSS 转义 \25B8 会被吃成控制字符 + “B8”
+      const arrow = String(progressStep.arrow || '');
+      if (arrow && (/B8/.test(arrow) || /[\u0000-\u001f]/.test(arrow))) {
+        problems.push(`阶段折叠箭头是乱码（::before 内容 ${JSON.stringify(arrow)}）`);
       }
       const openStep = (summary.steps.find((step) => step.progressOpen) || {}).progressOpen;
       if (openStep && openStep.steps < 1) problems.push('展开阶段后没有列出具体步骤');
