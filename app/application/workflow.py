@@ -95,6 +95,9 @@ class SessionState:
     blockers: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     dry_run: bool = False
+    # 会话快照里顺带扫到的系统已用盘符（含幽灵盘符），`prepare()` 分配盘符时
+    # 直接复用，不再单独启动一次 PowerShell。
+    used_letters: tuple[str, ...] = ()
 
     @property
     def selectable_disks(self) -> tuple[DiskInfo, ...]:
@@ -709,9 +712,16 @@ class WorkflowController:
             f"{check.label}：{check.message}" for check in checks if not check.passed and check.optional
         ]
         disks: tuple[DiskInfo, ...] = ()
+        used_letters: tuple[str, ...] = ()
 
         try:
-            disks = tuple(self._service.scan_protected_disks())
+            scanner = getattr(self._service, "scan_protected_snapshot", None)
+            if scanner is not None:
+                disks, used_letters = scanner()
+                disks = tuple(disks)
+            else:
+                # 测试替身/旧服务只有单次扫描接口：退回旧行为。
+                disks = tuple(self._service.scan_protected_disks())
         except Exception as exc:  # noqa: BLE001 - 扫描失败记成阻断项，界面还能打开
             blockers.append(f"硬盘扫描失败：{exc}")
 
@@ -727,6 +737,7 @@ class WorkflowController:
             blockers=tuple(dict.fromkeys(blockers)),
             warnings=tuple(warnings),
             dry_run=self._dry_run,
+            used_letters=tuple(used_letters),
         )
         self._session = session
         self._prepared = {}
@@ -741,7 +752,13 @@ class WorkflowController:
         self._apply_live_safety_flags()
 
         try:
-            disks = tuple(self._service.scan_protected_disks())
+            scanner = getattr(self._service, "scan_protected_snapshot", None)
+            if scanner is not None:
+                disks, used_letters = scanner()
+                disks = tuple(disks)
+            else:
+                disks = tuple(self._service.scan_protected_disks())
+                used_letters = session.used_letters
         except Exception as exc:
             raise WorkflowError(f"硬盘扫描失败：{exc}") from exc
 
@@ -751,7 +768,12 @@ class WorkflowController:
             for blocker in session.blockers
             if not blocker.startswith("硬盘扫描失败")
         )
-        self._session = replace(session, disks=disks, blockers=blockers)
+        self._session = replace(
+            session,
+            disks=disks,
+            blockers=blockers,
+            used_letters=tuple(used_letters),
+        )
         self._prepared = {}
         return list(disks)
 
@@ -833,6 +855,12 @@ class WorkflowController:
             for number, payload in payloads.items()
         }
         summaries = [disk.to_dict() for disk in session.disks]
+        # 会话快照里的盘符只在“这一轮还没跑过任务”时复用：跑过任务以后，
+        # EFI 临时盘符可能被保留下来（releaseEfiLetter=false），快照就过期了，
+        # 这时回到现场扫描，宁可多花一次 PowerShell 也不能分到已占用的字母。
+        known_letters = session.used_letters or None
+        if known_letters and self._manager.jobs():
+            known_letters = None
         try:
             selection = self._service.build_selection_plan(
                 session.task_payload or {},
@@ -842,6 +870,7 @@ class WorkflowController:
                 result_dir=self._result_dir,
                 resource_resolver=self._resource_resolver,
                 extra_counts=extra_counts,
+                known_letters=known_letters,
             )
         except Exception as exc:
             raise WorkflowError(f"无法生成执行计划：{exc}") from exc

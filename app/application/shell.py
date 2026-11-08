@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -29,6 +30,7 @@ from typing import Any
 from app.application.command_log import CommandLog
 from app.application.partitions import ESP_GPT, is_reserved_partition
 from app.application.runner_utils import RunnerError, decode_output, tail, to_int
+from app.application.streaming import StreamOutcome, stream_process
 from app.safety_guard import ensure_command_allowed
 
 DISKPART_TIMEOUT = 600.0
@@ -47,6 +49,8 @@ COPY_TIMEOUT = 4 * 3600.0
 # 跑 diskpart 会互相踩。多盘流水线里分区本身已经由 ``PartitionSequencer`` 串行化，
 # 这里再上一把模块级锁：执行期释放盘符、boot 修复等旁路调用也不会和分区撞车。
 _DISKPART_LOCK = threading.Lock()
+
+_LOGGER = logging.getLogger(__name__)
 
 # 只读：查分区表 + 卷信息（盘符/卷标/文件系统）+ 盘容量。
 # 其中 ``Win32_LogicalDiskToPartition`` 用来关联 ESP 的临时盘符——ESP 是隐藏卷，
@@ -192,6 +196,46 @@ class ProcessShell:
             source=self.source,
         )
 
+    def run_streaming(
+        self,
+        command: Sequence[str],
+        timeout: float,
+        *,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        cancel: threading.Event | None = None,
+        on_line: Callable[[str], None] | None = None,
+    ) -> StreamOutcome:
+        """流式执行：边跑边落日志，``cancel`` 置位时终止进程。
+
+        注入 ``runner`` 的测试替身没法“边跑边读”，这里退化成“跑完回放输出”，
+        保持与真实现相同的返回值形状；取消已经置位时直接返回 cancelled，
+        不调用替身（这样取消路径也能被单测覆盖）。
+        """
+        if self._runner is not None:
+            if cancel is not None and cancel.is_set():
+                return StreamOutcome(returncode=None, output="", elapsed=0.0, cancelled=True)
+            code, output, elapsed = self._runner(list(command), timeout, env=env, cwd=cwd)
+            text = str(output or "")
+            if on_line is not None:
+                for line in text.splitlines():
+                    try:
+                        on_line(line)
+                    except Exception:
+                        _LOGGER.debug("进度回调失败", exc_info=True)
+            return StreamOutcome(returncode=code, output=text, elapsed=elapsed)
+        return stream_process(
+            command,
+            timeout,
+            log=self.log,
+            allow_real_disk=self.allow_real_disk,
+            env=env if env is not None else self.env,
+            cwd=cwd,
+            source=self.source,
+            cancel=cancel,
+            on_line=on_line,
+        )
+
 
 class DiskpartShell:
     """diskpart + 只读 PowerShell 查询。
@@ -254,6 +298,12 @@ class DiskpartShell:
         os.close(handle)
         try:
             Path(path).write_text("\r\n".join(lines) + "\r\n", encoding="ascii")
+            runner = getattr(self.process, "run_streaming", None)
+            if runner is not None:
+                # 流式：diskpart 的输出也会实时出现在任务日志里（取消不在这里做，
+                # 分区中途被强杀比等它跑完更危险，取消检查点在阶段边界）。
+                outcome = runner([self.diskpart, "/s", path], timeout)
+                return (outcome.returncode if outcome.returncode is not None else -1), outcome.output
             code, output, _elapsed = self.process.run([self.diskpart, "/s", path], timeout)
             return code, output
         finally:

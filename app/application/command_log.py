@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import uuid
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -40,6 +43,8 @@ class CommandLog:
     ) -> None:
         self.path: Path | None = None
         self._lines: list[str] = []
+        # 多线程：子进程读取线程与任务线程可能同时写日志。
+        self._lock = threading.Lock()
         # ``None`` = 只留内存（单测用）：运行时会由 ``main.py`` 传入
         # ``default_log_dir()``，所以界面上始终有日志可看。
         if log_dir:
@@ -59,13 +64,49 @@ class CommandLog:
 
     def write(self, line: str) -> None:
         stamped = f"[{datetime.now().strftime('%H:%M:%S')}] {line}"
-        self._lines.append(stamped)
+        with self._lock:
+            self._lines.append(stamped)
         if self.path is not None:
             try:
                 with self.path.open("a", encoding="utf-8") as handle:
                     handle.write(stamped + "\n")
             except OSError:
                 _LOGGER.warning("写执行日志失败: %s", self.path, exc_info=True)
+
+    @contextmanager
+    def streaming(self) -> Iterator[Callable[[str], None]]:
+        """流式写入器：文件只打开一次，每行 flush。
+
+        ``write()`` 每行 open/close 是为了简单；但 Ghost 的进度输出每秒好几行，
+        那种写法会变成 open/close 风暴，日志文件也常常滞后。这里返回一个
+        上下文内可用的 ``write`` 函数，退出时关闭句柄。目录不可写时退回内存。
+        """
+        handle = None
+        if self.path is not None:
+            try:
+                handle = self.path.open("a", encoding="utf-8")
+            except OSError:
+                _LOGGER.warning("写执行日志失败: %s", self.path, exc_info=True)
+
+        def write(line: str) -> None:
+            stamped = f"[{datetime.now().strftime('%H:%M:%S')}] {line}"
+            with self._lock:
+                self._lines.append(stamped)
+                if handle is not None:
+                    try:
+                        handle.write(stamped + "\n")
+                        handle.flush()
+                    except OSError:
+                        _LOGGER.warning("写执行日志失败: %s", self.path, exc_info=True)
+
+        try:
+            yield write
+        finally:
+            if handle is not None:
+                try:
+                    handle.close()
+                except OSError:
+                    pass
 
     def block(self, title: str, body: str) -> None:
         self.write(f"--- {title} ---")

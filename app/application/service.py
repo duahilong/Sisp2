@@ -134,6 +134,26 @@ def _as_int(value: Any) -> int | None:
     return None
 
 
+def _wanted_numbers(disk_numbers: Sequence[int] | None) -> list[int] | None:
+    """整理定向扫描的盘号；``None`` 表示全盘，空列表也按全盘处理。
+
+    空列表（例如“一个盘都没选中”）退回全盘是刻意的：调用点要么已经
+    提前校验过选择非空，要么只是想拿一份快照，不能因为空列表就静默扫空。
+    """
+    if disk_numbers is None:
+        return None
+    numbers: list[int] = []
+    try:
+        items = list(disk_numbers)
+    except TypeError:
+        return None
+    for item in items:
+        number = _as_int(item)
+        if number is not None and number >= 0 and number not in numbers:
+            numbers.append(number)
+    return numbers or None
+
+
 def _system_drive_letter() -> str | None:
     """系统盘符；``app.drive_letters`` 不可用时也能算出来。"""
     if os.name == "nt":
@@ -200,23 +220,56 @@ class SispService:
         self._powershell = powershell
 
     # ------------------------------------------------------------------ 扫描
-    def scan_disks(self) -> list[dict[str, Any]]:
+    def scan_disks(
+        self, disk_numbers: Sequence[int] | None = None
+    ) -> list[dict[str, Any]]:
         """返回硬盘摘要列表（纯只读）。
 
+        ``disk_numbers`` 不为 None 时只查这几块盘：写盘闸门每一步都要核对
+        “确认的盘还是不是这块盘”，以前每次都扫全部磁盘（一次 PowerShell
+        冷启动 + 全部分区/卷），现在只查目标盘；实测 3 块盘约 0.99 s → 0.85 s，
+        主要成本仍是 PowerShell 解释器启动。
+
         优先用 ``app.modules.disk_info.service.scan_disk_summaries``；
-        该模块不可用时退回到本模块内置的 ``Get-Disk`` 扫描。
+        该模块不可用时退回到本模块内置的 ``Get-Disk`` 扫描（不支持定向，
+        查完再按盘号过滤）。
+        """
+        wanted = _wanted_numbers(disk_numbers)
+        if self._disk_scanner is not None:
+            items = [dict(item) for item in self._disk_scanner()]
+        else:
+            try:
+                from app.modules.disk_info.service import scan_disk_summaries
+            except ImportError:
+                _LOGGER.debug("disk_info 模块不可用，使用内置只读扫描")
+                items = self._scan_with_powershell()
+            else:
+                items = [dict(item) for item in scan_disk_summaries(wanted)]
+        if wanted is None:
+            return items
+        return [
+            item
+            for item in items
+            if _as_int(item.get("disk_number")) in wanted
+        ]
+
+    def scan_snapshot(self) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
+        """一次拿“磁盘摘要 + 已用盘符”（会话开始/刷新用）。
+
+        返回 ``(summaries, used_letters)``。注入 ``disk_scanner`` 的测试
+        替身没有合并脚本，此时盘符交回给 ``build_selection_plan`` 自己扫。
         """
         if self._disk_scanner is not None:
-            return [dict(item) for item in self._disk_scanner()]
-
+            return ([dict(item) for item in self._disk_scanner()], ())
         try:
-            from app.modules.disk_info.service import scan_disk_summaries
+            from app.modules.disk_info.service import scan_snapshot
         except ImportError:
-            _LOGGER.debug("disk_info 模块不可用，使用内置只读扫描")
-        else:
-            return [dict(item) for item in scan_disk_summaries()]
-
-        return self._scan_with_powershell()
+            _LOGGER.debug("disk_info 模块不可用，快照退化为单次全盘扫描")
+            return (self.scan_disks(), ())
+        data = scan_snapshot()
+        disks = [dict(item) for item in data.get("disks") or ()]
+        letters = tuple(str(item).strip().upper() for item in data.get("used_letters") or () if str(item).strip())
+        return (disks, letters)
 
     def _scan_with_powershell(self) -> list[dict[str, Any]]:
         shell = self._powershell or shutil.which("powershell") or shutil.which("pwsh")
@@ -250,10 +303,24 @@ class SispService:
 
     def scan_protected_disks(self) -> list[DiskInfo]:
         """扫描并标记保护状态；被保护的盘 ``is_selectable=False``。"""
+        return self._protect_summaries(self.scan_disks())
+
+    def scan_protected_snapshot(self) -> tuple[list[DiskInfo], tuple[str, ...]]:
+        """一次扫描同时返回“带保护标记的盘”和“已用盘符”。
+
+        会话开始/刷新不再先扫盘、再由 ``build_selection_plan`` 扫一遍盘符，
+        首屏少一次 PowerShell 解释器冷启动（实测约 1 秒）。
+        """
+        summaries, letters = self.scan_snapshot()
+        return (self._protect_summaries(summaries), letters)
+
+    def _protect_summaries(
+        self, summaries: Sequence[Mapping[str, Any]]
+    ) -> list[DiskInfo]:
         system_letter = _system_drive_letter()
 
         disks: list[DiskInfo] = []
-        for summary in self.scan_disks():
+        for summary in summaries:
             disk = DiskInfo.from_summary(summary)
             reasons = self._protection_reasons(disk, system_letter)
             disks.append(
@@ -302,6 +369,7 @@ class SispService:
         result_dir: str | None = None,
         resource_resolver: Callable[[Any], int | None] | None = None,
         extra_counts: Mapping[int, int] | None = None,
+        known_letters: Sequence[str] | None = None,
     ) -> SelectionPlan:
         """校验选中硬盘并分配盘符，返回 ``SelectionPlan``。
 
@@ -309,6 +377,8 @@ class SispService:
         计算函数；容量不足直接抛 ``ValueError``，不进入确认界面。
         ``extra_counts`` 是 ``{硬盘编号: 额外数据分区数}``（每盘 0 或 1），
         决定这块盘要分配 3 个还是 4 个盘符。
+        ``known_letters`` 是会话快照里已有的系统盘符；给了就不再单独启动一次
+        PowerShell 扫描（没给时保持旧行为，调用方无需改）。
         """
         _ = (log_dir, result_dir)  # 目前只透传，不落盘
 
@@ -339,18 +409,25 @@ class SispService:
 
         # 摘要只能看到 Get-Partition 报告的盘符；EFI 等隐藏卷或已删除卷留下的
         # 幽灵盘符（DriveInfo IsReady=False）会被漏掉，导致 assign letter 失败。
-        try:
-            from app.modules.disk_info.service import scan_used_drive_letters
-        except ImportError:
-            _LOGGER.debug("disk_info 模块不可用，跳过系统盘符扫描")
+        # 会话快照已经带了这份盘符时直接复用，不再开第二个 PowerShell。
+        if known_letters is not None:
+            for letter in known_letters:
+                text = str(letter).strip().upper()
+                if text:
+                    used_letters.add(text)
         else:
             try:
-                for letter in scan_used_drive_letters():
-                    text = str(letter).strip().upper()
-                    if text:
-                        used_letters.add(text)
-            except Exception as exc:  # noqa: BLE001 - 扫描失败不阻断建计划
-                _LOGGER.warning("扫描系统已用盘符失败，仅使用磁盘摘要中的盘符: %s", exc)
+                from app.modules.disk_info.service import scan_used_drive_letters
+            except ImportError:
+                _LOGGER.debug("disk_info 模块不可用，跳过系统盘符扫描")
+            else:
+                try:
+                    for letter in scan_used_drive_letters():
+                        text = str(letter).strip().upper()
+                        if text:
+                            used_letters.add(text)
+                except Exception as exc:  # noqa: BLE001 - 扫描失败不阻断建计划
+                    _LOGGER.warning("扫描系统已用盘符失败，仅使用磁盘摘要中的盘符: %s", exc)
 
         if resource_resolver is not None:
             for number in disk_numbers:
@@ -512,8 +589,10 @@ class SispService:
         return summary
 
     def _find_disk_summary(self, disk_number: int) -> dict[str, Any] | None:
-        for summary in self.scan_disks():
-            if _as_int(summary.get("disk_number")) == disk_number:
+        """按盘号定向复核（只查这一块盘，不再全盘扫描）。"""
+        number = int(disk_number)
+        for summary in self.scan_disks([number]):
+            if _as_int(summary.get("disk_number")) == number:
                 return summary
         return None
 

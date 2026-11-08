@@ -7,6 +7,40 @@ tag 上的提交树就是那一版的完整代码与文档快照。
 定版（`v1.1.0`）之后只做优化与修复：功能以 tag 为准，`main` 继续向前走，
 需要回到某一版时 `git checkout v1.1.0` 或 `git archive v1.1.0`。
 
+## 未发布（main）— 执行可见性与定向扫描
+
+定版后只做优化与修复，不改变既有功能语义。这一批改了两处。
+
+### 新增
+
+- **子进程流式输出**：`app/application/streaming.py` 用 Popen 按行读取 stdout/stderr，
+  `CommandLog.streaming()` 逐行追加并 flush。diskpart / Ghost / bcdboot / robocopy 运行期间，
+  任务日志与 `/api/jobs/{id}/log` 就能看到内容，不再等进程结束一次性落盘。
+- **Ghost 进度与真取消**：解析 Ghost 输出里的百分比，换算成 `image` 步骤的内部比例，
+  任务的 `percent` 按“已完成步数 + 当前步比例”插值且只前进不后退；
+  取消会终止 Ghost 子进程（terminate → 等 5 s → kill），EFI 盘符仍照常释放。
+  diskpart 分区中途不强杀，仍在“清盘后/建分区后”两个检查点停。
+- **一次批量快照**：会话开始/刷新用一条 PowerShell 同时取“磁盘 + 分区 + 卷”和“已用盘符”；
+  `prepare()` 复用会话快照里的盘符（跑过任务后自动回到现场重扫）。
+- **写盘闸门定向复核**：`SispService._gate_target` 只查目标盘（`VIX_DISK_NUMBERS`），
+  不再为每块盘重扫全部磁盘；白名单、身份比对、保护规则与失败文案保持不变。
+
+### 变更
+
+- `POWERSHELL_SCRIPT` 支持 `VIX_DISK_NUMBERS` 过滤，新增 `SNAPSHOT_SCRIPT` 与
+  `scan_snapshot()`；`run_powershell()` 支持 `env`。
+- `PhaseContext.notify()` 支持可选的 `fraction`；`on_step` 三参回调继续可用（按签名探测）。
+
+### 测试
+
+- 新增 `tests/test_streaming.py`、`tests/test_scan_targeting.py`；VM（Windows 10 19045 +
+  Python 3.14.10）全量 **537 passed**，ruff 全绿。
+- VM 冒烟：源码 `--serve --dry-run` 会话扫到 3 块盘、prepare 两块盘并生成盘符/分区脚本、
+  submit/confirm 后两个任务 100% 完成；交付产物 `dist/Sisp2.exe`（17.4 MB）
+  以 `--dry-run --serve` 启动后 `/api/info` 版本 1.1.0、会话扫到 3 块盘。
+- 实测定向扫描（3 块盘）：全盘 987 ms、单盘 853 ms、单盘快照 971 ms、全盘快照 1075 ms——
+  单次查询主要耗在 PowerShell 解释器启动，收益来自“会话少一次解释器 + 闸门只查目标盘”。
+
 ## 1.1.0 — 2026-11-08（功能定版）
 
 功能全部落地、文档与代码对齐后的定版。自 `v1.0.1` 起共 69 个提交。

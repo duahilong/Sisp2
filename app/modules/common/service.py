@@ -16,6 +16,7 @@ powershell.exe”也做成“返回失败结果”，而不是抛异常，让调
 from __future__ import annotations
 
 import locale
+import os
 import subprocess
 import sys
 
@@ -120,6 +121,7 @@ def run_powershell(
     timeout: float | None = POWERSHELL_SCAN_TIMEOUT,
     *,
     allow_real_disk: bool = False,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """执行一段 PowerShell 脚本，返回 ``CompletedProcess[str]``。
 
@@ -129,6 +131,8 @@ def run_powershell(
         allow_real_disk：是否允许写盘/改挂载的命令，默认 **False**。只读扫描
             （``Get-Disk`` / ``Get-Partition``）不受影响；真需要写盘的调用方
             必须显式传 ``True``，否则会抛 :class:`app.safety_guard.RealDiskBlocked`。
+        env：附加环境变量（例如定向扫描要传 ``VIX_DISK_NUMBERS``）；
+            与 ``os.environ`` 合并，不替换整个环境（PowerShell 依赖 PATH/SystemRoot）。
 
     返回：
         ``subprocess.CompletedProcess``，``stdout`` / ``stderr`` 已经是 ``str``。
@@ -156,12 +160,16 @@ def run_powershell(
     ensure_command_allowed(argv, allow_real_disk=allow_real_disk, source="run_powershell")
 
     try:
+        child_env = dict(os.environ)
+        if env:
+            child_env.update({str(key): str(value) for key, value in env.items()})
         completed = subprocess.run(  # noqa: S603 - argv 由本模块按固定模板拼装
             argv,
             capture_output=True,
             timeout=timeout,
             check=False,
             creationflags=_NO_WINDOW,
+            env=child_env if env else None,
         )
     except subprocess.TimeoutExpired as exc:
         detail = _decode_console_output(exc.stderr).strip()

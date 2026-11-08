@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import threading
 from collections.abc import Mapping, Sequence
@@ -45,17 +46,57 @@ class PhaseContext:
     # 演练任务：阶段可以报“将会做什么”，但绝不执行命令（拷贝阶段用它区分文案）。
     dry_run: bool = False
 
-    def notify(self, key: str, status: str, message: str = "") -> None:
-        """上报"某一步正在执行"；进度回调可选，异常一律吞掉。"""
+    def __post_init__(self) -> None:
+        # 回调可以是老的 ``on_step(key, status, message)``，也可以多接一个
+        # ``fraction``（0–1，用于 Ghost 这类有内部百分比的步骤）。签名在构造期
+        # 判定一次，运行期不再反复反射；老回调不会被多塞一个参数。
+        self._accepts_fraction = _accepts_fraction(self.on_step)
+
+    def notify(
+        self,
+        key: str,
+        status: str,
+        message: str = "",
+        fraction: float | None = None,
+    ) -> None:
+        """上报“某一步正在执行”；进度回调可选，异常一律吞掉。"""
         if self.on_step is None:
             return
         try:
-            self.on_step(key, status, message)
+            if self._accepts_fraction:
+                self.on_step(key, status, message, fraction)
+            else:
+                self.on_step(key, status, message)
         except Exception:
             _LOGGER.warning("进度回调失败", exc_info=True)
 
     def cancelled(self) -> bool:
         return self.cancel.is_set()
+
+
+def _accepts_fraction(callback: Any) -> bool:
+    """进度回调是否接受第 4 个参数 ``fraction``。
+
+    三参回调是历史契约（测试与外部执行器都在用），不能因为新增了子步骤
+    进度就把它直接撑破；``*args`` / ``**kwargs`` 视为可以接受。
+    """
+    if callback is None:
+        return False
+    try:
+        parameters = list(inspect.signature(callback).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    for parameter in parameters:
+        if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
+            return True
+        if parameter.name == "fraction":
+            return True
+    positional = [
+        parameter
+        for parameter in parameters
+        if parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    return len(positional) >= 4
 
 
 @dataclass(frozen=True)

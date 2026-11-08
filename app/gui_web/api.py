@@ -50,8 +50,13 @@ def err(code: str, message: str, detail: Any = None) -> dict[str, Any]:
 def _scan_summary(disk_number: int) -> dict[str, Any]:
     from app.modules.disk_info.service import scan_disk_summaries
 
-    for summary in scan_disk_summaries():
-        if int(summary.get("disk_number") or -1) == int(disk_number):
+    number = int(disk_number)
+    summaries = scan_disk_summaries([number])
+    if not summaries:
+        # 定向查不到时退回一次全盘扫描：可能是盘号对不上，也可能是旧脚本行为。
+        summaries = scan_disk_summaries()
+    for summary in summaries:
+        if int(summary.get("disk_number") or -1) == number:
             return summary
     raise PermissionError(f"硬盘 {disk_number} 当前不存在")
 

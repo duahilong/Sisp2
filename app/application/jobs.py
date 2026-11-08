@@ -17,8 +17,8 @@
 
 - **默认停在等待确认**：``submit()`` 不会自动开跑，必须显式
   ``confirm_batch()``，避免界面误触直接清盘；
-- **取消是协作式的**：``cancel()`` 只把 ``cancel_event`` 置位并立刻返回，
-  正在执行的步骤跑完后才停（与界面提示的“当前步骤完成后才会停止”一致）；
+- **取消是分档的**：``cancel()`` 只置位 ``cancel_event`` 并立刻返回；排队/等分区的任务
+  一个命令都不跑，分区在步骤边界停，写镜像的 Ghost 会被执行层直接终止。
 - **事件是旁路**：``subscribe()`` 的回调在 ``jobs_lock`` 之外调用，
   回调抛异常只记日志，不影响任务状态；
 - **提交/确认幂等**：同一块盘同时只允许一个未结束任务，``confirm_batch()``
@@ -461,9 +461,15 @@ class JobManager:
         ``diskpart_preview`` 这种演练期附加步骤照样发事件，但不进 ``completed``。
         """
         total = _step_total()
-        stages = set(_step_keys())
+        keys = list(_step_keys())
+        stages = set(keys)
 
-        def report(key: str, status: str, message: str = "") -> None:
+        def report(
+            key: str,
+            status: str,
+            message: str = "",
+            fraction: float | None = None,
+        ) -> None:
             counted = not stages or key in stages
             with self._lock:
                 completed = list(job.progress.get("completed") or [])
@@ -476,6 +482,20 @@ class JobManager:
                     if key not in completed:
                         completed.append(key)
                 percent = round(len(completed) * 100 / total) if total else 0
+                # 同一个任务里进度只允许前进：上一次报过的 percent 也要参与 max，
+                # 否则重试/低百分比回调会把它拉回去。
+                previous = int(job.progress.get("percent") or 0)
+                percent = max(percent, previous)
+                # 子步骤进度（例如 Ghost 自己的百分比）：把"当前步"按 fraction
+                # 折进总进度。只允许前进：重试时从 3% 回到 0% 会让界面看起来
+                # 像卡住或倒退。是否多传这一个参数由 PhaseContext 按回调签名决定。
+                if counted and status == STEP_RUNNING and fraction is not None and total:
+                    ratio = min(max(float(fraction), 0.0), 1.0)
+                    try:
+                        index = keys.index(key)
+                    except ValueError:
+                        index = 0
+                    percent = max(percent, round((index + ratio) * 100 / total))
                 job.progress = {
                     "total": total,
                     "completed": completed,

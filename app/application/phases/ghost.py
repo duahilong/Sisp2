@@ -18,6 +18,7 @@ from app.application.partitions import ghost_target
 from app.application.phases.base import PhaseContext, PhaseOutcome, PhaseResult
 from app.application.runner_utils import tail
 from app.application.shell import GHOST_TIMEOUT, ProcessShell
+from app.application.streaming import parse_percent
 from app.modules.ghost.service import ghost_command, parse_ghosterr
 
 GROUP = "system"
@@ -86,13 +87,23 @@ class GhostImagePhase:
             if self.start_gate is not None:
                 self.start_gate.wait()
             try:
-                code, output, elapsed = self.shell.run(
-                    self.command(ctx), GHOST_TIMEOUT, cwd=self.cwd
-                )
+                code, output, elapsed, cancelled = self._run(ctx)
             except Exception as exc:  # noqa: BLE001 - 缺工具/启动失败/超时都算这一步失败
                 return PhaseOutcome.failed(
                     PhaseResult.failed("image", f"Ghost 无法执行：{exc}"),
                     message=f"应用镜像失败：{exc}",
+                )
+
+            if cancelled:
+                # 进程已被终止：盘上可能已有半个镜像，必须说清楚“不是什么都没发生”。
+                return PhaseOutcome(
+                    ok=False,
+                    cancelled=True,
+                    disk_touched=True,
+                    results=(
+                        PhaseResult.skipped("image", "任务已取消（镜像写入已中止）"),
+                    ),
+                    message="任务已取消（镜像写入被中止，分区已建好）",
                 )
 
             if code == 0:
@@ -144,6 +155,42 @@ class GhostImagePhase:
         ))
 
     # ------------------------------------------------------------------ 内部
+    def _run(self, ctx: PhaseContext) -> tuple[int | None, str, float, bool]:
+        """跑一次 Ghost：有流式能力就边跑边解析百分比、随时可取消。"""
+        command = self.command(ctx)
+        streaming = getattr(self.shell, "run_streaming", None)
+        if streaming is None:
+            code, output, elapsed = self.shell.run(command, GHOST_TIMEOUT, cwd=self.cwd)
+            return code, output, elapsed, False
+        outcome = streaming(
+            command,
+            GHOST_TIMEOUT,
+            cwd=self.cwd,
+            cancel=ctx.cancel,
+            on_line=self._progress_callback(ctx),
+        )
+        return outcome.returncode, outcome.output, outcome.elapsed, outcome.cancelled
+
+    @staticmethod
+    def _progress_callback(ctx: PhaseContext):
+        """把 Ghost 的 `` 42%`` 输出翻成 ``fraction``；只前进不后退。"""
+        last = -1
+
+        def on_line(line: str) -> None:
+            nonlocal last
+            percent = parse_percent(line)
+            if percent is None or percent <= last:
+                return
+            last = percent
+            ctx.notify(
+                "image",
+                "running",
+                f"应用镜像（Ghost） {percent}%",
+                fraction=percent / 100,
+            )
+
+        return on_line
+
     @staticmethod
     def _is_transient(reason: str) -> bool:
         text = (reason or "").lower()

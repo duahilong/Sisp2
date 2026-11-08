@@ -9,7 +9,20 @@ from app.modules.common.service import POWERSHELL_SCAN_TIMEOUT, run_powershell
 # 消费的字典。
 
 POWERSHELL_SCRIPT = r"""
-$disks = Get-Disk | Sort-Object Number
+$wanted = @()
+if ($env:VIX_DISK_NUMBERS) {
+    # 定向查询：只取这几块盘（写盘闸门复核用），避免每次写盘前都扫全部磁盘。
+    $wanted = @($env:VIX_DISK_NUMBERS.Split(',') | ForEach-Object { [int]$_.Trim() })
+}
+if ($wanted.Count -gt 0) {
+    # PowerShell 5.1 不允许 `foreach (...) {...} | Sort-Object`（空管道元素）。
+    # 先收集再排序，两条分支都得到数组。
+    $disks = @()
+    foreach ($n in $wanted) { $disks += Get-Disk -Number $n -ErrorAction SilentlyContinue }
+    $disks = @($disks | Sort-Object Number)
+} else {
+    $disks = @(Get-Disk | Sort-Object Number)
+}
 $result = @()
 
 foreach ($disk in $disks) {
@@ -96,6 +109,23 @@ $letters | Select-Object -Unique | Sort-Object
 INVALID_SIZE_DISPLAY = "大小异常"
 UNKNOWN_SIZE_DISPLAY = "未知"
 
+# 一次会话开始/刷新时，把"磁盘快照 + 已用盘符"合并成一次 PowerShell 往返：
+# 两者本来就是同一种只读查询，分两次启动解释器只会白等一倍冷启动时间。
+SNAPSHOT_SCRIPT = (
+    POWERSHELL_SCRIPT.rsplit("$result | ConvertTo-Json", 1)[0]
+    # 盘符脚本最后一行是"直接输出"（供单独调用）。合并进快照时必须去掉，
+    # 否则字母会先于 JSON 打到 stdout，解析直接失败。
+    + USED_DRIVE_LETTERS_SCRIPT.rsplit("$letters | Select-Object", 1)[0]
+    + r"""
+
+$letters = @($letters | Select-Object -Unique | Sort-Object)
+[PSCustomObject]@{
+    disks = @($result)
+    used_letters = @($letters)
+} | ConvertTo-Json -Depth 6
+"""
+).strip()
+
 
 def format_size(size_bytes: Any) -> str:
     if size_bytes is None:
@@ -117,8 +147,31 @@ def format_size(size_bytes: Any) -> str:
     return f"{size_bytes} B"
 
 
-def run_powershell_json(script: str) -> list[dict[str, Any]]:
-    completed = run_powershell(script, timeout=POWERSHELL_SCAN_TIMEOUT)
+def _disk_numbers_env(disk_numbers: Any = None) -> dict[str, str] | None:
+    """把显式盘号列表翻成 PowerShell 脚本读的环境变量（None = 全盘）。"""
+    if disk_numbers is None:
+        return None
+    numbers: list[int] = []
+    try:
+        iterator = list(disk_numbers)
+    except TypeError:
+        return None
+    for item in iterator:
+        if isinstance(item, bool):
+            continue
+        try:
+            number = int(item)
+        except (TypeError, ValueError):
+            continue
+        if number >= 0 and number not in numbers:
+            numbers.append(number)
+    if not numbers:
+        return None
+    return {"VIX_DISK_NUMBERS": ",".join(str(number) for number in sorted(numbers))}
+
+
+def _run_json(script: str, *, env: dict[str, str] | None = None) -> Any:
+    completed = run_powershell(script, timeout=POWERSHELL_SCAN_TIMEOUT, env=env)
 
     if completed.returncode != 0:
         raise RuntimeError(
@@ -133,12 +186,18 @@ def run_powershell_json(script: str) -> list[dict[str, Any]]:
         raise RuntimeError("PowerShell 没有返回任何内容")
 
     try:
-        data = json.loads(stdout)
+        return json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise RuntimeError(
             "PowerShell 返回了无法解析的 JSON\n"
             f"原始输出:\n{stdout[:500]}"
         ) from exc
+
+
+def run_powershell_json(
+    script: str, *, env: dict[str, str] | None = None
+) -> list[dict[str, Any]]:
+    data = _run_json(script, env=env)
     if isinstance(data, dict):
         return [data]
     return data
@@ -247,18 +306,54 @@ def summarize_disk(disk: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def scan_disks() -> list[dict[str, Any]]:
-    return run_powershell_json(POWERSHELL_SCRIPT)
+def scan_disks(disk_numbers: Any = None) -> list[dict[str, Any]]:
+    """扫描磁盘原始结构；传 ``disk_numbers`` 时只查这几块（定向复核）。"""
+    return run_powershell_json(POWERSHELL_SCRIPT, env=_disk_numbers_env(disk_numbers))
 
 
-def scan_disk_summaries() -> list[dict[str, Any]]:
+def scan_disk_summaries(disk_numbers: Any = None) -> list[dict[str, Any]]:
     """扫描并把每块盘归一化成界面契约（含分区明细）。
 
     直接复用完整扫描脚本：分区大小、文件系统、类型都来自同一次
     ``Get-Partition`` / ``Get-Volume`` 查询，避免摘要脚本只带盘符、
-    导致界面上的分区表全是“未知”。
+    导致界面上的分区表全是“未知”。传入盘号时只查询这几块盘。
     """
-    return [summarize_disk(disk) for disk in scan_disks()]
+    return [summarize_disk(disk) for disk in scan_disks(disk_numbers)]
+
+
+def _parse_letters(stdout: str) -> list[str]:
+    letters: list[str] = []
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        if line and line.upper() not in letters:
+            letters.append(line.upper())
+    return letters
+
+
+def scan_snapshot(disk_numbers: Any = None) -> dict[str, Any]:
+    """一次往返拿到 ``{"disks": [...摘要], "used_letters": [...]}``。
+
+    会话开始/刷新共用：原本要跑两遍 PowerShell（全盘扫描 + 已用盘符），
+    现在合并成一次，界面首屏少等一次解释器冷启动。
+    """
+    data = _run_json(SNAPSHOT_SCRIPT, env=_disk_numbers_env(disk_numbers))
+    if not isinstance(data, dict):
+        raise RuntimeError("快照脚本的输出格式不对（应为 JSON 对象）")  # noqa: TRY004
+    disks = data.get("disks") or []
+    if isinstance(disks, dict):
+        disks = [disks]
+    used = data.get("used_letters") or []
+    if isinstance(used, str):
+        used = [used]
+    letters: list[str] = []
+    for item in used:
+        letter = str(item).strip().upper()[:1]
+        if letter and letter not in letters:
+            letters.append(letter)
+    return {
+        "disks": [summarize_disk(disk) for disk in disks if isinstance(disk, dict)],
+        "used_letters": letters,
+    }
 
 
 def scan_used_drive_letters() -> list[str]:
@@ -270,12 +365,4 @@ def scan_used_drive_letters() -> list[str]:
             f"标准输出:\n{completed.stdout}\n"
             f"标准错误:\n{completed.stderr}"
         )
-    stdout = (completed.stdout or "").strip()
-    if not stdout:
-        return []
-    letters: list[str] = []
-    for raw_line in stdout.splitlines():
-        line = raw_line.strip()
-        if line and line not in letters:
-            letters.append(line.upper())
-    return letters
+    return _parse_letters(completed.stdout or "")
