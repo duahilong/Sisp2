@@ -39,7 +39,7 @@ python -m app.gui_web.main --serve --port 8765
 | `POST /api/cancel` | `{job_id}`，协作式取消 |
 | `GET /api/jobs` | 任务列表（首屏兜底，SSE 未连上时也能画出进度） |
 | `GET /api/jobs/{job_id}` | 单任务查询（含 `progress`） |
-| `GET /api/jobs/{job_id}/log?tail=200` | 任务日志尾部；只允许 `logDir` 下的 `.log` 文件，越界返回 `E_PATH` |
+| `GET /api/jobs/{job_id}/log?tail=200` | 任务日志尾部；只允许 `logDir` 下的 `.log` 文件，越界返回 `E_PATH`。任务运行中 `details["log_path"]` 还不存在，此时按文件名里的盘号（`disk-runner-d<N>-*.log`）找「比任务启动时刻新」的最新一份；都没有则返回 `message` 说明原因 |
 | `POST /api/partition/preview` | `{disk_number?}`；返回**真实会执行的三段 diskpart 脚本**（只读，需先 `/api/prepare`；与执行器同源生成） |
 | `POST /api/images` | 不带 `path` 时返回设置里的两个系统槽位 `{versions: [{id, label, path, ok, exists, reason, size_display}], default}`（每个都读文件头 `FE EF`）；带 `path` 时只校验那一个 GHO（返回 `magic_ok`）。`directory` 参数仅兼容旧请求体，已不再使用。全部是纯文件读取，不 spawn 任何进程 |
 | `GET /api/boot/report` | 扫描各盘的 Windows 目录与 ESP，返回可修复性报告 |

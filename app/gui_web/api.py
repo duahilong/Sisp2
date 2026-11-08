@@ -23,6 +23,7 @@ import platform
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -192,14 +193,57 @@ class WebApi:
             return err("E_NOT_FOUND", f"任务不存在: {job_id}")
         return ok(job.to_dict())
 
+    def _latest_disk_log(self, job: Any) -> str | None:
+        """运行中的任务还没有 ``log_path``：按「盘号 + 启动时间」兜底找日志。
+
+        执行器的 ``CommandLog`` 文件名里带盘号（``disk-runner-d2-*.log``），
+        任务结束前 ``details["log_path"]`` 还不存在，界面展开日志时会空着。
+        这里只在「文件比任务启动时刻新」时采用，避免翻到同一块盘上一轮
+        的旧日志。
+        """
+        root = self._log_root
+        spec = getattr(job, "spec", None)
+        try:
+            number = int(getattr(spec, "disk_number", None))
+        except (TypeError, ValueError):
+            return None
+        if not root:
+            return None
+        began: float | None = None
+        started = str(getattr(job, "started_at", "") or "").strip()
+        if started:
+            try:
+                began = datetime.fromisoformat(started).timestamp()
+            except ValueError:
+                began = None
+        candidates: list[tuple[float, str]] = []
+        for item in sorted(Path(root).glob(f"disk-runner-d{number}-*.log")):
+            try:
+                stamp = item.stat().st_mtime
+            except OSError:
+                continue
+            if began is not None and stamp + 2.0 < began:
+                continue
+            candidates.append((stamp, str(item)))
+        if not candidates:
+            return None
+        return max(candidates)[1]
+
     def job_log(self, job_id: str, tail: int = 200) -> dict[str, Any]:
         """读取任务日志尾部；路径必须落在配置的日志目录内。"""
         job = self._wf.job_manager.get(job_id)
         if job is None:
             return err("E_NOT_FOUND", f"任务不存在: {job_id}")
-        path = _job_log_path(job)
+        path = _job_log_path(job) or self._latest_disk_log(job)
         if path is None:
-            return ok({"path": "", "lines": [], "total": 0, "message": "该任务没有日志文件"})
+            return ok(
+                {
+                    "path": "",
+                    "lines": [],
+                    "total": 0,
+                    "message": "还没有日志：任务可能刚启动，或没配置日志目录（设置 · 日志与诊断）",
+                }
+            )
         allowed = self._allowed_log_path(path)
         if allowed is None:
             return err("E_PATH", "日志路径不在日志目录内，拒绝读取", {"path": str(path)})

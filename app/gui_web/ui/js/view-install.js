@@ -886,22 +886,123 @@ function layoutDetailsOf(job) {
   return { status: step.status, message: step.message || '', verdict: layoutVerdict(step.details) };
 }
 
-function layoutPanel(info) {
+function layoutPanel(info, openKey) {
   const verdict = info.verdict;
-  const ok = info.status === 'ok' && verdict.ok;
+  const problems = verdict.problems.length;
+  const ok = info.status === 'ok' && problems === 0;
+  // 演练与未执行的步骤 status 不是 ok，但也没有问题——不能显示成“未通过”。
+  const label = ok
+    ? '分区验收通过'
+    : (problems ? `分区验收未通过（${problems} 个问题）` : `分区验收${info.status === 'skipped' ? '未执行（演练）' : '未通过'}`);
   const rows = verdict.rows.map((row) => `<tr><td class="k">#${row.number} ${esc(row.label)}</td>
       <td>${esc(fmtSize(row.size))}${row.letter ? ` · ${esc(row.letter)}:` : ''}${row.fileSystem ? ` · ${esc(row.fileSystem)}` : ''}</td></tr>`).join('');
-  return `<li class="verdict ${ok ? 'ok' : 'bad'}">
-    <div class="vd-h">分区验收${ok ? '通过' : `未通过（${verdict.problems.length} 个问题）`}</div>
-    <div class="vd-m">${esc(info.message)}</div>
-    ${rows ? `<table class="vd-rows">${rows}</table>` : ''}
-    ${verdict.problems.length ? `<div class="vd-p">${verdict.problems.map(esc).join('<br>')}</div>` : ''}
-    ${verdict.warnings.length ? `<div class="vd-w">${verdict.warnings.map(esc).join('<br>')}</div>` : ''}
-  </li>`;
+  return `<details class="vdbox" data-open-key="${esc(openKey)}"${openKey ? '' : ''}>
+    <summary class="vd-sum ${ok ? 'ok' : (problems ? 'bad' : '')}">${esc(label)}</summary>
+    <div class="vd-body">
+      <div class="vd-m">${esc(info.message)}</div>
+      ${rows ? `<table class="vd-rows">${rows}</table>` : ''}
+      ${verdict.problems.length ? `<div class="vd-p">${verdict.problems.map(esc).join('<br>')}</div>` : ''}
+      ${verdict.warnings.length ? `<div class="vd-w">${verdict.warnings.map(esc).join('<br>')}</div>` : ''}
+    </div>
+  </details>`;
 }
 
 function jobOf(jobId) {
   return state.jobs.get(jobId) || null;
+}
+
+/** 重新渲染前记下哪些 <details> 是展开的：进度页每 1.5 s 整页重绘，
+ *  不记的话用户刚展开的步骤/日志会被合上。 */
+function captureOpenDetails() {
+  const open = new Set();
+  const body = $('#wzBody');
+  if (!body) return open;
+  body.querySelectorAll('details[data-open-key]').forEach((node) => {
+    if (node.open) open.add(node.dataset.openKey);
+  });
+  return open;
+}
+
+/** 一个阶段行：默认只显示“① 硬盘分区 4/4 ✓”，展开才列具体步骤。 */
+function phaseRowHtml(jobId, group, index, skipped, stepEvents, completed, current, open) {
+  const cls = ['phrow', group.status, skipped ? 'skipped' : ''].filter(Boolean).join(' ');
+  if (skipped) {
+    return `<li class="${cls}"><span class="ph-no">${index + 1}</span>
+      <span class="ph-title">${esc(group.title)}</span>
+      <span class="ph-count">未执行</span></li>`;
+  }
+  const mark = group.status === 'done' ? '✓' : (group.status === 'failed' ? '×' : (group.status === 'running' ? '●' : ''));
+  const key = `${jobId}:${group.key}`;
+  const steps = group.steps.map((stepKey) => {
+    const event = stepEvents.get(stepKey);
+    const done = completed.includes(stepKey);
+    const isCurrent = current === stepKey || (event && event.status === 'running');
+    const failed = event && event.status === 'failed';
+    const itemCls = done ? 'done' : (failed || isCurrent ? 'on' : '');
+    const itemMark = done ? '✓' : (failed ? '×' : (isCurrent ? '●' : ''));
+    const text = event ? (event.status === 'running' ? '进行中' : (JOB_STATUS_TEXT[event.status] || event.status)) : '';
+    return `<li class="sub ${itemCls}"><span class="sk">${itemMark}</span>${esc(STEP_LABELS[stepKey] || stepKey)}
+      <span class="stt">${esc(text)}</span></li>`;
+  }).join('');
+  return `<li class="${cls}">
+    <details data-open-key="${esc(key)}"${open.has(key) ? ' open' : ''}>
+      <summary><span class="ph-no">${index + 1}</span><span class="ph-title">${esc(group.title)}</span>
+        <span class="ph-count">${group.completed.length}/${group.total} ${mark}</span></summary>
+      <ul class="psteps">${steps}</ul>
+    </details>
+  </li>`;
+}
+
+/** 一块盘的紧凑卡片：头部一行 + 4px 进度条 + 3 个阶段行 + 验收/日志两个折叠区。 */
+function progressCardHtml(jobId, open) {
+  const job = jobOf(jobId);
+  const diskNumber = job && job.spec ? job.spec.disk_number : '?';
+  const progress = (job && job.progress) || state.wizard.progress.get(jobId) || {};
+  const percent = Number(progress.percent) || 0;
+  const completed = progress.completed || [];
+  const current = progress.current;
+  const stepEvents = state.wizard.steps.get(jobId) || new Map();
+  // 阶段分组来自后端 plan.phases（老后端回退内置表），分区与装机在界面上就是两段。
+  const plan = (job && job.plan) || planOfDisk(diskNumber);
+  const groups = phaseGroups(plan);
+  const stepStates = {};
+  stepEvents.forEach((event, key) => { stepStates[key] = event.status; });
+  const perPhase = progressByPhase(progress, groups, stepStates);
+  const failedKey = Object.keys(stepStates).find((key) => stepStates[key] === 'failed') || null;
+  const skippedGroups = new Set(failedKey ? skippedByFailure(failedKey, groups) : []);
+  const layoutInfo = layoutDetailsOf(job);
+  const status = job ? job.status : 'pending';
+  // 排队：任务已启动但没有产生任何步骤事件——多盘流水线里它在等前一块盘的分区组。
+  const queued = !current && !completed.length && !stepEvents.size
+    && ['running', 'pending', 'scheduled', 'waiting_confirmation'].includes(status);
+  const badge = `<span class="badge ${esc(status)}">${esc(jobStatusText(status))}</span>`;
+  const logLines = logCache.get(jobId) || [];
+  const logKey = `${jobId}:log`;
+  const logBody = logLines.length
+    ? logLines.map((line) => `<div><span class="t">·</span><span>${esc(line)}</span></div>`).join('')
+    : `<div class="plog-empty">${esc(logCache.get(`${jobId}:msg`) || '日志还没有输出…')}</div>`;
+  const rows = perPhase.map((group, index) => phaseRowHtml(
+    jobId, group, index, skippedGroups.has(group.key), stepEvents, completed, current, open,
+  )).join('');
+  const verdict = (layoutInfo && !skippedGroups.has('partition'))
+    ? layoutPanel(layoutInfo, `${jobId}:verdict`) : '';
+
+  return `<div class="jcard" data-job="${esc(jobId)}">
+    <div class="jc-h">
+      <span class="jc-name">磁盘 ${esc(diskNumber)}</span>
+      ${badge}
+      <span class="jc-pct">${percent}%</span>
+    </div>
+    <div class="jc-step" title="${esc(queued ? '等待前一块盘分区完成' : (progress.message || ''))}">${esc(queued ? '排队：前一块盘分区完成后自动开始' : (progress.message || '准备中'))}</div>
+    <div class="track"><i style="width:${percent}%"></i></div>
+    <ul class="phases">${rows}</ul>
+    ${job && job.error ? `<div class="warnbox jc-err"><span class="wi">!</span><div>${esc(job.error)}</div></div>` : ''}
+    ${verdict}
+    <details class="plogbox" data-log="${esc(jobId)}" data-open-key="${esc(logKey)}"${open.has(logKey) ? ' open' : ''}>
+      <summary>日志 <span class="plogmeta">${logLines.length ? `最近 ${logLines.length} 行` : '暂无输出'}</span></summary>
+      <div class="plog">${logBody}</div>
+    </details>
+  </div>`;
 }
 
 function renderProgressHtml() {
@@ -909,85 +1010,30 @@ function renderProgressHtml() {
   if (!jobIds.length) {
     return `<div class="wz-inner"><div class="empty-hint">没有要显示的任务</div></div>`;
   }
-
-  const blocks = jobIds.map((jobId) => {
-    const job = jobOf(jobId);
-    const diskNumber = job && job.spec ? job.spec.disk_number : '?';
-    const progress = (job && job.progress) || state.wizard.progress.get(jobId) || {};
-    const percent = Number(progress.percent) || 0;
-    const completed = progress.completed || [];
-    const current = progress.current;
-    const stepEvents = state.wizard.steps.get(jobId) || new Map();
-    // 阶段分组来自后端 plan.phases（老后端回退内置表），分区与装机在界面上就是两段。
-    const plan = (job && job.plan) || planOfDisk(diskNumber);
-    const groups = phaseGroups(plan);
-    const stepStates = {};
-    stepEvents.forEach((event, key) => { stepStates[key] = event.status; });
-    const perPhase = progressByPhase(progress, groups, stepStates);
-    const failedKey = Object.keys(stepStates).find((key) => stepStates[key] === 'failed') || null;
-    const skippedGroups = new Set(failedKey ? skippedByFailure(failedKey, groups) : []);
-    const layoutInfo = layoutDetailsOf(job);
-
-    const stages = perPhase.map((phase, index) => {
-      const head = `<li class="phase-head">
-        <span class="ph-no">${index + 1}</span>
-        <span class="ph-title">${esc(phase.title)}</span>
-        <span class="ph-eta">${phase.completed.length}/${phase.total}${phase.status === 'done' ? ' ✓' : (phase.status === 'failed' ? ' ×' : '')}</span>
-      </li>`;
-      if (skippedGroups.has(phase.key)) {
-        return head + `<li class="skip"><span class="sk">⊘</span>未执行（前一段没有通过验收）</li>`;
-      }
-      const items = phase.steps.map((key) => {
-        const event = stepEvents.get(key);
-        const done = completed.includes(key);
-        const isCurrent = current === key || (event && event.status === 'running');
-        const failed = event && event.status === 'failed';
-        let cls = '';
-        if (done) cls = 'done';
-        else if (failed) cls = 'on';
-        else if (isCurrent) cls = 'on';
-        const mark = done ? '✓' : (failed ? '×' : (isCurrent ? '●' : ''));
-        const status = event ? (event.status === 'running' ? '进行中' : (JOB_STATUS_TEXT[event.status] || event.status)) : '';
-        return `<li class="sub ${cls}"><span class="sk">${mark}</span>${esc(STEP_LABELS[key] || key)}
-          <span class="stt">${esc(status)}</span></li>`;
-      }).join('');
-      const panel = (phase.key === 'partition' && layoutInfo) ? layoutPanel(layoutInfo) : '';
-      return head + items + panel;
-    }).join('');
-
-    const status = job ? job.status : 'pending';
-    // 排队：任务已启动但没有产生任何步骤事件——多盘流水线里它在等前一块盘的分区组。
-    const queued = !current && !completed.length && !stepEvents.size
-      && ['running', 'pending', 'scheduled', 'waiting_confirmation'].includes(status);
-    const badge = `<span class="badge ${esc(status)}">${esc(jobStatusText(status))}</span>`;
-    const logLines = logCache.get(jobId) || [];
-
-    return `<div class="prog" data-job="${esc(jobId)}">
-      <div class="prow">
-        <span class="pname">磁盘 ${esc(diskNumber)} ${queued ? '排队等待分区' : '安装中'}</span>
-        ${badge}
-        <span class="peta">${percent}% · ${esc(queued ? '前一块盘分区完成后自动开始' : (progress.message || ''))}</span>
-      </div>
-      <div class="track"><i style="width:${percent}%"></i></div>
-      <ul class="stages">${stages}</ul>
-      ${job && job.error ? `<div class="warnbox" style="margin-top:10px"><span class="wi">!</span><div>${esc(job.error)}</div></div>` : ''}
-      <div class="plog" data-log="${esc(jobId)}">${logLines.map((line) => `<div><span class="t">·</span><span>${esc(line)}</span></div>`).join('')}</div>
-    </div>`;
-  }).join('');
+  // 先读旧 DOM 的展开状态，再整体替换内容（进度页每轮轮询都会重绘）。
+  const open = captureOpenDetails();
+  const cards = jobIds.map((jobId) => progressCardHtml(jobId, open)).join('');
 
   return `<div class="wz-inner wp">
-    ${blocks}
-    <div class="wz-startrow">
-      ${phase === 'running' ? '<button class="tbtn" id="cancelBtn">取消剩余任务</button>' : ''}
+    <div class="prog-grid">${cards}</div>
+    <div class="progfoot">
+      ${phase === 'running' ? '<button class="tbtn danger" id="cancelBtn">⏹ 取消剩余任务</button>' : ''}
       ${phase === 'done' ? '<button class="tbtn primary" id="finishBtn">完成，回到主页面</button>' : ''}
       ${phase === 'failed' ? '<button class="tbtn" id="retryBtn">重新开始</button>' : ''}
+      <span class="wz-startnote" id="progNote">${phase === 'running' ? '已开始的写盘步骤会尽量收尾，未开始的跳过' : ''}</span>
+      <span class="spacer"></span>
       <button class="tbtn" id="openLogBtn">查看任务日志</button>
-      <span class="wz-startnote" id="progNote"></span>
     </div>
   </div>`;
 }
 
 function bindProgress() {
+  // 日志区首次展开就去拉一次日志（轮询只在展开状态下工作）。
+  $$('#wzBody details[data-log]').forEach((box) => {
+    box.addEventListener('toggle', () => {
+      if (box.open) void pollJobLogs();
+    });
+  });
   const cancel = $('#cancelBtn');
   if (cancel) {
     cancel.addEventListener('click', async () => {
@@ -1056,26 +1102,30 @@ export function onStepEvent(payload) {
 }
 
 /**
- * 轮询在跑的任务日志尾部，填进进度页的内联日志区。
- * 只改 .plog 的 DOM，避免整页重绘打断用户滚动。
+ * 轮询在跑的任务日志尾部，填进卡片里展开的日志区。
+ * 只改 `.plog` 的 DOM，避免整页重绘打断用户滚动；折叠状态下不请求。
  */
 export async function pollJobLogs() {
-  if (state.wizard.phase !== 'running') return;
+  if (!['running', 'done', 'failed'].includes(state.wizard.phase)) return;
   for (const jobId of state.wizard.jobIds) {
+    const box = $(`#wzBody details[data-log="${jobId}"]`);
+    if (!box || !box.open) continue;
     const job = jobOf(jobId);
-    if (!job || !['running', 'ok', 'failed'].includes(job.status)) continue;
+    if (!job || !['running', 'ok', 'failed', 'cancelled'].includes(job.status)) continue;
     try {
-      const data = await api.jobLog(jobId, 60);
+      const data = await api.jobLog(jobId, 120);
       const lines = data.lines || [];
-      const before = (logCache.get(jobId) || []).length;
       logCache.set(jobId, lines);
-      if (lines.length !== before) {
-        const box = $(`#wzBody .plog[data-log="${jobId}"]`);
-        if (box) {
-          box.innerHTML = lines.map((line) => `<div><span class="t">·</span><span>${esc(line)}</span></div>`).join('');
-          box.scrollTop = box.scrollHeight;
-        }
+      logCache.set(`${jobId}:msg`, data.message || '');
+      const panel = box.querySelector('.plog');
+      if (panel) {
+        panel.innerHTML = lines.length
+          ? lines.map((line) => `<div><span class="t">·</span><span>${esc(line)}</span></div>`).join('')
+          : `<div class="plog-empty">${esc(data.message || '这个任务还没有输出日志')}</div>`;
+        panel.scrollTop = panel.scrollHeight;
       }
+      const meta = box.querySelector('.plogmeta');
+      if (meta) meta.textContent = lines.length ? `最近 ${lines.length} 行` : '暂无输出';
     } catch (exc) {
       // 日志读不到不影响安装；下一轮再试
     }

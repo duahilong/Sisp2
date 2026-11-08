@@ -11,6 +11,10 @@
  *   3. 依次切到 系统安装 → 选盘 → 分区大小 → 版本 → 确认，再切到 设置；
  *   4. 每屏截一张 png，最后把结果（含 JS 报错）打成一坨 JSON。
  *
+ * 加 ``--start`` 时（**只对 --dry-run 服务**）会勾选确认框、点“开始安装”，
+ * 等进度页出来后再截图与断言（任务卡片 / 3 行阶段 / 日志折叠）。真实模式下
+ * 这个参数会被拒绝执行——它会写盘。
+ *
  * 有 JS 异常 / 致命错误屏 / 关键节点为空 → 退出码 1。
  */
 
@@ -27,6 +31,7 @@ const argOf = (name, fallback) => {
 
 const URL_ = argOf('url', 'http://127.0.0.1:8901/');
 const OUT = argOf('out', 'build/shots');
+const START = args.includes('--start');
 // 端口默认随机抽一个：固定端口一旦有残留的 headless Chrome 占着，就会连到上一轮的浏览器上。
 const PORT = Number(argOf('port', String(9300 + Math.floor(Math.random() * 600))));
 // 自动找一个 Chromium 内核的浏览器：开发机上通常是 Chrome，干净的测试机可能只有 Edge。
@@ -635,6 +640,64 @@ async function main() {
       });
     }
 
+    // 进度页：只在演练模式下真跑一次任务（真实模式点“开始安装”会写盘，绝不点）
+    if (START) {
+      const info = JSON.parse(
+        await evaluate(`fetch('/api/info').then((r) => r.json()).then((j) => JSON.stringify(j.data || {}))`),
+      );
+      if (!info.dry_run) {
+        problems.push('--start 只能配 --dry-run 服务使用；本次跳过进度页检查');
+      } else {
+        await evaluate(`(function () {
+          const box = document.querySelector('#ackBox');
+          if (box && !box.checked) box.click();
+          return true;
+        })()`);
+        await sleep(300);
+        await evaluate(`document.querySelector('#wzNext').click(); true`);
+        let started = false;
+        for (let i = 0; i < 100 && !started; i += 1) {
+          await sleep(200);
+          started = await evaluate(`document.querySelectorAll('#wzBody .jcard').length > 0`);
+        }
+        if (!started) problems.push('点“开始安装”后 20 秒内没有出现任务卡片（.jcard）');
+        await sleep(1500);
+        summary.shots.push(await shoot('08-progress'));
+        summary.steps.push({
+          progress: JSON.parse(await evaluate(`(function () {
+            const cards = Array.from(document.querySelectorAll('#wzBody .jcard'));
+            const first = cards[0];
+            return JSON.stringify({
+              cards: cards.length,
+              phaseRows: first ? first.querySelectorAll('.phases .phrow').length : 0,
+              logs: document.querySelectorAll('#wzBody .plogbox').length,
+              footer: document.querySelectorAll('.progfoot .tbtn').length,
+              cancelDanger: Boolean(document.querySelector('.progfoot .tbtn.danger')),
+              finished: cards.length > 0 && cards.every((card) => /已完成|失败|已取消/.test(String(card.innerText || ''))),
+              head: first ? String((first.querySelector('.jc-h') || {}).innerText || '').slice(0, 80) : '',
+              text: first ? String(first.innerText || '').slice(0, 320) : '',
+            });
+          })()`)),
+        });
+        // 展开第一个阶段与第一个日志：折叠内容必须能渲染出步骤与日志行
+        await evaluate(`(function () {
+          const row = document.querySelector('#wzBody .phases .phrow');
+          if (row) row.open = true;
+          const log = document.querySelector('#wzBody .plogbox');
+          if (log) log.open = true;
+          return true;
+        })()`);
+        await sleep(2000);
+        summary.shots.push(await shoot('08b-progress-expanded'));
+        summary.steps.push({
+          progressOpen: JSON.parse(await evaluate(`JSON.stringify({
+            steps: document.querySelectorAll('#wzBody .phases .psteps li').length,
+            logText: String((document.querySelector('#wzBody .plog') || { innerText: '' }).innerText || '').length,
+          })`)),
+        });
+      }
+    }
+
     // 设置
     await evaluate(`document.querySelector('#navseg [data-nav="settings"]').click(); true`);
     await sleep(500);
@@ -723,6 +786,20 @@ async function main() {
       if (!step4.planLetters) problems.push('第 4 步没有显示计划盘符');
       if (step4.planUnalloc) problems.push('第 4 步不该出现“未分配”（最后一个分区永远吃满）');
       if (!step4.planAuto) problems.push('第 4 步应把最后一个分区显示为“剩余空间（约 X GB）”');
+    }
+
+    const progressStep = (summary.steps.find((step) => step.progress) || {}).progress;
+    if (START && progressStep) {
+      if (!progressStep.cards) problems.push('进度页没有任务卡片');
+      if (progressStep.phaseRows !== 3) {
+        problems.push(`进度页每盘应有 3 行阶段（实际 ${progressStep.phaseRows}）`);
+      }
+      if (!progressStep.logs) problems.push('进度页没有可折叠的日志块');
+      if (!progressStep.cancelDanger && !progressStep.finished) {
+        problems.push('取消按钮不是醒目样式（.tbtn.danger）');
+      }
+      const openStep = (summary.steps.find((step) => step.progressOpen) || {}).progressOpen;
+      if (openStep && openStep.steps < 1) problems.push('展开阶段后没有列出具体步骤');
     }
 
     const rejections = JSON.parse(await evaluate(`JSON.stringify(window.__rejections || [])`));

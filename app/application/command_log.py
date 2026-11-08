@@ -19,7 +19,12 @@ _LOGGER = logging.getLogger(__name__)
 class CommandLog:
     """把命令、退出码、输出写进日志文件；没有 ``log_dir`` 时只留内存。"""
 
-    def __init__(self, log_dir: str | os.PathLike[str] | None) -> None:
+    def __init__(
+        self,
+        log_dir: str | os.PathLike[str] | None,
+        *,
+        disk_number: int | None = None,
+    ) -> None:
         self.path: Path | None = None
         self._lines: list[str] = []
         if log_dir:
@@ -30,7 +35,10 @@ class CommandLog:
                 # 多盘并发时同一秒可能同时创建多份日志：追加进程号 + 6 位随机后缀，
                 # 否则两个任务会写进同一个文件（行互相穿插，事后无法按盘追踪）。
                 suffix = f"{os.getpid()}-{uuid.uuid4().hex[:6]}"
-                self.path = directory / f"disk-runner-{stamp}-{suffix}.log"
+                # 盘号进文件名：任务还在跑（结果里没有 log_path）时，界面靠它
+                # 找到正在写的这份日志（``WebApi`` 的兜底查找按 d<N>- 匹配）。
+                disk = f"d{int(disk_number)}-" if disk_number is not None else ""
+                self.path = directory / f"disk-runner-{disk}{stamp}-{suffix}.log"
             except OSError:
                 _LOGGER.warning("无法创建日志目录: %s", log_dir, exc_info=True)
 

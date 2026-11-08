@@ -262,7 +262,7 @@ class WindowsDiskRunner:
             if str(value).strip()
         }
         options = dict(getattr(spec, "runner_options", None) or {})
-        log = CommandLog(self.log_dir)
+        log = CommandLog(self.log_dir, disk_number=disk_number)
         env = runtime_env()
         started = datetime.now()
         log.write(f"任务开始：disk={disk_number} dry_run=False letters={letters}")
