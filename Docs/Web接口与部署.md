@@ -39,7 +39,7 @@ python -m app.gui_web.main --serve --port 8765
 | `POST /api/cancel` | `{job_id}`，协作式取消 |
 | `GET /api/jobs` | 任务列表（首屏兜底，SSE 未连上时也能画出进度） |
 | `GET /api/jobs/{job_id}` | 单任务查询（含 `progress`） |
-| `GET /api/jobs/{job_id}/log?tail=200` | 任务日志尾部；只允许 `logDir` 下的 `.log` 文件，越界返回 `E_PATH`。任务运行中 `details["log_path"]` 还不存在，此时按文件名里的盘号（`disk-runner-d<N>-*.log`）找「比任务启动时刻新」的最新一份；都没有则返回 `message` 说明原因 |
+| `GET /api/jobs/{job_id}/log?tail=200` | 任务日志尾部；只允许日志目录（`logDir`，留空时是 `%APPDATA%\Sisp\logs`）下的 `.log` 文件，越界返回 `E_PATH`。任务运行中 `details["log_path"]` 还不存在，此时按文件名里的盘号（`disk-runner-d<N>-*.log`）找「不早于任务启动时刻」的最新一份；都没有则返回 `message` 说明原因 |
 | `POST /api/partition/preview` | `{disk_number?}`；返回**真实会执行的三段 diskpart 脚本**（只读，需先 `/api/prepare`；与执行器同源生成） |
 | `POST /api/images` | 不带 `path` 时返回设置里的两个系统槽位 `{versions: [{id, label, path, ok, exists, reason, size_display}], default}`（每个都读文件头 `FE EF`）；带 `path` 时只校验那一个 GHO（返回 `magic_ok`）。`directory` 参数仅兼容旧请求体，已不再使用。全部是纯文件读取，不 spawn 任何进程 |
 | `GET /api/boot/report` | 扫描各盘的 Windows 目录与 ESP，返回可修复性报告 |
@@ -164,9 +164,11 @@ ui/
 ```powershell
 python tools/ui_check.py                                                  # 语法/引用/纯函数行为
 node tools/ui_smoke.mjs --url http://127.0.0.1:8765/ --out build/shots     # 浏览器冒烟 + 截图
+node tools/ui_smoke.mjs --url http://127.0.0.1:8901/ --start --out build/shots  # 再跑到进度页（只配 --dry-run）
 ```
 
 `ui_check.py` 也需要 `node`（只做语法与纯函数行为，不挂浏览器依赖）；没有 `node`
 时打印“跳过”并以 0 退出。`ui_smoke.mjs` 用 headless Chrome 的 DevTools 协议走一遍
 主页面、四步向导、设置页、菜单和修复引导弹窗，把 `{ok, problems, steps}` 打到 stdout，
-截图落到 `--out` 指定的目录。
+截图落到 `--out` 指定的目录；加 `--start` 时会先确认服务处于演练模式，再勾选、点“开始安装”，
+对进度页（`.jcard` / 3 行 `.phrow` / 折叠日志 `.plogbox` / 取消按钮样式）做断言。
