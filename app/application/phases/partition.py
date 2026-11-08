@@ -87,10 +87,10 @@ class PartitionPhase:
                 wipe_lines(ctx.disk_number), title="diskpart 脚本（清盘 + 转 GPT）"
             )
         except Exception as exc:  # noqa: BLE001 - 统一翻成步骤失败
-            return self._fail(ctx, f"无法执行 diskpart：{exc}")
+            return self._fail(f"无法执行 diskpart：{exc}")
         if code != 0:
             return self._fail(
-                ctx, f"diskpart 失败（退出码 {code}）", code=code, output=output
+                f"diskpart 失败（退出码 {code}）", code=code, output=output
             )
 
         # 盘已经空了：从这里开始取消也"不是什么都没发生"，消息要说清楚状态。
@@ -108,7 +108,7 @@ class PartitionPhase:
             msr = self.shell.find_msr(ctx.disk_number)
         except Exception as exc:  # noqa: BLE001 - 查不了就别动盘
             return self._fail(
-                ctx, f"无法确认 MSR 分区，已中止（避免误删）：{exc}", disk_touched=True
+                f"无法确认 MSR 分区，已中止（避免误删）：{exc}", disk_touched=True
             )
 
         # ===== ③ 单独删 MSR + 立刻复查 =====
@@ -119,11 +119,10 @@ class PartitionPhase:
                 )
             except Exception as exc:  # noqa: BLE001
                 return self._fail(
-                    ctx, f"删除 MSR 分区时无法执行 diskpart：{exc}", disk_touched=True
+                    f"删除 MSR 分区时无法执行 diskpart：{exc}", disk_touched=True
                 )
             if code != 0:
                 return self._fail(
-                    ctx,
                     f"删除 MSR 分区失败（退出码 {code}）：{tail(output, 500)}",
                     code=code,
                     output=output,
@@ -132,10 +131,9 @@ class PartitionPhase:
             try:
                 leftover = self.shell.find_msr(ctx.disk_number, label="复查 MSR")
             except Exception as exc:  # noqa: BLE001
-                return self._fail(ctx, f"删除 MSR 后无法复查：{exc}", disk_touched=True)
+                return self._fail(f"删除 MSR 后无法复查：{exc}", disk_touched=True)
             if leftover is not None:
                 return self._fail(
-                    ctx,
                     f"MSR 分区删除失败：删除后仍然存在（分区 #{leftover}），已中止，未建任何分区",
                     disk_touched=True,
                 )
@@ -148,17 +146,17 @@ class PartitionPhase:
                 title="diskpart 脚本（建分区）",
             )
         except Exception as exc:  # noqa: BLE001
-            return self._fail(ctx, f"无法执行 diskpart：{exc}", disk_touched=True)
+            return self._fail(f"无法执行 diskpart：{exc}", disk_touched=True)
         if code != 0:
             return self._fail(
-                ctx, f"diskpart 失败（退出码 {code}）", code=code, output=output, disk_touched=True
+                f"diskpart 失败（退出码 {code}）", code=code, output=output, disk_touched=True
             )
 
         # ===== ⑤ 分区验收（独立的 layout 步骤）=====
         try:
             ok, message, details = self.acceptance.run(ctx.disk_number, ctx.parts, log)
         except Exception as exc:  # noqa: BLE001
-            return self._fail(ctx, f"无法验证分区结果：{exc}", disk_touched=True)
+            return self._fail(f"无法验证分区结果：{exc}", disk_touched=True)
         if not ok:
             return PhaseOutcome.failed(
                 *self._created_results(ctx, verified=False),
@@ -222,7 +220,6 @@ class PartitionPhase:
 
     def _fail(
         self,
-        ctx: PhaseContext,
         message: str,
         *,
         code: int | None = None,

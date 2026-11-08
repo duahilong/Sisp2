@@ -140,22 +140,3 @@ def identity_matches(
     expected_model = _text(expected.get("model"))
     actual_model = _text(actual.get("model"))
     return not (expected_model and actual_model and not _same_text(expected_model, actual_model))
-
-
-def describe_identity(identity: Mapping[str, Any] | None) -> str:
-    """一行身份描述，用于日志和阻断项文案。"""
-    if not isinstance(identity, Mapping):
-        return "未知硬盘"
-    number = _int_or_none(identity.get("disk_number"))
-    model = _text(identity.get("model")) or "未知型号"
-    size = _text(identity.get("size_display")) or "未知容量"
-    unique_id = _text(identity.get("unique_id"))
-    serial = _text(identity.get("serial_number"))
-    if unique_id:
-        marker = f"UniqueId={unique_id}"
-    elif serial:
-        marker = f"SerialNumber={serial}"
-    else:
-        marker = "缺少 UniqueId/SerialNumber"
-    prefix = f"硬盘 {number}" if number is not None else "硬盘 ?"
-    return f"{prefix}（{model}，{size}，{marker}）"

@@ -23,8 +23,6 @@ STEP_OK = "ok"
 STEP_FAILED = "failed"
 STEP_SKIPPED = "skipped"
 
-STEP_STATUSES = (STEP_OK, STEP_FAILED, STEP_SKIPPED)
-
 
 @dataclass(frozen=True)
 class StepResult:
@@ -86,14 +84,6 @@ class WorkerResult:
     started_at: str | None = None
     finished_at: str | None = None
     duration_seconds: float = 0.0
-
-    @property
-    def failed_steps(self) -> tuple[StepResult, ...]:
-        return tuple(step for step in self.steps if step.failed)
-
-    @property
-    def skipped_steps(self) -> tuple[StepResult, ...]:
-        return tuple(step for step in self.steps if step.skipped)
 
     @classmethod
     def dry_run_plan(

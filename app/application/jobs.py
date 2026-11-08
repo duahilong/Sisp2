@@ -28,7 +28,6 @@
 from __future__ import annotations
 
 import inspect
-import json
 import logging
 import threading
 import uuid
@@ -36,7 +35,6 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
 from typing import Any
 
 from app.application.steps import STEP_KEYS, group_progress
@@ -256,8 +254,6 @@ class JobManager:
     def __init__(
         self,
         executor: Executor | None = None,
-        *,
-        event_dir: str | Path | None = None,
     ) -> None:
         self._executor = executor
         self._jobs: dict[str, Job] = {}
@@ -265,10 +261,6 @@ class JobManager:
         self._all_done = threading.Condition(self._lock)
         self._subscribers: list[Callable[[JobEvent], None]] = []
         self._seq = 0
-        self._event_dir = Path(event_dir) if event_dir else None
-        self._event_file: Path | None = None
-        if self._event_dir is not None:
-            self._event_file = self._event_dir / "jobs.jsonl"
 
     # ------------------------------------------------------------------ 查询
     def get(self, job_id: str) -> Job | None:
@@ -305,22 +297,11 @@ class JobManager:
             )
             subscribers = list(self._subscribers)
 
-        self._persist_event(event)
         for callback in subscribers:
             try:
                 callback(event)
             except Exception:
                 _LOGGER.exception("任务事件回调失败: %s", event_type)
-
-    def _persist_event(self, event: JobEvent) -> None:
-        if self._event_file is None:
-            return
-        try:
-            self._event_dir.mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
-            with self._event_file.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
-        except OSError:
-            _LOGGER.warning("任务事件落盘失败: %s", self._event_file, exc_info=True)
 
     # ------------------------------------------------------------------ 创建
     def submit(

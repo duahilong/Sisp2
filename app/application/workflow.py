@@ -99,10 +99,6 @@ class SessionState:
     # 直接复用，不再单独启动一次 PowerShell。
     used_letters: tuple[str, ...] = ()
 
-    @property
-    def selectable_disks(self) -> tuple[DiskInfo, ...]:
-        return tuple(disk for disk in self.disks if disk.is_selectable)
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "dry_run": self.dry_run,
@@ -292,33 +288,6 @@ def _image_blocker(payload: Mapping[str, Any] | None) -> str | None:
     return problems[0] if problems else None
 
 
-def _apply_partition_defaults(
-    payload: dict[str, Any],
-    defaults: Mapping[str, Any] | None,
-) -> dict[str, Any]:
-    """把设置页的分区默认值合并进载荷。
-
-    设置是唯一的默认值来源，所以这里永远是“覆盖”。向导里每块盘的逐盘覆盖在
-    ``_merge_payload`` 里合并，晚于这里，因此永远优先。
-
-    ``data_size_gb=None`` 表示“用剩余空间”，不写入（下游 ``or`` 判空即可）。
-    """
-    if not defaults:
-        return payload
-
-    partition_info = payload.get("partition_info")
-    if not isinstance(partition_info, dict):
-        partition_info = {}
-        payload["partition_info"] = partition_info
-
-    for key in ("efi_size_mb", "c_size_gb", "data_size_gb"):
-        value = defaults.get(key)
-        if value in (None, ""):
-            continue
-        partition_info[key] = value
-    return payload
-
-
 def _image_from_settings(settings: Mapping[str, Any] | None) -> dict[str, Any]:
     """设置页的系统槽位 → ``image_info``。
 
@@ -399,7 +368,6 @@ class WorkflowController:
         log_dir: str | None = None,
         result_dir: str | None = None,
         resource_resolver: Callable[[Any], int | None] | None = None,
-        event_dir: str | None = None,
         allowed_disk_numbers: Iterable[int] | None = None,
         real_runner: Callable[[Any, threading.Event], WorkerResult] | None = None,
         partition_defaults: Mapping[str, Any] | None = None,
@@ -446,7 +414,6 @@ class WorkflowController:
         # 默认执行器直接调本会话的 service；旧的 JobManager 会另造一个 dry-run 服务。
         self._manager = job_manager or JobManager(
             executor=self._execute_spec,
-            event_dir=event_dir,
         )
         self._preflight_runner = preflight_runner or run_preflight_checks
         # 多盘流水线的两个闸门：分区轮次（按盘号串行）与 Ghost 启动间隔。
@@ -564,12 +531,6 @@ class WorkflowController:
         return self._preflight_runner(**kwargs)
 
     # ------------------------------------------------------------------ 设置
-    def set_settings_provider(
-        self, provider: Callable[[], dict[str, Any]] | None
-    ) -> None:
-        """注入设置读取函数；界面改完设置后无需重建控制器。"""
-        self._settings_provider = provider
-
     def _settings(self) -> dict[str, Any]:
         if self._settings_provider is None:
             return {}

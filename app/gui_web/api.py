@@ -449,10 +449,6 @@ class WebApi:
         return bool(getattr(self._wf.service, "dry_run", True))
 
     # ------------------------------------------------------------------ 设置
-    def settings_data(self) -> dict[str, Any]:
-        """当前设置快照（供 main.py 读 rememberWindow 等行为开关）。"""
-        return self._settings.get()
-
     def get_settings(self) -> dict[str, Any]:
         try:
             return ok(self._settings.to_dict())

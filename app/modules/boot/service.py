@@ -22,8 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +30,6 @@ from app.safety_guard import ensure_command_allowed
 
 BCDBOOT_TIMEOUT = 120.0
 DISKPART_TIMEOUT = 120.0
-SCAN_TIMEOUT = 60
 
 ESP_GPT_TYPE = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 
@@ -321,24 +319,6 @@ def build_script(disk_number: int, partition_number: int, letter: str, *, releas
     return lines
 
 
-@dataclass
-class RepairResult:
-    disk_number: int
-    success: bool
-    message: str
-    steps: list[dict[str, Any]]
-    log_path: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "disk_number": self.disk_number,
-            "success": self.success,
-            "message": self.message,
-            "steps": list(self.steps),
-            "log_path": self.log_path,
-        }
-
-
 class BootRepairer:
     """扫描 → 诊断 → 重写引导；依赖全部可注入，便于离线测试。"""
 
@@ -570,9 +550,3 @@ class _RunLog:
         if self._handle is not None:
             self._handle.close()
             self._handle = None
-
-
-def collect_free_letters(letters: Iterable[str]) -> list[str]:
-    """给定已占用盘符，返回可用的临时盘符（供测试与界面预览）。"""
-    used = {str(letter).upper() for letter in letters}
-    return [letter for letter in CANDIDATE_LETTERS if letter not in used]

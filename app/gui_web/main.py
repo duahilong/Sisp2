@@ -15,7 +15,7 @@ apps”）。以前 exe 清单写 ``requireAdministrator``，于是 Windows 上�
 现在清单是 ``asInvoker``：界面在普通权限下跑，需要管理员的写盘动作全在提权后端里。
 
 装配方式与之前一致：``WorkflowController()`` 零参构造，内部会用默认值造出
-``SispService()`` / ``JobManager(event_dir=None)`` / ``run_preflight_checks``。
+``SispService()`` / ``JobManager()`` / ``run_preflight_checks``。
 设置存储在这里注入（``SettingsStore``），默认落在
 ``%APPDATA%\\Sisp\\settings.json``；传 ``--settings <path>`` 可改位置。
 """
@@ -344,7 +344,7 @@ def _make_server(app, host: str, port: int):
     return uvicorn.Server(config)
 
 
-def _wait_until_ready(url: str, server, timeout: float = 10.0) -> bool:
+def _wait_until_ready(url: str, timeout: float = 10.0) -> bool:
     """轮询 /health 直到服务就绪或超时。"""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -457,7 +457,7 @@ def _run_desktop(args) -> int:
 
             app = create_app(api, wf, host_check=True)
             server, _thread = _serve_in_thread(app, "127.0.0.1", args.port)
-            if not _wait_until_ready(health, server):
+            if not _wait_until_ready(health):
                 print("本机 HTTP 服务启动超时，无法打开窗口。", file=sys.stderr)
                 return 1
 

@@ -405,16 +405,4 @@ export async function importSettings() {
   }
 }
 
-export async function probeAllSettings() {
-  try {
-    const result = await api.probeAllPaths();
-    state.probes = result || {};
-    renderSettings();
-    const bad = Object.values(state.probes).filter((item) => item.state === 'miss');
-    toast(bad.length ? `${bad.length} 个路径不存在` : '所有路径都可用', bad.length ? 'err' : '');
-  } catch (exc) {
-    toast(`批量检测失败：${exc.message || exc}`, 'err');
-  }
-}
-
 export { FIELDS as SETTINGS_FIELDS, LABELS as SETTINGS_LABELS };

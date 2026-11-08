@@ -193,11 +193,6 @@ export function setLogSource(text) {
 }
 
 /** 把某个任务的日志行搬进日志坞（`GET /api/jobs/{id}/log` 的结果）。 */
-export function pushJobLog(jobId, lines, tail = 40) {
-  const slice = (lines || []).slice(-tail);
-  for (const line of slice) pushLog(line, '', jobId.slice(0, 6));
-}
-
 /* ------------------------------------------------------------------ toast */
 export function toast(message, kind = '') {
   const box = $('#toasts');
@@ -214,10 +209,6 @@ export function toast(message, kind = '') {
 }
 
 /* ------------------------------------------------------------------ 弹窗 */
-export function isModalOpen() {
-  return $('#overlay').classList.contains('on');
-}
-
 export function closeModal() {
   const overlay = $('#overlay');
   if (!overlay) return;

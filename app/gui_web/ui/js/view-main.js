@@ -14,7 +14,7 @@ import {
   usedRatio, partBadge,
 } from './derive.js';
 import { state, diskOf, selectDisk, selectPart, notify, jobsArray } from './state.js';
-import { setStatus, setMidStatus, jobStatusText } from './shell.js';
+import { setStatus, setMidStatus } from './shell.js';
 
 export function renderMain() {
   renderBanners();
@@ -314,11 +314,4 @@ export function lostPartitionsText(disk) {
   const parts = (disk && disk.partitions) || [];
   if (!parts.length) return '这块盘上本来就没有分区';
   return parts.map((part) => `${part.drive_letter ? `${part.drive_letter}: ` : ''}${partLabel(part)}（${fmtSize(part.size_bytes)}）`).join('、');
-}
-
-export function jobProgressText(job) {
-  const progress = job && job.progress;
-  if (!progress) return '';
-  const percent = Number(progress.percent) || 0;
-  return `${percent}% · ${progress.message || jobStatusText(job.status)}`;
 }

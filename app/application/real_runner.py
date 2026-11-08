@@ -194,7 +194,6 @@ class WindowsDiskRunner:
     def _build_shell(
         self,
         log: CommandLog,
-        options: Mapping[str, Any],
         env: Mapping[str, str],
     ) -> Any:
         if self._shell is not None:
@@ -220,7 +219,7 @@ class WindowsDiskRunner:
     def _build_pipeline(self, ctx: PhaseContext) -> JobPipeline:
         if self._pipeline_factory is not None:
             return self._pipeline_factory(ctx)
-        shell = self._build_shell(ctx.log, ctx.options, ctx.env or {})
+        shell = self._build_shell(ctx.log, ctx.env or {})
         process = self._build_process(ctx.log, ctx.env or {})
         uefi = self._uefi or UefiBootPhase(
             process,

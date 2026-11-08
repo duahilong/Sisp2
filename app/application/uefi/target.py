@@ -34,14 +34,6 @@ class BootTarget:
     #: bcdboot 的引导源目录：恒为刚还原出来的 ``<Windows盘符>:\Windows``。
     source: str
 
-    @property
-    def efi_root(self) -> str:
-        return f"{self.efi_letter}:\\"
-
-    @property
-    def windows_root(self) -> str:
-        return f"{self.windows_letter}:\\"
-
     @classmethod
     def from_context(cls, ctx: Any) -> BootTarget:
         """从阶段上下文取盘符；缺 EFI/Windows 盘符直接拒绝。"""

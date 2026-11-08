@@ -26,7 +26,7 @@ import json
 import os
 import shutil
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -287,21 +287,6 @@ def _add_setting_path_checks(
         add(CHECK_SETTING_PATHS, True, "已配置：" + "；".join(present))
     else:
         add(CHECK_SETTING_PATHS, True, "未配置系统文件路径，使用默认值")
-
-
-def summarize_failures(report: Mapping[str, Any]) -> list[str]:
-    """把报告里未通过的检查拼成阻断项文案，方便 CLI 直接打印。"""
-    failures: list[str] = []
-    raw_results = report.get("results") if isinstance(report, Mapping) else None
-    if not isinstance(raw_results, Sequence) or isinstance(raw_results, str):
-        return failures
-    for item in raw_results:
-        if not isinstance(item, Mapping) or item.get("passed"):
-            continue
-        name = _text(item.get("name")) or "检查"
-        message = _text(item.get("message")) or ""
-        failures.append(f"{name}：{message}" if message else name)
-    return failures
 
 
 if __name__ == "__main__":  # pragma: no cover - 手工排查用

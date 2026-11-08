@@ -136,11 +136,6 @@ def _attributes(path: Path) -> dict[str, bool]:
     return {name: bool(raw & bit) for name, bit in _ATTRIBUTE_BITS if bit}
 
 
-def _describe(path: Path, root: Path) -> str:
-    rel = _relative(root, path)
-    return rel if rel != "." else "根目录"
-
-
 def compare_trees(
     source: str | os.PathLike[str],
     target: str | os.PathLike[str],

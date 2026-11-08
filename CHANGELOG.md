@@ -7,6 +7,44 @@ tag 上的提交树就是那一版的完整代码与文档快照。
 定版（`v1.1.0`）之后只做优化与修复：功能以 tag 为准，`main` 继续向前走，
 需要回到某一版时 `git checkout v1.1.0` 或 `git archive v1.1.0`。
 
+## 未发布（main）— 死代码清理
+
+定版后只做优化与修复，不改变既有功能语义。这一批只删“定义了但没人用”的代码，
+行为、接口与失败文案均未变（22 个文件，+16 / −252 行）。
+
+### 清理
+
+- **从未启用的任务事件落盘**：删除 `JobManager(event_dir=...)`、`_event_dir`、
+  `_event_file`（`jobs.jsonl`）与 `_persist_event()`。生产入口与测试都没有传过 `event_dir`，
+  这条链既不会写文件、也没有任何读取方；任务状态本来就只在内存里（单进程）。
+- **未引用的类型/常量/函数**：`contracts.DiskListResult`、`partitions.role_names()`、
+  `models.STEP_STATUSES`、`WorkerResult.failed_steps/skipped_steps`、
+  `boot.RepairResult`、`boot.SCAN_TIMEOUT`、`boot.collect_free_letters()`、
+  `service._find_disk_identity()`、`service.build_diskpart_segments()`、
+  `uefi.BootTarget.efi_root/windows_root`、`orchestrator.describe_identity()`、
+  `preflight.summarize_failures()`、`gui.elevation.SE_ERR_FNF/ACCESSDENIED`、`api.WebApi.settings_data()`、
+  `workflow.SessionState.selectable_disks`、`workflow._apply_partition_defaults()`、
+  `workflow.set_settings_provider()`、`phases.copy._describe()`。
+- **未用形参**：`partition._fail(ctx → 去掉)`、`real_runner._build_shell(options → 去掉)`、
+  `gui_web.main._wait_until_ready(server → 去掉)`；对应测试的 monkeypatch 同步收敛为单参。
+- **前端死导出**：`dom.setText/timeOf`、`shell.pushJobLog/isModalOpen`、
+  `state.totalPartitions/activeJobs/targetsValid/diskFreeGb`、`view-main.jobProgressText`、
+  `view-settings.probeAllSettings`。REST 接口 `probe_all` 与 `api.probeAllPaths()` 保留。
+- 文档同步：`Docs/安全边界.md` 删掉“可选 JSONL 事件落盘”的说法（该功能已不存在）。
+
+### 测试（全部在 VM 上执行）
+
+- `D:\venv-sisp\Scripts\python.exe -m pytest -q` → **539 passed**（12.90 s）；
+  `ruff check app tests` 全绿；本机只做静态检查，未运行任何测试。
+- 干跑冒烟（源码 `--serve --dry-run --port 8899`）：会话扫到 4 块盘；
+  prepare 盘 0 / 盘 2 → 盘符 E/F/G 与 J/K/P、0 blockers、每盘 3 个分区；
+  `preview` 返回 3+3 段脚本；submit/confirm 后两个任务 `ok`、7/7 步、100%。
+- **真实写盘（VM，120 GB 动态 VHD，5.06 GB GHO，清理后的代码）**：
+  `status=ok`，**169.5 s**；GPT 三区（ESP 100 MB FAT32 / Windows 60 GB NTFS / Data 59.9 GB NTFS）、
+  `F:\Windows\System32\config\SYSTEM`、`ntoskrnl.exe`、`explorer.exe` 均存在；
+  `bcdboot F:\Windows /s E: /f UEFI` 成功，`boot` 步骤校验通过；收尾释放 EFI 盘符 E；
+  日志里 8 条静默心跳（每 20 s 一条），证明写镜像期间仍可观察。
+
 ## 未发布（main）— 执行可见性与定向扫描
 
 定版后只做优化与修复，不改变既有功能语义。这一批改了两处。

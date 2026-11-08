@@ -37,7 +37,6 @@ from typing import Any
 from app.application.contracts import format_size
 from app.application.payload import PartitionLayoutError, require_layout_keys
 from app.application.runner_utils import to_int, to_text
-from app.drive_letters import letter_roles
 
 BYTES_PER_MB = 1024 * 1024
 
@@ -136,11 +135,6 @@ class PlannedPartition:
             "size_display": self.size_text,
             "letter": self.letter,
         }
-
-
-def role_names(data_partitions: int) -> tuple[str, ...]:
-    """按数据分区个数给出角色顺序（与盘符字典的键同源）。"""
-    return tuple(letter_roles(max(0, int(data_partitions) - 1)))
 
 
 def partition_info(payload: Mapping[str, Any] | None) -> Mapping[str, Any]:

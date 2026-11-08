@@ -26,20 +26,9 @@ export function toggle(node, visible) {
   if (node) node.style.display = visible ? '' : 'none';
 }
 
-export function setText(node, text) {
-  if (node) node.textContent = text == null ? '' : String(text);
-}
-
 /** 时钟字符串，日志行和进度页共用。 */
 export function stamp(date = new Date()) {
   return [date.getHours(), date.getMinutes(), date.getSeconds()]
     .map((n) => String(n).padStart(2, '0'))
     .join(':');
-}
-
-/** ISO 时间 → HH:MM:SS；后端时间是本地时区的 naive ISO。 */
-export function timeOf(iso) {
-  const text = String(iso || '');
-  const match = text.match(/T(\d{2}:\d{2}:\d{2})/);
-  return match ? match[1] : '';
 }

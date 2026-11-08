@@ -214,14 +214,6 @@ class DiskInfo:
 
 
 @dataclass(frozen=True)
-class DiskListResult:
-    """硬盘列表及非致命配置警告。"""
-
-    disks: tuple[DiskInfo, ...]
-    warning: str | None = None
-
-
-@dataclass(frozen=True)
 class CheckItem:
     """单项检查结果，供计划确认界面展示。"""
 

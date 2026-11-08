@@ -184,7 +184,7 @@ def test_desktop_falls_back_to_local_backend_when_uac_rejected(monkeypatch, tmp_
         return servers[-1], None
 
     monkeypatch.setattr(gui, "_serve_in_thread", fake_serve_in_thread)
-    monkeypatch.setattr(gui, "_wait_until_ready", lambda url, server: True)
+    monkeypatch.setattr(gui, "_wait_until_ready", lambda url: True)
     monkeypatch.setitem(sys.modules, "app.gui_web.server", types.SimpleNamespace(create_app=lambda *a, **k: object()))
 
     assert gui.main(["--port", "8792"]) == 0

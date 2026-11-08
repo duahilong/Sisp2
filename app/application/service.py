@@ -45,7 +45,6 @@ from app.application.contracts import (
 from app.application.partitions import (
     PartitionLayoutError,
     plan_partitions,
-    preview_segments,
     preview_text,
 )
 from app.application.steps import STEP_TITLES
@@ -596,10 +595,6 @@ class SispService:
                 return summary
         return None
 
-    def _find_disk_identity(self, disk_number: int) -> dict[str, Any] | None:
-        summary = self._find_disk_summary(disk_number)
-        return build_worker_disk_identity(summary) if summary is not None else None
-
     def _dry_run_result(
         self,
         spec: Any,
@@ -750,14 +745,4 @@ class SispService:
         if image_path:
             script += chr(10) + f"REM 镜像：{image_path}（由应用层接管，不经 diskpart）"
         return script
-
-    def build_diskpart_segments(
-        self,
-        disk_number: int,
-        payload: Mapping[str, Any],
-        letters: Mapping[str, str],
-    ) -> list[dict[str, Any]]:
-        """分段预览（``POST /api/partition/preview`` 的 ``data.segments``）。"""
-        parts = plan_partitions(payload, letters=letters)
-        return preview_segments(disk_number, parts)
 

@@ -25,8 +25,6 @@ import sys
 SW_SHOWNORMAL = 1
 
 # ShellExecuteW 的返回值：小于等于 32 都表示失败
-SE_ERR_FNF = 2
-SE_ERR_ACCESSDENIED = 5
 SE_HINSTANCE_SUCCESS_MIN = 32
 
 

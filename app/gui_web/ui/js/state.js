@@ -119,10 +119,6 @@ export function selectPart(diskNumber, partNumber) {
   state.selectedPart = partNumber === null || partNumber === undefined ? null : Number(partNumber);
 }
 
-export function totalPartitions() {
-  return state.disks.reduce((sum, disk) => sum + ((disk.partitions || []).length), 0);
-}
-
 /* ------------------------------------------------------------------ 任务 */
 export function setJobs(jobs) {
   state.jobs = new Map();
@@ -143,10 +139,6 @@ export function upsertJob(job, emit = true) {
 
 export function jobsArray() {
   return Array.from(state.jobs.values());
-}
-
-export function activeJobs() {
-  return jobsArray().filter((job) => job.status === 'running' || job.status === 'pending' || job.status === 'waiting_confirmation');
 }
 
 /* ------------------------------------------------------------------ 设置 */
@@ -338,11 +330,6 @@ export function removeExtraPartition(diskNumber, index) {
   state.wizard.ack = false;
 }
 
-export function targetsValid() {
-  return state.wizard.targets.length > 0
-    && state.wizard.targets.every((target) => !targetError(target));
-}
-
 /** 每块盘的通知 payload：POST /api/prepare 的 selection 形态。
  *
  * **最后一个数据分区永远发 ``"auto"``**（= diskpart 不写 ``size=``，吃掉全部剩余空间）：
@@ -411,8 +398,4 @@ export function syncAutoPartition(target) {
   const left = Math.max(0, Math.floor((totalGb - explicitGb - reserveGb()) * 10 + 1e-9) / 10);
   if (role === 'extra') extras[extras.length - 1].sizeGb = left;
   else target.dataGb = left;
-}
-
-export function diskFreeGb(disk) {
-  return freeBytes(disk) / (1024 ** 3);
 }
