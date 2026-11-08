@@ -1,4 +1,4 @@
-"""收尾阶段：把设置里指定的素材目录拷到第一数据分区根目录。
+"""收尾阶段：把设置里指定的文件夹（连同文件夹本身）拷到第一数据分区根目录下。
 
 **为什么单独一个阶段**：它跟镜像/引导没有共享状态——不需要 EFI 盘符、不需要
 diskpart、不需要 Ghost；它也补充不了 ``image``/``boot`` 的任何语义，只是"系统
@@ -246,12 +246,23 @@ class CopyAssetsPhase:
 
     # ------------------------------------------------------------------ 拼装
     def command(self, target_letter: str) -> list[str]:
-        """拷到 ``X:\\`` 根目录（不建同名子目录）。"""
+        """把源文件夹**连同文件夹本身**拷进 ``X:\\``（目标根下出现同名目录）。"""
         return robocopy_command(
             self.source,
-            self._root(target_letter),
+            self.destination(target_letter),
             program=self._program() or "robocopy",
         )
+
+    def destination(self, target_letter: str) -> str:
+        """目标路径 = ``<分区根>\\<源文件夹名>``。
+
+        用户要的是“把这个文件夹拷到根目录下”：目标里应当是
+        ``X:\\素材\\a.txt``，而不是 ``X:\\a.txt``。因此 robocopy 的 ``dst``
+        要带上源目录的最后一段。
+        """
+        name = Path(self.source).name
+        root = self._root(target_letter)
+        return str(Path(root) / name) if name else root
 
     def _root(self, letter: str) -> str:
         if self.target_root:
@@ -301,9 +312,15 @@ class CopyAssetsPhase:
             return self._fail("数据分区没有盘符，无法确定拷贝目标", ctx)
 
         root = self._root(target.letter)
-        if self._overlaps(source, root):
+        name = source.name
+        if not name:
             return self._fail(
-                f"拷贝目录与目标分区重叠：{source} ↔ {root}（会无限递归）", ctx
+                f"拷贝目录不能是驱动器根目录：{source}（请选择一个具体文件夹）", ctx
+            )
+        dest = str(Path(root) / name)
+        if self._overlaps(source, dest):
+            return self._fail(
+                f"拷贝目录与目标路径重叠：{source} ↔ {dest}（会无限递归）", ctx
             )
 
         stats = scan_source(str(source))
@@ -334,16 +351,16 @@ class CopyAssetsPhase:
                 PhaseResult.ok(
                     "copy",
                     f"演练：将拷贝 {stats.files} 个文件 / {stats.dirs} 个目录"
-                    f"（{_format_bytes(stats.bytes)}）到 {root}",
-                    target=root,
+                    f"（{_format_bytes(stats.bytes)}）到 {dest}",
+                    target=dest,
                     files=stats.files,
                     dirs=stats.dirs,
                     bytes=stats.bytes,
                 )
             )
 
-        command = robocopy_command(str(source), root, program=program)
-        ctx.notify("copy", "running", f"拷贝附加文件（{stats.files} 个文件）")
+        command = robocopy_command(str(source), dest, program=program)
+        ctx.notify("copy", "running", f"拷贝文件（{stats.files} 个文件）")
         ctx.log.write(" ".join(command))
         try:
             code, output, elapsed = self.shell.run(command, self.timeout)
@@ -359,7 +376,7 @@ class CopyAssetsPhase:
                 seconds=round(elapsed, 1),
             )
 
-        problems = compare_trees(str(source), root)
+        problems = compare_trees(str(source), dest)
         if problems:
             return self._fail(
                 "拷贝后校验未通过：" + "；".join(problems),
@@ -372,9 +389,9 @@ class CopyAssetsPhase:
             PhaseResult.ok(
                 "copy",
                 f"已拷贝 {stats.files} 个文件 / {stats.dirs} 个目录"
-                f"（{_format_bytes(stats.bytes)}）到 {root}",
+                f"（{_format_bytes(stats.bytes)}）到 {dest}",
                 exit=code,
-                target=root,
+                target=dest,
                 files=stats.files,
                 dirs=stats.dirs,
                 bytes=stats.bytes,

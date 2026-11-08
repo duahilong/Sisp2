@@ -2,7 +2,8 @@
 
 守护四件事：
 
-1. **目标口径**：拷到「系统分区之后的第一个数据分区」根目录，不是按盘符字母猜；
+1. **目标口径**：拷到「系统分区之后的第一个数据分区」根目录下的同名文件夹，
+   即 `X:\\<文件夹名>\\…`，不是按盘符字母猜；
 2. **不删东西**：命令里没有 ``/MIR`` ``/PURGE`` ``/MOV``，护栏还会再拦一次；
 3. **属性不丢**：``/COPY:DAT`` + ``/DCOPY:DAT``，拷完按相对路径逐项比对；
 4. **失败即整盘失败**：退出码、校验差异、空间不足都要给出可读原因。
@@ -11,6 +12,7 @@
 from __future__ import annotations
 
 import os
+import pathlib
 import shutil
 import stat
 import threading
@@ -276,13 +278,14 @@ def test_phase_fails_on_error_exit_code(tmp_path) -> None:
 
 
 def test_phase_copies_and_verifies(tmp_path) -> None:
-    source = _source(tmp_path)
+    source = _source(tmp_path)          # <tmp>/src，内含 a.txt 与 sub/b.txt
     target = tmp_path / "dst"
     target.mkdir()
+    dest = target / "src"               # 目标根下出现同名文件夹
 
     def handler(command, timeout, env):
-        # 模拟 robocopy /E：把源内容原样搬过去
-        shutil.copytree(source, target, dirs_exist_ok=True)
+        # 模拟 robocopy /E：把源内容搬到命令行给的目标目录
+        shutil.copytree(source, command[2], dirs_exist_ok=True)
         return 1, "Files : 2", 0.4
 
     shell = FakeProcess(handler=handler)
@@ -292,9 +295,26 @@ def test_phase_copies_and_verifies(tmp_path) -> None:
     result = outcome.results[0]
     assert result.status == "ok"
     assert "已拷贝 2 个文件" in result.message
-    assert str(target) in result.message
+    assert str(dest) in result.message
     assert shell.calls[0][1] == str(source)
-    assert (target / "sub" / "b.txt").is_file()
+    assert shell.calls[0][2] == str(dest)
+    assert (dest / "sub" / "b.txt").is_file()
+
+
+def test_phase_keeps_source_folder_name(tmp_path) -> None:
+    """整个文件夹连名字一起拷：目标里是 ``X:\\src\\a.txt``，不是 ``X:\\a.txt``。"""
+    source = _source(tmp_path)
+    phase = _phase(FakeProcess(), source, tmp_path / "dst")
+    assert phase.destination("G") == str(tmp_path / "dst" / "src")
+    assert phase.command("G")[2] == str(tmp_path / "dst" / "src")
+
+
+def test_phase_rejects_drive_root_source(tmp_path) -> None:
+    phase = CopyAssetsPhase(FakeProcess(), "C:/", robocopy="robocopy.exe",
+                            target_root=str(tmp_path / "dst"))
+    outcome = phase.run(_ctx())
+    assert outcome.ok is False
+    assert "驱动器根目录" in outcome.results[0].message
 
 
 def test_phase_fails_when_verification_finds_differences(tmp_path) -> None:
@@ -304,7 +324,9 @@ def test_phase_fails_when_verification_finds_differences(tmp_path) -> None:
 
     def handler(command, timeout, env):
         # 只拷一个文件：退出码是"成功"，但校验应该抓到缺文件
-        shutil.copy2(source / "a.txt", target / "a.txt")
+        dest = pathlib.Path(command[2])
+        dest.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source / "a.txt", dest / "a.txt")
         return 2, "Files : 1", 0.3
 
     shell = FakeProcess(handler=handler)

@@ -43,7 +43,7 @@ const FIELDS = [
   { section: 'install', key: 'sysDefaultGb', kind: 'int', effect: '下次生成计划生效', hint: '向导第 2 步的初始值，可以在那一步改。' },
   { section: 'install', key: 'efiDefaultMb', kind: 'int', effect: '下次生成计划生效', hint: 'EFI（ESP）分区大小，最小 64 MB；向导第 2 步只显示不可改。' },
   { section: 'install', key: 'dataDefaultGb', kind: 'auto-int', effect: '下次生成计划生效', hint: '“自动”= 剩余空间全给数据分区。' },
-  { section: 'install', key: 'copySource', kind: 'path', pick: 'dir', effect: '下次任务生效', hint: '装完系统后把这个目录的全部内容拷到数据分区根目录；留空 = 不拷。' },
+  { section: 'install', key: 'copySource', kind: 'path', pick: 'dir', effect: '下次任务生效', hint: '装完系统后把整个文件夹（含文件夹本身）拷到数据分区根目录；留空 = 不拷。' },
 
   { section: 'external', key: 'extGhost', kind: 'path', pick: 'file', effect: '重启后生效', hint: '空 = 依次找 PATH 与 System32 里的 ghost64 / ghost32。' },
   { section: 'external', key: 'extBcdboot', kind: 'path', pick: 'file', effect: '重启后生效', hint: '空 = 依次找 PATH 与 System32 里的 bcdboot。' },
