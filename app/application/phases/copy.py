@@ -287,7 +287,7 @@ class CopyAssetsPhase:
         source = Path(self.source)
         if not source.is_dir():
             return self._fail(
-                f"拷贝目录不可用：{source}（设置 → 安装默认值 → 附加文件目录）",
+                f"拷贝目录不可用：{source}（设置 → 安装默认值 → 拷贝文件目录）",
                 ctx,
             )
 

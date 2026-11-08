@@ -72,7 +72,7 @@ const LABELS = {
   sysDefaultGb: '系统分区默认大小',
   efiDefaultMb: 'EFI 分区大小',
   dataDefaultGb: '数据分区默认大小',
-  copySource: '附加文件目录',
+  copySource: '拷贝文件目录',
   extGhost: 'Ghost 路径',
   extBcdboot: 'bcdboot 路径',
   sysImageALabel: '系统 A 名称',

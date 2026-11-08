@@ -603,7 +603,7 @@ class WorkflowController:
         """把界面设置里的执行器可选项挑出来，随任务一起下发。
 
         布尔开关必须显式下发（``False`` 也要传），否则执行器只能看到默认值
-        ``True``，开关就失效了。``copy_source``（附加文件目录）留空表示不拷，
+        ``True``，开关就失效了。``copy_source``（拷贝文件目录）留空表示不拷，
         由拷贝阶段记一条 ``skipped``。
         """
         settings = self._settings()
