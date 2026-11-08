@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 # Windows 版本资源用四段数字，这里给出对应关系
 VERSION_TUPLE = tuple(int(part) for part in __version__.split(".")) + (0,) * (

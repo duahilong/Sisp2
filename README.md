@@ -73,10 +73,25 @@ python -m pytest tests/ -q
 
 [`design/`](design/) 目录包含 `disk-tools-app.html` 与 `disk-tools-prototype.html` 两个可点击 HTML 界面原型，用于设计参考；原型不连接本项目后端，也不执行磁盘操作。正式运行界面位于 `app/gui_web/ui/index.html`。
 
+## 版本与定版
+
+当前定版：**v1.1.0**（2026-11-08，功能全部落地）。定版之后只做优化与修复，
+功能语义以 tag 上的代码与文档为准；变更历史见 [CHANGELOG.md](CHANGELOG.md)。
+
+- 版本号只有一处来源：`app/version.py` 的 `__version__`，`packaging/version_info.txt`
+  与它由 `tests/test_packaging.py` 强校验（界面标题、`/api/info`、exe 的 FileVersion 都用它）。
+- 定版就是一个**注释 tag**：tag 指向的提交树 = 那一版的完整快照（源码 + 文档），
+  所以「回到某一版」不需要额外备份：`git checkout v1.1.0`，或 `git archive v1.1.0 -o sisp-1.1.0.zip`。
+- 打新版（例：`1.1.1` 只修 bug）：改 `app/version.py` 与 `packaging/version_info.txt` →
+  在 VM 上跑 `ruff` / `pytest` / `tools/ui_check.py` / `ui_smoke` → 本地 `python packaging/build.py` →
+  提交 → `git tag -a v1.1.1 -m "..."` → `git push origin main --tags`。
+- 发布产物不入库（`.gitignore` 跳过 `dist/`）：exe 放 GitHub Release，并在提交说明里记下
+  字节数与 MD5，便于核对。
+
 ## 文档索引
 
-共 8 篇：**6 篇主文档**（架构、配置、Web/部署、安全、测试、打包）、1 份事故报告、
-1 份历史测试快照。`Docs/` 下的文件名全部是中文；旧英文名（`architecture.md` /
+共 9 篇：**6 篇主文档**（架构、配置、Web/部署、安全、测试、打包）、1 篇已归档的改造实施记录、
+1 份事故报告、1 份历史测试快照。`Docs/` 下的文件名全部是中文；旧英文名（`architecture.md` /
 `security.md` / `web-api.md` / `testing.md` / `packaging.md` / `configuration.md`）已不存。
 快照类文档只作对照，**当前行为以代码和主文档为准**。
 
