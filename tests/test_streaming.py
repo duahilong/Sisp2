@@ -183,3 +183,24 @@ def test_notify_keeps_three_argument_callbacks(tmp_path):
     )
     ctx.notify("image", "running", "应用镜像", fraction=0.5)
     assert seen == [("image", "running", "应用镜像")]
+
+
+def test_stream_process_heartbeats_when_command_is_silent(tmp_path):
+    """Ghost 重定向后一行不输出：日志要靠心跳证明进程还活着。"""
+    log = CommandLog(tmp_path, disk_number=2)
+    script = "import time; time.sleep(1.2)"
+
+    outcome = stream_process(
+        [sys.executable, "-c", script],
+        30,
+        log=log,
+        allow_real_disk=False,
+        poll=0.05,
+        heartbeat=0.25,
+    )
+
+    assert outcome.returncode == 0
+    summary = log.summary()
+    assert summary.count("仍在运行") >= 2
+    # 心跳只是日志，不污染子进程输出。
+    assert "仍在运行" not in outcome.output

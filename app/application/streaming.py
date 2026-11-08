@@ -39,6 +39,9 @@ KILL_GRACE_SECONDS = 5.0
 # 几 KB，但坏盘/循环重试时可能刷屏，这里兜住内存。
 OUTPUT_LIMIT = 200_000
 READ_CHUNK = 8192
+# Ghost 把进度画在自己的控制台上，输出被重定向后一行都不打印；没有输出时
+# 每 20 秒在日志里写一条“仍在运行”，否则用户面对的是完全静止的日志。
+HEARTBEAT_SECONDS = 20.0
 
 # Ghost 的进度行形如 ``  42% complete``；一行里可能有多个百分比，取最大的。
 _PERCENT = re.compile(r"(\d{1,3})\s*%")
@@ -81,13 +84,16 @@ def stream_process(
     on_line: Callable[[str], None] | None = None,
     poll: float = POLL_SECONDS,
     kill_grace: float = KILL_GRACE_SECONDS,
+    heartbeat: float = HEARTBEAT_SECONDS,
 ) -> StreamOutcome:
     """执行一条命令，实时落日志并支持取消。
 
     参数与 :func:`app.application.shell.run_process` 对齐，额外两项：
 
     - ``cancel``：被置位时终止子进程并返回 ``cancelled=True``；
-    - ``on_line``：每读到一行就回调（Ghost 用它解析百分比）。
+    - ``on_line``：每读到一行就回调（Ghost 用它解析百分比）；
+    - ``heartbeat``：连续这么多秒没有任何输出时，往日志里写一条存活提示
+      （Ghost 重定向后不打印进度，靠它区分“卡死”和“还在写”）。
 
     超时与之前一致：终止进程后抛 ``RunnerError("命令超时（N 秒）：...")``，
     让调用方的失败文案保持原样。
@@ -101,12 +107,15 @@ def stream_process(
     chunks: list[str] = []
     chunk_chars = 0
     dropped = False
+    # 最后一次“有动静”的时间：普通输出和心跳都会刷新它。
+    activity = [time.monotonic()]
 
     def emit_text(text: str, write: Callable[[str], None]) -> None:
         nonlocal chunk_chars, dropped
         if not text.strip():
             return
         write(f"    {text}")
+        activity[0] = time.monotonic()
         chunks.append(text)
         chunk_chars += len(text) + 1
         while chunk_chars > OUTPUT_LIMIT and len(chunks) > 1:
@@ -173,6 +182,12 @@ def stream_process(
                 write(f"--- 超时（{timeout:.0f}s），已终止进程 ---")
                 reader.join(timeout=kill_grace)
                 raise RunnerError(f"命令超时（{timeout:.0f} 秒）：{verbose[0]}")
+            idle = time.monotonic() - activity[0]
+            if heartbeat and heartbeat > 0 and idle >= heartbeat:
+                write(
+                    f"    … 仍在运行（已 {time.monotonic() - started_monotonic:.0f} 秒，暂无输出）"
+                )
+                activity[0] = time.monotonic()
             time.sleep(max(0.01, poll))
 
         reader.join(timeout=kill_grace)
@@ -215,6 +230,7 @@ def _terminate(proc: subprocess.Popen[bytes], grace: float) -> None:
 
 
 __all__ = [
+    "HEARTBEAT_SECONDS",
     "KILL_GRACE_SECONDS",
     "OUTPUT_LIMIT",
     "POLL_SECONDS",
