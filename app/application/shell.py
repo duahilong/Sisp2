@@ -40,6 +40,8 @@ VERIFY_TIMEOUT = 120.0
 # Ghost 还原 14 GB 的 GHO 在 SATA 上也够用；NVMe 通常 5–15 分钟。
 GHOST_TIMEOUT = 2 * 3600.0
 BCDBOOT_TIMEOUT = 120.0
+# 收尾的附加文件拷贝：素材目录可能是几十 GB，给足 4 小时；取消在步骤边界生效。
+COPY_TIMEOUT = 4 * 3600.0
 
 # diskpart 是全局状态机（select disk / select partition 是进程级状态），两块盘同时
 # 跑 diskpart 会互相踩。多盘流水线里分区本身已经由 ``PartitionSequencer`` 串行化，
@@ -361,6 +363,7 @@ class DiskpartShell:
 
 __all__ = [
     "BCDBOOT_TIMEOUT",
+    "COPY_TIMEOUT",
     "DISKPART_TIMEOUT",
     "GHOST_TIMEOUT",
     "PARTITIONS_SCRIPT",

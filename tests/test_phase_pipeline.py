@@ -72,18 +72,28 @@ def _ctx(tmp_path, *, parts=None, letters=None, options=None, cancel=False, on_s
 
 
 # ---------------------------------------------------------------- 步骤契约
-def test_step_contract_has_six_steps_with_layout():
-    """「分区验收」是独立一步：分区组 4 步 + 系统组 2 步（引导与校验合一步）。"""
-    assert STEP_KEYS == ("efi", "windows", "data", "layout", "image", "boot")
+def test_step_contract_has_seven_steps_with_extras():
+    """「分区验收」独立成步，「拷贝附加文件」独立成收尾组。"""
+    assert STEP_KEYS == (
+        "efi",
+        "windows",
+        "data",
+        "layout",
+        "image",
+        "boot",
+        "copy",
+    )
     assert STEP_GROUPS["partition"] == ("efi", "windows", "data", "layout")
+    assert STEP_GROUPS["extras"] == ("copy",)
     assert GROUP_OF["layout"] == "partition"
     assert GROUP_OF["image"] == "system"
     assert GROUP_OF["boot"] == "system"
+    assert GROUP_OF["copy"] == "extras"
 
 
 def test_phases_payload_is_declarative():
     phases = phases_payload()
-    assert [phase["key"] for phase in phases] == ["partition", "system"]
+    assert [phase["key"] for phase in phases] == ["partition", "system", "extras"]
     assert phases[0]["title"] == "硬盘分区"
     assert phases[0]["steps"] == ["efi", "windows", "data", "layout"]
     assert phases[0]["stop_on_failure"] is True
@@ -94,6 +104,7 @@ def test_group_progress_ignores_extra_steps():
     groups = group_progress(["efi", "windows", "data", "layout", "diskpart_preview"], None)
     assert groups["partition"]["percent"] == 100
     assert groups["system"]["percent"] == 0
+    assert groups["extras"]["percent"] == 0
     assert "verify" not in groups
 
 
@@ -191,10 +202,15 @@ class _RecordingPhase:
         )
 
 
-def _pipeline(tmp_path, *, partition, system):
+def _pipeline(tmp_path, *, partition, system, extras=None):
     return JobPipeline(
         partition=partition,
         system=system,
+        extras=(
+            _RecordingPhase("extras", results=(PhaseResult.ok("copy", "已拷贝"),))
+            if extras is None
+            else extras
+        ),
     )
 
 
@@ -345,7 +361,7 @@ def test_prepare_returns_declarative_phases(tmp_path):
         "/api/prepare", json={"selection": {"1": {"c_size": 20, "data_size": 30}}}
     ).json()["data"]
     phases = prepared[0]["plan"]["phases"]
-    assert [phase["key"] for phase in phases] == ["partition", "system"]
+    assert [phase["key"] for phase in phases] == ["partition", "system", "extras"]
     assert phases[0]["steps"] == ["efi", "windows", "data", "layout"]
 
 
@@ -501,3 +517,56 @@ def test_real_runner_fills_job_progress(tmp_path):
     assert groups["partition"]["done"] is True
     assert groups["system"]["percent"] == 100
     assert "verify" not in groups
+
+# ---------------------------------------------------------------- 收尾组（拷贝）
+def test_pipeline_runs_extras_after_system(tmp_path):
+    """收尾组只在系统组成功之后跑：分区 → 镜像/引导 → 拷贝。"""
+    partition = _RecordingPhase("partition", results=(PhaseResult.ok("layout"),))
+    system = _RecordingPhase("system", results=(PhaseResult.ok("boot"),))
+    extras = _RecordingPhase("extras", results=(PhaseResult.ok("copy", "已拷贝"),))
+    pipeline = JobPipeline(partition=partition, system=system, extras=extras)
+
+    result = pipeline.run(_ctx(tmp_path))
+
+    assert result.ok is True
+    assert [item.key for item in result.results] == ["layout", "boot", "copy"]
+    assert partition.calls == system.calls == extras.calls == 1
+
+
+def test_pipeline_fails_whole_job_when_copy_fails(tmp_path):
+    """拷贝失败 = 整盘失败（用户确认的语义），不是“装好了但少几个文件”。"""
+    partition = _RecordingPhase("partition", results=(PhaseResult.ok("layout"),))
+    system = _RecordingPhase("system", results=(PhaseResult.ok("boot"),))
+    extras = _RecordingPhase(
+        "extras",
+        ok=False,
+        message="附加文件拷贝失败：robocopy 退出码 16",
+        results=(PhaseResult.failed("copy", "robocopy 退出码 16"),),
+    )
+    pipeline = JobPipeline(partition=partition, system=system, extras=extras)
+
+    result = pipeline.run(_ctx(tmp_path))
+
+    assert result.ok is False
+    assert "robocopy" in (result.failure or "")
+    assert {item.key: item.status for item in result.results}["copy"] == "failed"
+
+
+def test_pipeline_skips_extras_when_system_fails(tmp_path):
+    """镜像/引导没成功 → 拷贝记「未执行」，不往半成品分区里塞文件。"""
+    partition = _RecordingPhase("partition", results=(PhaseResult.ok("layout"),))
+    system = _RecordingPhase(
+        "system",
+        ok=False,
+        message="应用镜像失败",
+        results=(PhaseResult.failed("image", "Ghost 退出码 1"),),
+    )
+    extras = _RecordingPhase("extras", results=(PhaseResult.ok("copy"),))
+    pipeline = JobPipeline(partition=partition, system=system, extras=extras)
+
+    result = pipeline.run(_ctx(tmp_path))
+
+    assert extras.calls == 0
+    statuses = {item.key: item for item in result.results}
+    assert statuses["copy"].status == "skipped"
+    assert "未执行" in statuses["copy"].message

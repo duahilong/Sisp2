@@ -602,12 +602,15 @@ class WorkflowController:
     def _runner_options(self) -> dict[str, Any]:
         """把界面设置里的执行器可选项挑出来，随任务一起下发。
 
-        现在只剩布尔开关：临时目录与引导源目录都已固定用系统默认值，
-        不再作为可选项下发。布尔开关必须显式下发（``False`` 也要传），
-        否则执行器只能看到默认值 ``True``，开关就失效了。
+        布尔开关必须显式下发（``False`` 也要传），否则执行器只能看到默认值
+        ``True``，开关就失效了。``copy_source``（附加文件目录）留空表示不拷，
+        由拷贝阶段记一条 ``skipped``。
         """
         settings = self._settings()
-        return {"release_efi_letter": bool(settings.get("releaseEfiLetter", True))}
+        return {
+            "release_efi_letter": bool(settings.get("releaseEfiLetter", True)),
+            "copy_source": str(settings.get("copySource") or "").strip(),
+        }
 
     def authorize_disks(
         self, disk_numbers: Iterable[int], *, dry_run: bool | None = None

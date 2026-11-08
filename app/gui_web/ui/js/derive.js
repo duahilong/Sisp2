@@ -453,6 +453,7 @@ export function unallocatedBytes(totalBytes, sysGb, dataGb, extras = [], efiMb =
 export const PHASE_FALLBACK = [
   { key: 'partition', title: '硬盘分区', steps: ['efi', 'windows', 'data', 'layout'], stop_on_failure: true },
   { key: 'system', title: '写入系统', steps: ['image', 'boot'], stop_on_failure: true },
+  { key: 'extras', title: '收尾', steps: ['copy'], stop_on_failure: true },
 ];
 
 /** 计划 → 阶段分组（缺失/非法时回退内置表）。 */

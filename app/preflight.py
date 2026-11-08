@@ -55,6 +55,7 @@ OPTIONAL_TOOLS: tuple[tuple[str, str], ...] = (
 SETTING_PATHS: tuple[tuple[str, str, str], ...] = (
     ("sysImageA", "系统 A 镜像", "file"),
     ("sysImageB", "系统 B 镜像", "file"),
+    ("copySource", "附加文件目录", "dir"),
 )
 
 _POWERSHELL_NAMES = ("powershell", "pwsh", "powershell.exe", "pwsh.exe")

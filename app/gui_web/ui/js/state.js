@@ -20,6 +20,8 @@ export const STEP_LABELS = {
   image: '应用系统镜像',
   // 写引导与校验是同一步：bcdboot 写完立刻查引导文件与系统文件
   boot: '写入 UEFI 引导并校验',
+  // 收尾：把设置里指定的目录拷到第一数据分区（设置留空时该步显示“跳过”）
+  copy: '拷贝附加文件到数据分区',
 };
 
 export const JOB_STATUS_TEXT = {

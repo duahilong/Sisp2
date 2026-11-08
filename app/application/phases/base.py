@@ -1,9 +1,10 @@
 """阶段契约：``PhaseContext`` / ``PhaseResult`` / ``PhaseOutcome``。
 
-一次真实写盘被拆成两组互不依赖的阶段：
+一次真实写盘被拆成三组互不依赖的阶段：
 
     partition  → 清盘 / 删 MSR / 建分区 / 分区验收（layout）
     system     → 应用镜像（Ghost） / 写引导并校验（bcdboot + 文件检查）
+    extras     → 拷附加文件到第一数据分区（设置留空则整步跳过）
 
 阶段之间只通过这里的类型交换信息：**没有 ``self``、没有共享可变 dict**。
 分区阶段说"我做完了、盘动过、ESP 是第 k 个分区"；装机阶段只管读自己的入参。
@@ -41,6 +42,8 @@ class PhaseContext:
     # 本任务独占的 Ghost 工作目录（放 ghosterr.txt / ghost32.dmp）；结束后由
     # runner 归档失败原因并删除。None 时退回日志目录（单测用）。
     work_dir: str | None = None
+    # 演练任务：阶段可以报“将会做什么”，但绝不执行命令（拷贝阶段用它区分文案）。
+    dry_run: bool = False
 
     def notify(self, key: str, status: str, message: str = "") -> None:
         """上报"某一步正在执行"；进度回调可选，异常一律吞掉。"""

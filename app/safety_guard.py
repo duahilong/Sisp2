@@ -104,6 +104,15 @@ GHOST_READ_ONLY = frozenset({"-ver", "-?", "-h", "-help", "--version"})
 # 脚本里看不到内容的动态执行：一律当危险（无法静态判定它执行了什么东西）。
 DANGEROUS_DYNAMIC = ("invoke-expression", "iex")
 
+# 拷贝类工具里**永远不允许**的开关：它们会删目标盘（或源）里多出来的内容。
+# 收尾拷贝只增不删，代码里也不会拼这些开关；这里是第二道闸。
+FORBIDDEN_SWITCHES: dict[str, frozenset[str]] = {
+    "robocopy": frozenset({"/mir", "/purge", "/mov", "/move", "/del", "/nocopy"}),
+    "robocopy.exe": frozenset({"/mir", "/purge", "/mov", "/move", "/del", "/nocopy"}),
+    "xcopy": frozenset({"/del"}),
+    "xcopy.exe": frozenset({"/del"}),
+}
+
 # PowerShell 脚本里可能出现的外部写盘程序（必须带“调用”上下文才算，见下）。
 DANGEROUS_SCRIPT_PROGRAMS = (
     "diskpart",
@@ -253,6 +262,18 @@ def is_dangerous_command(command: Sequence[str]) -> bool:
     return False
 
 
+def _forbidden_switch(command: Sequence[str]) -> str | None:
+    """命令里是否带了“会删除内容”的开关；返回命中的开关（小写）。"""
+    banned = FORBIDDEN_SWITCHES.get(program_name(command))
+    if not banned:
+        return None
+    for arg in command[1:]:
+        token = str(arg).strip().lower()
+        if token in banned:
+            return token
+    return None
+
+
 def ensure_command_allowed(
     command: Sequence[str],
     *,
@@ -263,7 +284,15 @@ def ensure_command_allowed(
 
     ``allow_real_disk`` 默认 **False**：调用方必须显式声明"我这是生产环境、要真写盘"。
     这样即使将来重构又一次把 mock 搬丢，测试也只会失败，不会清盘。
+
+    ``robocopy /MIR`` 这类会删目标内容的开关不参与授权判断：任何环境都直接拦。
     """
+    forbidden = _forbidden_switch(command)
+    if forbidden is not None:
+        raise RealDiskBlocked(
+            f"已阻止会删除内容的命令：{program_name(command)} {forbidden}"
+            "（拷贝只增不删）。"
+        )
     if not is_dangerous_command(command):
         return
     if not allow_real_disk:

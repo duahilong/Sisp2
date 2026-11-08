@@ -1,4 +1,4 @@
-"""编排：分区组 → 系统组，以及"失败后谁跳过"的唯一实现。
+"""编排：分区组 → 系统组 → 收尾组，以及"失败后谁跳过"的唯一实现。
 
 **为什么必须有这一层**：以前"分区失败就把镜像/引导记成 skipped"这条语义散在
 ``_partition_phase`` / ``_fail_diskpart`` 里，分区阶段被迫认识下游步骤的名字。
@@ -26,7 +26,7 @@ from app.application.partitions import (
     check_minimums,
     plan_partitions,
 )
-from app.application.phases.base import PhaseContext, PhaseOutcome, PhaseResult
+from app.application.phases.base import Phase, PhaseContext, PhaseOutcome, PhaseResult
 from app.application.phases.partition import EfiLetterReleaser, PartitionPhase
 from app.application.phases.system import SystemPhase
 from app.application.steps import (
@@ -64,11 +64,14 @@ class PipelineResult:
 
 
 class JobPipeline:
-    """把两个互不依赖的阶段按组串起来。
+    """把三段互不依赖的阶段按组串起来。
 
     ``sequencer`` 只在**多盘**时注入（``PartitionSequencer``）：它把「分区组」
     按盘号顺序串行化，而系统组（Ghost/引导）各自独立——这就是多盘流水线的
     全部秘密；单盘时为 ``None``，代码路径与历史实现一致。
+
+    ``extras``（附加文件拷贝）是可有可无的收尾阶段：它失败会让整盘任务失败
+    （流程没走完），但不会把已经成功的镜像/引导改成失败。
     """
 
     def __init__(
@@ -76,11 +79,13 @@ class JobPipeline:
         *,
         partition: PartitionPhase,
         system: SystemPhase,
+        extras: Phase | None = None,
         cleanup: EfiLetterReleaser | None = None,
         sequencer: PartitionSequencer | None = None,
     ) -> None:
         self.partition = partition
         self.system = system
+        self.extras = extras
         self.cleanup = cleanup
         self.sequencer = sequencer
 
@@ -140,7 +145,7 @@ class JobPipeline:
                 # 排队期间被取消：一块盘都还没动，所有步骤统一记「排队中取消」。
                 result = PipelineResult(failure="任务已取消（排队中）")
                 self._skip_groups(
-                    result, ("partition", "system"), "任务已取消（排队中）", ctx
+                    result, ("partition", "system", "extras"), "任务已取消（排队中）", ctx
                 )
                 return result
             return self._run_groups(ctx)
@@ -187,6 +192,24 @@ class JobPipeline:
             result.failure = system.message
             if not system.cancelled:
                 self._skip_after(result, "system", system, ctx)
+            return result
+
+        # 写系统完成之后、拷贝之前的取消检查点
+        if ctx.cancelled():
+            result.failure = "任务已取消（系统已写入，附加文件未拷贝）"
+            self._skip_groups(result, ("extras",), result.failure, ctx)
+            return result
+
+        # ===== 组 3：收尾（附加文件拷贝）=====
+        if self.extras is None:
+            return result
+        extra = self.extras.run(ctx)
+        for item in extra.results:
+            result.add(item, ctx)
+        if not extra.ok:
+            result.failure = extra.message or "附加文件拷贝失败"
+            if not extra.cancelled:
+                self._skip_after(result, "extras", extra, ctx)
             return result
         return result
 
@@ -253,6 +276,8 @@ def _reason_text(group: str) -> str:
         return "分区验收未通过，未写入任何镜像"
     if group == "system":
         return "写入系统未完成（镜像/引导未成功）"
+    if group == "extras":
+        return "收尾拷贝未完成"
     return "前一步失败"
 
 

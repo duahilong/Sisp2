@@ -119,7 +119,20 @@ def test_workflow_maps_settings_to_runner_options() -> None:
     assert wf._runner_options() == {
         # 布尔开关总是下发（False 也要传下去，否则关不掉释放行为）
         "release_efi_letter": False,
+        # 附加文件目录：没设置就是空串，拷贝阶段据此记一条 skipped
+        "copy_source": "",
     }
+
+
+def test_workflow_passes_copy_source_without_trimming_path() -> None:
+    """附加文件目录只去首尾空白，其余原样下发（可用性由拷贝阶段判断）。"""
+    wf = WorkflowController(
+        service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
+        dry_run=True,
+        preflight_runner=lambda *, dry_run=False: {"results": []},
+        settings_provider=lambda: {"copySource": r"  D:\素材  "},
+    )
+    assert wf._runner_options()["copy_source"] == r"D:\素材"
 
 
 def test_workflow_preflight_receives_settings() -> None:
@@ -151,7 +164,7 @@ def test_workflow_survives_broken_settings_provider() -> None:
     )
     assert wf._settings() == {}
     # 设置读不到时开关回落默认值 True
-    assert wf._runner_options() == {"release_efi_letter": True}
+    assert wf._runner_options() == {"release_efi_letter": True, "copy_source": ""}
 
 
 # ------------------------------------------------------------------ 执行器
@@ -321,8 +334,8 @@ def test_workflow_ignores_blank_setting_values(bad: str) -> None:
         preflight_runner=lambda *, dry_run=False: {"results": []},
         settings_provider=lambda: {"sysImageA": bad, "extGhost": bad},
     )
-    # 执行器选项只剩布尔开关：空字符串项不该混进来
-    assert wf._runner_options() == {"release_efi_letter": True}
+    # 执行器选项只剩布尔开关与拷贝目录：坏掉的镜像路径不该混进来
+    assert wf._runner_options() == {"release_efi_letter": True, "copy_source": ""}
 
 
 def _noop(*_args: Any, **_kwargs: Any) -> WorkerResult:

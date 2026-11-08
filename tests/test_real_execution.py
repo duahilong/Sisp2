@@ -1193,7 +1193,7 @@ def test_partition_step_details_carry_verification(
     assert layout.details["problems"] == []
     assert layout.details["efi_partition"] == 1
     assert layout.details["partitions"]
-    # 进度键固定为 6 步（含 layout）
+    # 进度键固定为 7 步（含 layout 与收尾拷贝）
     assert [step.key for step in result.steps] == [
         "efi",
         "windows",
@@ -1201,6 +1201,7 @@ def test_partition_step_details_carry_verification(
         "layout",
         "image",
         "boot",
+        "copy",
     ]
 
 
@@ -1280,7 +1281,7 @@ def test_cancelled_job_reports_cancelled_even_if_executor_fails():
 
 # ------------------------------------------------------ 进度事件（job.step）
 # 真实写盘的 6 个步骤：分区组（含独立的「分区验收」）+ 系统组（镜像 + 引导）
-_STAGES = ("efi", "windows", "data", "layout", "image", "boot")
+_STAGES = ("efi", "windows", "data", "layout", "image", "boot", "copy")
 
 
 def _step_manager() -> tuple[JobManager, Job, list[tuple[str, str]]]:

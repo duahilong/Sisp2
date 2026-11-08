@@ -534,6 +534,8 @@ class SispService:
 
         letters = dict(getattr(spec, "drive_letters", None) or {})
         payload = dict(getattr(spec, "task_payload", None) or {})
+        options = dict(getattr(spec, "runner_options", None) or {})
+        copy_source = str(options.get("copy_source") or "").strip()
         script = self.build_diskpart_preview(disk_number, payload, letters)
 
         steps = (
@@ -578,6 +580,17 @@ class SispService:
                 status=STEP_SKIPPED,
                 message="dry-run 未执行",
                 details={},
+            ),
+            StepResult(
+                key="copy",
+                title=STEP_TITLES["copy"],
+                status=STEP_SKIPPED,
+                message=(
+                    "dry-run 未执行"
+                    if copy_source
+                    else "未设置拷贝目录，跳过"
+                ),
+                details={"source": copy_source, "target": letters.get("data")},
             ),
             StepResult(
                 key="diskpart_preview",

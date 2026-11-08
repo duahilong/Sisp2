@@ -100,7 +100,7 @@ SSE 首帧为 `snapshot`，包含 `poll_events(cursor, 1000)` 返回的可用补
  "progress":{"total":6,"completed":["efi"],"current":"windows","percent":33,"message":"正在安装系统分区"}}
 ```
 
-`key` 取 `STEP_TITLES` 的键（`efi/windows/data/layout/image/boot`），`status` 是
+`key` 取 `STEP_TITLES` 的键（`efi/windows/data/layout/image/boot/copy`），`status` 是
 `running` 或步骤结果（`ok`/`failed`/`skipped`）。同一份 `progress` 也会写进
 `Job.progress`，随 `GET /api/jobs` 一起返回，所以前端断开重连后不用重放事件也能
 把进度条摆对。

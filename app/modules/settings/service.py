@@ -44,6 +44,8 @@ DEFAULTS: dict[str, Any] = {
     "sysDefaultGb": 120,
     "efiDefaultMb": 100,
     "dataDefaultGb": "auto",
+    # 附加文件：装完系统后把这个目录的全部内容拷到第一数据分区根目录（空 = 不拷）
+    "copySource": "",
     # 外部程序（空 = 依次找 PATH 与 System32）；diskpart 固定用系统自带，不开放设置。
     "extGhost": "",
     # 写引导用的 bcdboot.exe；留空则用 System32 里的。
@@ -70,6 +72,7 @@ _PATH_KEYS: dict[str, str] = {
     "sysImageA": "file",
     "sysImageB": "file",
     "logDir": "dir",
+    "copySource": "dir",
 }
 
 # 纯文本设置（系统槽位的显示名）：单条最长字符数

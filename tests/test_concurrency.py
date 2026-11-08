@@ -164,7 +164,7 @@ def test_cancel_while_queued_skips_every_step() -> None:
     assert "排队中" in (result.failure or "")
     assert spans.items == [], "排队中被取消的盘不应该执行任何阶段"
     skipped = [item for item in result.results if item.status == "skipped"]
-    assert len(skipped) == 6, "六个步骤都应记为跳过"
+    assert len(skipped) == 7, "七个步骤都应记为跳过（含收尾）"
     assert all("排队中" in item.message for item in skipped)
     assert sequencer.snapshot()["running"] == 2 or sequencer.snapshot()["finished"] == [2]
 

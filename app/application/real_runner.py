@@ -40,6 +40,7 @@ from app.application.partitions import (
     wipe_lines,
 )
 from app.application.phases.base import PhaseContext, PhaseOutcome, PhaseResult
+from app.application.phases.copy import CopyAssetsPhase
 from app.application.phases.ghost import GhostImagePhase
 from app.application.phases.partition import EfiLetterReleaser, PartitionPhase
 from app.application.phases.system import SystemPhase
@@ -229,6 +230,8 @@ class WindowsDiskRunner:
         # ghosterr.txt 落在本任务独占的工作目录（多盘并发时不能共用日志目录，
         # 否则失败原因会互相覆盖）；没有 work_dir 时退回日志目录。
         cwd = ctx.work_dir or existing_dir(self.log_dir)
+        # 收尾阶段：设置里留空时阶段自己记 skipped，所以这里无条件装配。
+        copy_source = str(ctx.options.get("copy_source") or "")
         return JobPipeline(
             partition=PartitionPhase(shell),
             system=SystemPhase(
@@ -237,6 +240,7 @@ class WindowsDiskRunner:
                 ),
                 uefi,
             ),
+            extras=CopyAssetsPhase(process, copy_source),
             cleanup=EfiLetterReleaser(shell),
             sequencer=self._sequencer,
         )

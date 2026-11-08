@@ -145,7 +145,7 @@ const out = {
   progress_groups: (() => {
     const groups = phaseGroups(null);
     const phases = progressByPhase(
-      { total: 6, completed: ['efi', 'windows', 'data', 'layout'], current: 'image', percent: 67 },
+      { total: 7, completed: ['efi', 'windows', 'data', 'layout'], current: 'image', percent: 57 },
       groups,
       { efi: 'ok', windows: 'ok', data: 'ok', layout: 'ok', image: 'running' }
     );
@@ -156,10 +156,15 @@ const out = {
     const groups = phaseGroups(null);
     return skippedByFailure('layout', groups);
   })(),
-  // 引导（最后一组）失败不影响任何后续组
+  // 引导失败 → 只剩收尾组被跳过
   skipped_after_boot: (() => {
     const groups = phaseGroups(null);
     return skippedByFailure('boot', groups);
+  })(),
+  // 拷贝（最后一组）失败不影响任何后续组
+  skipped_after_copy: (() => {
+    const groups = phaseGroups(null);
+    return skippedByFailure('copy', groups);
   })(),
   // 验收面板：problems 非空 → 不通过；warnings 只提示
   verdict_ok: layoutVerdict({ partition_style: 'GPT', problems: [], warnings: ['ESP 盘符未关联'],
@@ -206,12 +211,13 @@ EXPECTED = {
     "fit_even_split": True,
     "fit_keeps_mins": True,
     "phases_from_plan": ["partition", "system"],
-    "phases_fallback": [["partition", 4], ["system", 2]],
-    "progress_groups": [["partition", 100, "done"], ["system", 0, "running"]],
-    "skipped_after_layout": ["system"],
+    "phases_fallback": [["partition", 4], ["system", 2], ["extras", 1]],
+    "progress_groups": [["partition", 100, "done"], ["system", 0, "running"], ["extras", 0, "idle"]],
+    "skipped_after_layout": ["system", "extras"],
     "free_gpt_slack": 0,
     "free_gpt_gap": 90,
-    "skipped_after_boot": [],
+    "skipped_after_boot": ["extras"],
+    "skipped_after_copy": [],
     "notes_warnings": [
         {"body": "取消为协作式：当前步骤完成后才会停止", "disks": [1, 2]},
         {"body": "破坏性操作：将清空目标硬盘全部数据", "disks": [1]},
