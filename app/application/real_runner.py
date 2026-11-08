@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import tempfile
 import threading
 from collections.abc import Mapping
 from datetime import datetime
@@ -75,6 +77,25 @@ _FS_TOKENS = {"ntfs": "ntfs"}
 
 # 兼容旧名字（外部脚本与测试在用）。
 _partition_verdict = partition_verdict
+
+
+def _make_workdir(disk_number: int) -> str | None:
+    """给单个任务开一个独占的临时工作目录（Ghost 在里面写 ghosterr.txt）。
+
+    多盘并发时不能用共享的日志目录：Ghost 的失败原因固定叫 ``GHOSTERR.TXT``，
+    两个进程会互相覆盖，事后无法区分是哪块盘失败。
+    """
+    try:
+        return tempfile.mkdtemp(prefix=f"sisp-ghost-{int(disk_number)}-")
+    except OSError:
+        _LOGGER.warning("无法创建 Ghost 临时目录", exc_info=True)
+        return None
+
+
+def _remove_workdir(path: str | None) -> None:
+    if not path:
+        return
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def data_fs_token(payload: Mapping[str, Any]) -> str:
@@ -136,6 +157,8 @@ class WindowsDiskRunner:
         process: Any = None,
         uefi: Any = None,
         pipeline_factory: Any = None,
+        sequencer: Any = None,
+        ghost_gate: Any = None,
     ) -> None:
         # 真实写盘授权：默认关闭。生产入口 build_real_runner() 会显式打开；
         # 测试/脚本里直接构造的 runner 只能"读"，执行 diskpart/format/bcdboot/ghost
@@ -152,6 +175,10 @@ class WindowsDiskRunner:
         self._process = process
         self._uefi = uefi
         self._pipeline_factory = pipeline_factory
+        # 多盘并发：分区轮次闸门（``PartitionSequencer``）与 Ghost 启动间隔闸门。
+        # 单盘时两者都为 None，行为与历史实现完全一致。
+        self._sequencer = sequencer
+        self._ghost_gate = ghost_gate
 
     # ------------------------------------------------------------------ 入口
     def __call__(
@@ -199,15 +226,19 @@ class WindowsDiskRunner:
             bcdboot=self.bcdboot,
             probe=BootProbe(process, powershell=self.powershell),
         )
-        # ghosterr.txt 落在日志目录；日志目录不可用时交给系统临时目录。
-        cwd = existing_dir(self.log_dir)
+        # ghosterr.txt 落在本任务独占的工作目录（多盘并发时不能共用日志目录，
+        # 否则失败原因会互相覆盖）；没有 work_dir 时退回日志目录。
+        cwd = ctx.work_dir or existing_dir(self.log_dir)
         return JobPipeline(
             partition=PartitionPhase(shell),
             system=SystemPhase(
-                GhostImagePhase(process, ghost=self.ghost, cwd=cwd),
+                GhostImagePhase(
+                    process, ghost=self.ghost, cwd=cwd, start_gate=self._ghost_gate
+                ),
                 uefi,
             ),
             cleanup=EfiLetterReleaser(shell),
+            sequencer=self._sequencer,
         )
 
     # ------------------------------------------------------------------ 执行
@@ -234,6 +265,7 @@ class WindowsDiskRunner:
         log.write(f"配置：{json.dumps(payload, ensure_ascii=False)[:2000]}")
 
         parts, layout_error = JobPipeline.build_parts(payload, letters)
+        work_dir = _make_workdir(disk_number)
         ctx = PhaseContext(
             disk_number=disk_number,
             parts=parts or (),
@@ -244,6 +276,7 @@ class WindowsDiskRunner:
             options=options,
             env=env,
             on_step=on_step,
+            work_dir=work_dir,
         )
 
         missing_tools = [
@@ -272,6 +305,11 @@ class WindowsDiskRunner:
             # 收尾释放 EFI 盘符：唯一入口，受设置 releaseEfiLetter 控制。
             # 分区阶段自己会记录 disk_touched，没动过盘时这里什么都不做。
             pipeline.cleanup_letter(ctx, partition=partition_outcome)
+            # 多盘流水线：无论成败都要放行下一块盘（幂等，pipeline 里已经调过一次）。
+            if self._sequencer is not None:
+                self._sequencer.done(disk_number)
+            self._archive_ghosterr(work_dir, disk_number, log)
+            _remove_workdir(work_dir)
 
         return self._finish(
             disk_number=disk_number,
@@ -281,6 +319,23 @@ class WindowsDiskRunner:
         )
 
     # ------------------------------------------------------------------ 结果
+    def _archive_ghosterr(
+        self, work_dir: str | None, disk_number: int, log: CommandLog
+    ) -> None:
+        """把失败时 Ghost 写的 ``GHOSTERR.TXT`` 存到日志目录，再删临时目录。"""
+        if not work_dir or not self.log_dir:
+            return
+        source = Path(work_dir) / "ghosterr.txt"
+        try:
+            if not source.is_file():
+                return
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            target = Path(self.log_dir) / f"ghosterr-disk{int(disk_number)}-{stamp}.txt"
+            shutil.copyfile(source, target)
+            log.write(f"Ghost 失败原因已存档：{target}")
+        except OSError:
+            _LOGGER.warning("归档 ghosterr 失败", exc_info=True)
+
     def _finish(
         self,
         *,
@@ -358,6 +413,8 @@ def build_real_runner(
     diskpart: str | None = None,
     ghost: str | None = None,
     bcdboot: str | None = None,
+    sequencer: Any = None,
+    ghost_gate: Any = None,
 ) -> WindowsDiskRunner:
     """工厂函数；``WorkflowController`` 用它给未注入服务的会话配默认执行器。
 
@@ -372,6 +429,8 @@ def build_real_runner(
         ghost=ghost,
         bcdboot=bcdboot,
         allow_real_disk=True,
+        sequencer=sequencer,
+        ghost_gate=ghost_gate,
     )
 
 

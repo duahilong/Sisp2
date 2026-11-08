@@ -956,14 +956,17 @@ function renderProgressHtml() {
     }).join('');
 
     const status = job ? job.status : 'pending';
+    // 排队：任务已启动但没有产生任何步骤事件——多盘流水线里它在等前一块盘的分区组。
+    const queued = !current && !completed.length && !stepEvents.size
+      && ['running', 'pending', 'scheduled', 'waiting_confirmation'].includes(status);
     const badge = `<span class="badge ${esc(status)}">${esc(jobStatusText(status))}</span>`;
     const logLines = logCache.get(jobId) || [];
 
     return `<div class="prog" data-job="${esc(jobId)}">
       <div class="prow">
-        <span class="pname">磁盘 ${esc(diskNumber)} 安装中</span>
+        <span class="pname">磁盘 ${esc(diskNumber)} ${queued ? '排队等待分区' : '安装中'}</span>
         ${badge}
-        <span class="peta">${percent}% · ${esc(progress.message || '')}</span>
+        <span class="peta">${percent}% · ${esc(queued ? '前一块盘分区完成后自动开始' : (progress.message || ''))}</span>
       </div>
       <div class="track"><i style="width:${percent}%"></i></div>
       <ul class="stages">${stages}</ul>

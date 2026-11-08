@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from app.application.contracts import CheckItem, DiskInfo
+from app.application.coordination import GhostStartGate, PartitionSequencer
 from app.application.jobs import ExecutionPlan, Job, JobManager, JobSpec, JobStatus
 from app.application.partitions import (
     PartitionLayoutError,
@@ -390,8 +391,8 @@ class WorkflowController:
         *,
         preflight_runner: PreflightRunner | None = None,
         dry_run: bool = False,
-        worker_interval: float = 6.0,
-        max_parallel: int = 1,
+        worker_interval: float = 0.0,
+        max_parallel: int = 0,
         log_dir: str | None = None,
         result_dir: str | None = None,
         resource_resolver: Callable[[Any], int | None] | None = None,
@@ -408,7 +409,9 @@ class WorkflowController:
         # 降级为演练，不能反过来升级为真实写盘。
         self._forced_dry_run = bool(dry_run)
         self._worker_interval = max(float(worker_interval), 0.0)
-        self._max_parallel = max(int(max_parallel), 1)
+        # 0 表示“按本批任务数放开”：几张盘就几个线程，分区组由
+        # ``PartitionSequencer`` 串行化，系统组（Ghost/引导）并行。
+        self._max_parallel = max(int(max_parallel), 0)
         self._log_dir = log_dir
         self._result_dir = result_dir
         self._resource_resolver = resource_resolver
@@ -443,6 +446,10 @@ class WorkflowController:
             event_dir=event_dir,
         )
         self._preflight_runner = preflight_runner or run_preflight_checks
+        # 多盘流水线的两个闸门：分区轮次（按盘号串行）与 Ghost 启动间隔。
+        # 单盘时 sequencer 只包含一张盘，效果与串行实现完全一致。
+        self._sequencer = PartitionSequencer()
+        self._ghost_gate = GhostStartGate()
         self._session: SessionState | None = None
         self._prepared: dict[int, PreparedJob] = {}
         self._jobs: dict[str, PreparedJob] = {}
@@ -470,8 +477,15 @@ class WorkflowController:
         cancel_event: threading.Event,
         on_step: Any = None,
     ) -> WorkerResult:
-        """``JobManager`` 的默认执行器：走本会话的 service，不再另造一个。"""
-        self._sync_service_policy(dry_run=bool(getattr(spec, "dry_run", False)))
+        """``JobManager`` 的默认执行器：走本会话的 service，不再另造一个。
+
+        策略同步的边界：**只降不升**。这个任务是演练时把共享 service 降级为
+        演练（多盘并发下所有任务同模式，赋值幂等）；升级（真实模式）由控制面
+        ``start()`` / ``prepare()`` / ``confirm()`` 统一处理——每个任务都去改
+        同一个 service 对象，并发时就是数据竞争。
+        """
+        if bool(getattr(spec, "dry_run", False)):
+            self._sync_service_policy(dry_run=True)
         execute = self._service.execute_spec
         try:
             accepts = "on_step" in inspect.signature(execute).parameters
@@ -1069,11 +1083,16 @@ class WorkflowController:
             jobs.append(job)
 
         if not require_confirmation:
+            self._sync_service_policy(dry_run=self._dry_run)
+            self._sequencer.set_order(sorted(job.disk_number for job in jobs))
             try:
                 self._manager.confirm_batch(
                     [job.id for job in jobs],
                     interval=self._worker_interval if interval is None else interval,
-                    max_parallel=self._max_parallel if max_parallel is None else max_parallel,
+                    max_parallel=(
+                        self._max_parallel if max_parallel is None else max_parallel
+                    )
+                    or len(jobs),
                 )
             except ValueError as exc:
                 raise WorkflowError(str(exc)) from exc
@@ -1106,11 +1125,17 @@ class WorkflowController:
         if real_disks:
             self.authorize_disks(real_disks)
 
+        # 共享的 service 策略在这里一次性对齐（并发任务不能各自再改）。
+        self._sync_service_policy(dry_run=self._dry_run)
+        # 分区组按盘号升序串行；系统组（Ghost/引导）各自并行。
+        self._sequencer.set_order(sorted(job.disk_number for job in waiting))
+        parallel = self._max_parallel or len(waiting)
+
         try:
             self._manager.confirm_batch(
                 [job.id for job in waiting],
                 interval=self._worker_interval,
-                max_parallel=self._max_parallel,
+                max_parallel=parallel,
             )
         except ValueError as exc:
             raise WorkflowError(str(exc)) from exc
@@ -1126,6 +1151,9 @@ class WorkflowController:
         for job in self._select_jobs(job_ids):
             if self._manager.cancel(job.id, reason=reason):
                 cancelled.append(job.id)
+        if cancelled:
+            # 唤醒排队中的盘，让它们立刻看到取消信号（否则要等一个轮询周期）。
+            self._sequencer.cancel_waiting()
         return cancelled
 
     def wait_all(self, timeout: float | None = None) -> list[Job]:

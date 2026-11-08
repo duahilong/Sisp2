@@ -298,6 +298,120 @@ def test_phase_missing_ghost_binary(tmp_path) -> None:
     assert "Ghost 无法执行" in outcome.results[0].message
 
 
+# ------------------------------------------------- 并发冲突：启动闸门与重试
+GHOSTERR_8027 = (
+    "Error Number: (8027)\n"
+    "Message: A GeneralException occurred\n"
+    "A disk error occurred\n"
+    "Win32 error: (0x00000015) The device is not ready.\n"
+)
+
+
+class _Gate:
+    """记录被调用次数的启动闸门（``GhostStartGate`` 只需 ``wait()``）。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def wait(self) -> float:
+        self.calls += 1
+        return 0.0
+
+
+def _sequence_phase(
+    results: list[tuple[int, str]],
+    *,
+    cwd=None,
+    gate=None,
+    on_call=None,
+):
+    """按调用次序返回不同退出码的 Ghost 阶段。"""
+    calls: list[list[str]] = []
+
+    def fake_run(command, timeout, *, env=None, cwd=None):
+        calls.append(list(command))
+        index = min(len(calls) - 1, len(results) - 1)
+        code, output = results[index]
+        if on_call is not None:
+            on_call(len(calls))
+        return code, output, 0.1
+
+    shell = ProcessShell(log=CommandLog(None), runner=fake_run)
+    phase = GhostImagePhase(shell, ghost="ghost64.exe", cwd=cwd, start_gate=gate)
+    phase.calls = calls  # type: ignore[attr-defined]
+    return phase
+
+
+def test_phase_retries_once_after_transient_8027(tmp_path, monkeypatch) -> None:
+    """并发冲突（8027 / device is not ready）自动重试一次即成功。"""
+    monkeypatch.setattr("app.application.phases.ghost.RETRY_DELAY", 0.01)
+    gate = _Gate()
+
+    def on_call(index: int) -> None:
+        if index == 1:
+            (tmp_path / "ghosterr.txt").write_bytes(GHOSTERR_8027.encode("mbcs"))
+
+    phase = _sequence_phase(
+        [(1, ""), (0, "ok")], cwd=str(tmp_path), gate=gate, on_call=on_call
+    )
+    outcome = phase.run(_ctx(tmp_path))
+
+    assert outcome.ok is True
+    assert len(phase.calls) == 2, "8027 属于瞬时冲突，应该重试一次"
+    assert gate.calls == 2, "每次启动 Ghost 前都要过启动闸门"
+    assert outcome.results[0].details["attempts"] == 2
+
+
+def test_phase_gives_up_after_two_transient_failures(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("app.application.phases.ghost.RETRY_DELAY", 0.01)
+
+    def on_call(index: int) -> None:
+        (tmp_path / "ghosterr.txt").write_bytes(GHOSTERR_8027.encode("mbcs"))
+
+    phase = _sequence_phase([(1, ""), (1, "")], cwd=str(tmp_path), on_call=on_call)
+    outcome = phase.run(_ctx(tmp_path))
+
+    assert outcome.ok is False
+    assert len(phase.calls) == 2
+    assert outcome.results[0].details["attempts"] == 2
+    assert "退出码 1" in outcome.results[0].message
+
+
+def test_phase_does_not_retry_real_errors(tmp_path, monkeypatch) -> None:
+    """不是并发冲突（GHOSTERR 里没 8027）就不重试，避免把真错误跑两遍。"""
+    monkeypatch.setattr("app.application.phases.ghost.RETRY_DELAY", 0.01)
+
+    def on_call(index: int) -> None:
+        (tmp_path / "ghosterr.txt").write_bytes(
+            "分区块错误：目标分区太小\nFATAL".encode("mbcs")
+        )
+
+    phase = _sequence_phase([(1, ""), (0, "ok")], cwd=str(tmp_path), on_call=on_call)
+    outcome = phase.run(_ctx(tmp_path))
+
+    assert outcome.ok is False
+    assert len(phase.calls) == 1
+    assert outcome.results[0].details["attempts"] == 1
+
+
+def test_phase_cancel_during_retry_wait(tmp_path, monkeypatch) -> None:
+    """重试等待期间被取消：返回 cancelled，不再启动第二次。"""
+    monkeypatch.setattr("app.application.phases.ghost.RETRY_DELAY", 0.3)
+    ctx = _ctx(tmp_path)
+
+    def on_call(index: int) -> None:
+        if index == 1:
+            (tmp_path / "ghosterr.txt").write_bytes(GHOSTERR_8027.encode("mbcs"))
+            ctx.cancel.set()
+
+    phase = _sequence_phase([(1, ""), (0, "ok")], cwd=str(tmp_path), on_call=on_call)
+    outcome = phase.run(ctx)
+
+    assert outcome.ok is False
+    assert outcome.cancelled is True
+    assert len(phase.calls) == 1
+
+
 def test_phase_cancel_skips(tmp_path) -> None:
     commands: list[list[str]] = []
     phase = _phase(commands)

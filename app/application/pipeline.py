@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app.application.coordination import PartitionSequencer
 from app.application.partitions import (
     PartitionLayoutError,
     allow_small_partitions,
@@ -63,7 +64,12 @@ class PipelineResult:
 
 
 class JobPipeline:
-    """把两个互不依赖的阶段按组串起来。"""
+    """把两个互不依赖的阶段按组串起来。
+
+    ``sequencer`` 只在**多盘**时注入（``PartitionSequencer``）：它把「分区组」
+    按盘号顺序串行化，而系统组（Ghost/引导）各自独立——这就是多盘流水线的
+    全部秘密；单盘时为 ``None``，代码路径与历史实现一致。
+    """
 
     def __init__(
         self,
@@ -71,10 +77,12 @@ class JobPipeline:
         partition: PartitionPhase,
         system: SystemPhase,
         cleanup: EfiLetterReleaser | None = None,
+        sequencer: PartitionSequencer | None = None,
     ) -> None:
         self.partition = partition
         self.system = system
         self.cleanup = cleanup
+        self.sequencer = sequencer
 
     # ------------------------------------------------------------------ 前置
     def precheck(
@@ -124,6 +132,26 @@ class JobPipeline:
 
     # ------------------------------------------------------------------ 执行
     def run(self, ctx: PhaseContext) -> PipelineResult:
+        """跑一次任务；多盘时先在闸门前排队，结束后无论成败都要放行下一块盘。"""
+        try:
+            if self.sequencer is not None and not self.sequencer.enter(
+                ctx.disk_number, ctx.cancelled
+            ):
+                # 排队期间被取消：一块盘都还没动，所有步骤统一记「排队中取消」。
+                result = PipelineResult(failure="任务已取消（排队中）")
+                self._skip_groups(
+                    result, ("partition", "system"), "任务已取消（排队中）", ctx
+                )
+                return result
+            return self._run_groups(ctx)
+        finally:
+            # 兜底：任何路径（含排队中被取消）都不能把闸门留在自己手上；
+            # 正常路径在分区组结束时已经释放过，``done()`` 幂等。
+            if self.sequencer is not None:
+                self.sequencer.done(ctx.disk_number)
+
+
+    def _run_groups(self, ctx: PhaseContext) -> PipelineResult:
         result = PipelineResult()
 
         # ===== 组 1：硬盘分区（含分区验收）=====
@@ -131,6 +159,9 @@ class JobPipeline:
         result.partition = part
         for item in part.results:
             result.add(item, ctx)
+        # 分区组结束就放开下一块盘：这是多盘流水线的关键一步（写在 finally 之前的语义点）。
+        if self.sequencer is not None:
+            self.sequencer.done(ctx.disk_number)
         if not part.ok:
             result.failure = part.message
             if not part.cancelled:

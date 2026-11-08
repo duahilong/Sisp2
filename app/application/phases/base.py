@@ -38,6 +38,9 @@ class PhaseContext:
     options: Mapping[str, Any] = field(default_factory=dict)
     env: Mapping[str, str] | None = None
     on_step: Any = None
+    # 本任务独占的 Ghost 工作目录（放 ghosterr.txt / ghost32.dmp）；结束后由
+    # runner 归档失败原因并删除。None 时退回日志目录（单测用）。
+    work_dir: str | None = None
 
     def notify(self, key: str, status: str, message: str = "") -> None:
         """上报"某一步正在执行"；进度回调可选，异常一律吞掉。"""

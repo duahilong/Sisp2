@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -26,7 +27,10 @@ class CommandLog:
             try:
                 directory.mkdir(parents=True, exist_ok=True)
                 stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-                self.path = directory / f"disk-runner-{stamp}-{os.getpid()}.log"
+                # 多盘并发时同一秒可能同时创建多份日志：追加进程号 + 6 位随机后缀，
+                # 否则两个任务会写进同一个文件（行互相穿插，事后无法按盘追踪）。
+                suffix = f"{os.getpid()}-{uuid.uuid4().hex[:6]}"
+                self.path = directory / f"disk-runner-{stamp}-{suffix}.log"
             except OSError:
                 _LOGGER.warning("无法创建日志目录: %s", log_dir, exc_info=True)
 

@@ -20,6 +20,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,11 @@ VERIFY_TIMEOUT = 120.0
 # Ghost 还原 14 GB 的 GHO 在 SATA 上也够用；NVMe 通常 5–15 分钟。
 GHOST_TIMEOUT = 2 * 3600.0
 BCDBOOT_TIMEOUT = 120.0
+
+# diskpart 是全局状态机（select disk / select partition 是进程级状态），两块盘同时
+# 跑 diskpart 会互相踩。多盘流水线里分区本身已经由 ``PartitionSequencer`` 串行化，
+# 这里再上一把模块级锁：执行期释放盘符、boot 修复等旁路调用也不会和分区撞车。
+_DISKPART_LOCK = threading.Lock()
 
 # 只读：查分区表 + 卷信息（盘符/卷标/文件系统）+ 盘容量。
 # 其中 ``Win32_LogicalDiskToPartition`` 用来关联 ESP 的临时盘符——ESP 是隐藏卷，
@@ -228,6 +234,17 @@ class DiskpartShell:
         """把脚本写进临时文件再 ``diskpart /s``（diskpart 只认 ANSI 脚本）。"""
         if not self.diskpart:
             raise RunnerError("找不到 diskpart.exe")
+        # 全局互斥：多个任务（多盘流水线、boot 修复）可能同时需要 diskpart。
+        with _DISKPART_LOCK:
+            return self._run_diskpart_locked(lines, title=title, timeout=timeout)
+
+    def _run_diskpart_locked(
+        self,
+        lines: Sequence[str],
+        *,
+        title: str,
+        timeout: float,
+    ) -> tuple[int, str]:
         self.log.block(title, "\n".join(lines))
         handle, path = tempfile.mkstemp(
             prefix="sisp-diskpart-", suffix=".txt", dir=self.temp_dir
