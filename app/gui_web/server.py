@@ -153,7 +153,7 @@ def create_app(
     def probe_images(body: dict[str, Any] | None = None) -> dict[str, Any]:
         """设置里的两个系统版本（带文件头校验），或单独校验某个 GHO（``path``）。"""
         payload = body or {}
-        return api.probe_images(payload.get("directory"), payload.get("path"))
+        return api.probe_images(payload.get("path"))
 
     # ------------------------------------------------------------- 分区脚本预览
     @app.post("/api/partition/preview")
@@ -290,10 +290,6 @@ def create_app(
             str(body.get("key") or ""),
             None if path is None else str(path),
         )
-
-    @app.post("/api/settings/probe_all")
-    def probe_all_paths() -> dict[str, Any]:
-        return api.probe_all_paths()
 
     @app.post("/api/settings/open_folder")
     def open_settings_folder() -> dict[str, Any]:

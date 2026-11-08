@@ -84,6 +84,9 @@ class _FakeService:
     def scan_protected_disks(self, excluded_names: Any = None) -> list[DiskInfo]:
         return list(self.disks)
 
+    def scan_protected_snapshot(self) -> tuple[list[DiskInfo], tuple[str, ...]]:
+        return list(self.disks), ()
+
     def build_selection_plan(self, payload, summaries, selected, **kwargs):
         letters = {number: {"efi": "E", "windows": "F", "data": "G"} for number in selected}
         return SimpleNamespace(drive_letter_allocations=letters)
@@ -254,9 +257,6 @@ def test_settings_roundtrip(client: TestClient) -> None:
     reset = _unwrap(client.delete("/api/settings"))
     assert reset["settings"]["sysDefaultGb"] == 120
     assert reset["settings"]["theme"] == "light"
-
-    probed = _unwrap(client.post("/api/settings/probe_all"))
-    assert "extGhost" in probed
 
 
 def test_dialog_pick_returns_path_without_saving(client: TestClient, monkeypatch) -> None:

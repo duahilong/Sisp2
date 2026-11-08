@@ -366,7 +366,8 @@ def test_diskpart_script_written_into_configured_temp_dir(tmp_path) -> None:
 def _controller(settings: dict[str, Any], payload: dict[str, Any] | None = None) -> WorkflowController:
     return WorkflowController(
         service=SimpleNamespace(
-            allowed_disk_numbers=frozenset({1}), scan_protected_disks=lambda names: []
+            allowed_disk_numbers=frozenset({1}),
+            scan_protected_snapshot=lambda: ([], ()),
         ),
         preflight_runner=lambda : {"results": []},
         partition_defaults=dict(payload or {}),
@@ -395,17 +396,20 @@ def test_start_scans_without_excluded_names() -> None:
     """排除名单功能连同设置项一起移除：开盘扫描不再接收任何名单参数。"""
     seen: list[Any] = []
 
-    def scan(*args: Any, **kwargs: Any) -> list[Any]:
-        seen.append((args, kwargs))
-        return []
+    def scan() -> tuple[list[Any], tuple[str, ...]]:
+        seen.append("scan")
+        return [], ()
 
     wf = WorkflowController(
-        service=SimpleNamespace(allowed_disk_numbers=frozenset({1}), scan_protected_disks=scan),
+        service=SimpleNamespace(
+            allowed_disk_numbers=frozenset({1}), scan_protected_snapshot=scan
+        ),
         preflight_runner=lambda : {"results": []},
         worker_interval=0.0,
     )
     wf.start()
-    assert seen == [((), {})]
+    # 会话扫描不再接收“排除名单”之类的参数，也不该再走旧的单盘列表接口。
+    assert seen == ["scan"]
 
 
 def test_default_system_image_from_settings() -> None:

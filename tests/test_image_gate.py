@@ -111,6 +111,9 @@ class _FakeService:
     def scan_protected_disks(self, excluded_names: Any = None) -> list[DiskInfo]:
         return list(self.disks)
 
+    def scan_protected_snapshot(self) -> tuple[list[DiskInfo], tuple[str, ...]]:
+        return list(self.disks), ()
+
     def build_selection_plan(self, payload, summaries, selected, **kwargs):
         letters = {number: {"efi": "E", "windows": "F", "data": "G"} for number in selected}
         return SimpleNamespace(drive_letter_allocations=letters)

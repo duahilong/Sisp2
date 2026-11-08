@@ -74,8 +74,6 @@ _CHECK_KEYS = {
 _PLAN_STEP_KEYS = ("efi", "windows", "data")
 _DESTRUCTIVE_WARNING = "破坏性操作：将清空目标硬盘全部数据，请再次核对硬盘编号和身份"
 _CANCEL_WARNING = "取消为协作式：当前步骤完成后才会停止"
-BYTES_PER_MB = 1024 * 1024
-BYTES_PER_GB = 1024 * 1024 * 1024
 
 
 class WorkflowError(ValueError):
@@ -125,8 +123,8 @@ def _build_check_items(results: Sequence[dict[str, Any]] | None) -> tuple[CheckI
                 label=name,
                 passed=bool(result.get("passed")),
                 message=str(result.get("message") or ""),
-                # “可选”检查失败不进入阻断项：业务配置文件缺失属于可选，
-                # 界面设置已经能覆盖它的全部内容。
+                # “可选”检查失败不进入阻断项：例如镜像文件还没准备好，
+                # 用户可以在设置页补齐后再继续。
                 optional=bool(result.get("optional")),
             )
         )
@@ -279,12 +277,6 @@ def _image_problems(
     return []
 
 
-def _image_blocker(payload: Mapping[str, Any] | None) -> str | None:
-    """只查类型与存在性的便捷包装（给测试与轻量调用方用）。"""
-    problems = _image_problems(payload)
-    return problems[0] if problems else None
-
-
 def _image_from_settings(settings: Mapping[str, Any] | None) -> dict[str, Any]:
     """设置页的系统槽位 → ``image_info``。
 
@@ -298,27 +290,6 @@ def _image_from_settings(settings: Mapping[str, Any] | None) -> dict[str, Any]:
     if not versions:
         return {}
     return {"image_path": versions[0]["path"]}
-
-
-def _apply_image_defaults(
-    payload: dict[str, Any],
-    settings: Mapping[str, Any] | None,
-) -> dict[str, Any]:
-    """把设置里的镜像合并进载荷。
-
-    设置是唯一来源，所以永远覆盖；``prepare()`` 每次重新调一次，设置页改完不必
-    重启。向导第 3 步的逐盘选择在 ``_merge_payload`` 里合并，晚于这里，所以永远
-    优先于这里的设置值。
-    """
-    info = _image_from_settings(settings)
-    if not info:
-        return payload
-    current = payload.get("image_info")
-    if not isinstance(current, dict):
-        current = {}
-        payload["image_info"] = current
-    current.update(info)
-    return payload
 
 
 def _check_partition_fit(disk: DiskInfo, payload: dict[str, Any]) -> list[str]:
@@ -384,7 +355,7 @@ class WorkflowController:
             else None
         )
         self._real_runner = real_runner
-        # 界面设置的默认分区参数：只补业务配置没写的字段，不覆盖配置。
+        # 界面设置的默认分区参数：作为本次任务的默认值，逐盘覆盖优先。
         self._partition_defaults = dict(partition_defaults or {})
         # 外部工具路径（extGhost / extBcdboot）；空值交给 runner 自身探测。
         # diskpart 固定用系统自带，不再从设置读。
@@ -643,13 +614,8 @@ class WorkflowController:
         used_letters: tuple[str, ...] = ()
 
         try:
-            scanner = getattr(self._service, "scan_protected_snapshot", None)
-            if scanner is not None:
-                disks, used_letters = scanner()
-                disks = tuple(disks)
-            else:
-                # 测试替身/旧服务只有单次扫描接口：退回旧行为。
-                disks = tuple(self._service.scan_protected_disks())
+            disks, used_letters = self._service.scan_protected_snapshot()
+            disks = tuple(disks)
         except Exception as exc:  # noqa: BLE001 - 扫描失败记成阻断项，界面还能打开
             blockers.append(f"硬盘扫描失败：{exc}")
 
@@ -678,13 +644,8 @@ class WorkflowController:
         self._apply_live_safety_flags()
 
         try:
-            scanner = getattr(self._service, "scan_protected_snapshot", None)
-            if scanner is not None:
-                disks, used_letters = scanner()
-                disks = tuple(disks)
-            else:
-                disks = tuple(self._service.scan_protected_disks())
-                used_letters = session.used_letters
+            disks, used_letters = self._service.scan_protected_snapshot()
+            disks = tuple(disks)
         except Exception as exc:
             raise WorkflowError(f"硬盘扫描失败：{exc}") from exc
 

@@ -19,7 +19,7 @@ import {
 import {
   state, diskOf, targetOf, targetError, autoPartitionBytes, syncAutoPartition, addTarget, removeTarget,
   addExtraPartition, removeExtraPartition, selectionPayload, resetWizard, applyFit,
-  reserveGb, reserveEfiMb, dataFs, STEP_LABELS, JOB_STATUS_TEXT,
+  reserveGb, reserveEfiMb, STEP_LABELS, JOB_STATUS_TEXT,
 } from './state.js';
 import { pushLog, toast, confirmDialog, openModal, jobStatusText } from './shell.js';
 import { lostPartitionsText } from './view-main.js';
@@ -247,7 +247,7 @@ function extraRowsHtml(target) {
         <input type="number" min="${MIN_EXTRA_GB}" step="1" value="${esc(extra.sizeGb)}"
           data-size="extra" data-index="${index}" data-disk="${target.diskNumber}" readonly>
         <span class="unit">GB</span>
-        <span class="szsub">${esc(dataFs())} · 剩余自动占满</span>
+        <span class="szsub">NTFS · 剩余自动占满</span>
         <button class="rm" data-remove="${index}" data-disk="${target.diskNumber}" title="删除这个分区">✕</button>
       </div>`).join('');
 }
@@ -281,7 +281,7 @@ function stepSizeHtml() {
         <input type="number" min="${MIN_DATA_GB}" step="1" value="${esc(target.dataGb)}"
           data-size="data" data-disk="${target.diskNumber}"${autoRole(target) === 'data' ? ' readonly' : ''}>
         <span class="unit">GB</span>
-        <span class="szsub">${esc(dataFs())} · ${autoRole(target) === 'data' ? '剩余容量自动占满' : '建完即可用'}</span>
+        <span class="szsub">NTFS · ${autoRole(target) === 'data' ? '剩余容量自动占满' : '建完即可用'}</span>
       </div>
       ${extraRowsHtml(target)}
       ${addButton}

@@ -73,12 +73,6 @@ from app.models import STEP_FAILED, STEP_OK, STEP_SKIPPED, StepResult, WorkerRes
 
 _LOGGER = logging.getLogger(__name__)
 
-# 数据分区只允许 NTFS（见 ``partitions.DATA_FS_CHOICES``）；EFI 固定 FAT32。
-_FS_TOKENS = {"ntfs": "ntfs"}
-
-# 兼容旧名字（外部脚本与测试在用）。
-_partition_verdict = partition_verdict
-
 
 def _make_workdir(disk_number: int) -> str | None:
     """给单个任务开一个独占的临时工作目录（Ghost 在里面写 ghosterr.txt）。
@@ -97,18 +91,6 @@ def _remove_workdir(path: str | None) -> None:
     if not path:
         return
     shutil.rmtree(path, ignore_errors=True)
-
-
-def data_fs_token(payload: Mapping[str, Any]) -> str:
-    """数据分区文件系统：``partition_info.data_fs`` → diskpart 参数。
-
-    现在已经没有第二种可选值：数据分区恒为 NTFS。仍然过一遍白名单、
-    而不是直接返回常量，是为了守住“用户输入不参与拼脚本”这条线——旧任务文件
-    或第三方调用者送进来的 ``data_fs`` 只会被忽略，不会变成格式参数。
-    """
-    info = payload.get("partition_info") if isinstance(payload, Mapping) else None
-    raw = str((info or {}).get("data_fs") or "NTFS").strip().lower()
-    return _FS_TOKENS.get(raw, "ntfs")
 
 
 def prune_runner_logs(log_dir: str | os.PathLike[str], retention_days: int) -> int:
@@ -454,10 +436,8 @@ __all__ = [
     "RunnerError",
     "WindowsDiskRunner",
     "_CommandLog",
-    "_partition_verdict",
     "build_real_runner",
     "create_partition_lines",
-    "data_fs_token",
     "diskpart_lines",
     "msr_delete_lines",
     "option_flag",

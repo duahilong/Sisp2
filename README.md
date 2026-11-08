@@ -73,14 +73,14 @@ python -m pytest tests/ -q
 
 ## 版本与定版
 
-当前版本：**v1.2.0**（破坏性变更：移除演练模式，启动即真实写盘；预览改用只读的
+当前版本：**v1.2.1**（1.2.0 起移除演练模式，启动即真实写盘；预览改用只读的
 `prepare` + `/api/partition/preview`）。功能语义以 tag 上的代码与文档为准；
 变更历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 - 版本号只有一处来源：`app/version.py` 的 `__version__`，`packaging/version_info.txt`
   与它由 `tests/test_packaging.py` 强校验（界面标题、`/api/info`、exe 的 FileVersion 都用它）。
 - 定版就是一个**注释 tag**：tag 指向的提交树 = 那一版的完整快照（源码 + 文档），
-  所以「回到某一版」不需要额外备份：`git checkout v1.1.0`，或 `git archive v1.1.0 -o sisp-1.1.0.zip`（1.2.0 同理）。
+  所以「回到某一版」不需要额外备份：`git checkout v1.1.0`，或 `git archive v1.1.0 -o sisp-1.1.0.zip`（1.2.1 同理）。
 - 打新版（例：`1.1.1` 只修 bug）：改 `app/version.py` 与 `packaging/version_info.txt` →
   在 VM 上跑 `ruff` / `pytest` / `tools/ui_check.py` / `ui_smoke` → 本地 `python packaging/build.py` →
   提交 → `git tag -a v1.1.1 -m "..."` → `git push origin main --tags`。

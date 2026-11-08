@@ -287,13 +287,41 @@ async function main() {
       })`)),
     });
 
-    // 选中第一块可用磁盘 → 下一步
+    // 选中**容量最大**的可用磁盘 → 下一步。
+    // 不能选“第一块”：本机第一块可能只有 100 GB，而下面的快捷容量按钮会点 200，
+    // 那会让界面一开始就报“超过磁盘容量”，断言全部失真（1.2.1 复测时踩到）。
     const chose = await evaluate(`(function () {
-      const pick = document.querySelector('#wzBody .dsel:not([disabled])');
-      if (!pick) return false;
+      // 不用正则：这段代码写在模板字符串里，反斜杠要经过“Node 源码 → 页面源码 →
+      // RegExp”三层转义，很容易变成 [d.] 这种静默失效的写法。容量文本形如
+      // “磁盘 0 · VMware Virtual SATA Hard Drive · 100.00 GB<换行>可选”，按空白切词，
+      // 找到以 GB 开头的词就取它前面的数字。
+      const sizeOf = (el) => {
+        const text = String(((el.querySelector('.dt') || {}).textContent) || '');
+        const words = text.split(' ');
+        let capacity = 0;
+        for (let i = 1; i < words.length; i += 1) {
+          if (words[i].startsWith('GB')) capacity = Number.parseFloat(words[i - 1]) || 0;
+          if (words[i].startsWith('TB')) capacity = (Number.parseFloat(words[i - 1]) || 0) * 1024;
+        }
+        return capacity;
+      };
+      const picks = [...document.querySelectorAll('#wzBody .dsel:not([disabled])')];
+      if (!picks.length) return JSON.stringify({ ok: false, capacityGb: 0 });
+      const pick = picks.sort((a, b) => sizeOf(b) - sizeOf(a))[0];
       pick.click();
-      return true;
+      return JSON.stringify({ ok: true, capacityGb: sizeOf(pick), disk: Number(pick.dataset.disk) });
     })()`);
+    const choseInfo = JSON.parse(chose || '{}');
+    summary.steps.push({ step1pick: choseInfo });
+    if (choseInfo.ok && !choseInfo.capacityGb) {
+      problems.push('无法从磁盘卡片读出容量（选盘逻辑失效，后续容量断言不可信）');
+    }
+    if (choseInfo.ok && choseInfo.capacityGb && choseInfo.capacityGb < 240) {
+      problems.push(
+        '界面冒烟需要一块 ≥240 GB 的可清空盘（第 2 步会点快捷容量 200）：'
+        + `${choseInfo.capacityGb.toFixed(1)} GB 不够`,
+      );
+    }
     if (chose) {
       await sleep(300);
       summary.shots.push(await shoot('04-install-step1-picked'));

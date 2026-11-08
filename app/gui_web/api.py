@@ -12,7 +12,7 @@
 也不 import 除 ``workflow`` 之外的模块，避免把重依赖带进界面进程。
 
 设置相关方法（get_settings / update_settings / reset_settings /
-probe_path / probe_all_paths / pick_path / open_settings_folder），
+probe_path / pick_path / open_settings_folder），
 ``SettingsStore`` 通过构造参数注入，不传时按默认路径创建。
 """
 
@@ -52,9 +52,6 @@ def _scan_summary(disk_number: int) -> dict[str, Any]:
 
     number = int(disk_number)
     summaries = scan_disk_summaries([number])
-    if not summaries:
-        # 定向查不到时退回一次全盘扫描：可能是盘号对不上，也可能是旧脚本行为。
-        summaries = scan_disk_summaries()
     for summary in summaries:
         if int(summary.get("disk_number") or -1) == number:
             return summary
@@ -272,19 +269,19 @@ class WebApi:
         return resolved if root == resolved.parent or root in resolved.parents else None
 
     # ------------------------------------------------------------------ 镜像
-    def probe_images(self, directory: str | None = None, path: str | None = None) -> dict[str, Any]:
+    def probe_images(self, path: str | None = None) -> dict[str, Any]:
         """设置里的两个系统版本（带文件头校验），或单独校验某个 GHO。
 
         不带 ``path`` 时返回 ``{"versions": [...], "default": 第一个可用路径}``：
-        向导第 3 步直接拿它渲染按钮，不再扫描目录（``directory`` 参数只为兼容
-        旧请求体保留，已不再使用）。
+        向导第 3 步直接拿它渲染按钮。装机只认设置里的 A/B 两个槽位，
+        没有“扫描目录挑一个”的入口。
         """
         try:
             from app.modules.image.service import configured_versions, inspect_image
             from app.modules.image.service import probe as probe_image
 
             if path is not None:
-                return ok(probe_image(path=path))
+                return ok(probe_image(str(path)))
 
             versions: list[dict[str, Any]] = []
             for version in configured_versions(self._settings.get()):
@@ -432,11 +429,7 @@ class WebApi:
 
     def _gate(self, disk_number: int, identity: dict[str, Any]) -> Any:
         """分区/引导共用的写盘闸门。"""
-        service = self._wf.service
-        gate = getattr(service, "require_disk_writable", None)
-        if gate is None:  # 测试替身没有该方法时退回“只读扫描”
-            return _scan_summary(disk_number)
-        return gate(disk_number, identity)
+        return self._wf.service.require_disk_writable(disk_number, identity)
 
     # ------------------------------------------------------------------ 设置
     def get_settings(self) -> dict[str, Any]:
@@ -523,12 +516,6 @@ class WebApi:
     def probe_path(self, key: str, path: str | None = None) -> dict[str, Any]:
         try:
             return ok(self._settings.probe(key, path).to_dict())
-        except Exception as exc:  # noqa: BLE001
-            return err("E_SETTINGS", str(exc))
-
-    def probe_all_paths(self) -> dict[str, Any]:
-        try:
-            return ok(self._settings.probe_all())
         except Exception as exc:  # noqa: BLE001
             return err("E_SETTINGS", str(exc))
 

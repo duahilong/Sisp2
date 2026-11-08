@@ -82,8 +82,8 @@ def group_progress(
 ) -> dict[str, dict[str, Any]]:
     """按组算进度（纯函数）：给 ``job.progress.groups`` 用。
 
-    ``completed`` 里的键可能包含未知的附加步骤（例如旧版本写入的
-    历史事件），不属于任何组时忽略——进度分母只算真实阶段。
+    ``completed`` 里出现了不属于任何组的键时直接忽略——进度分母只算
+    真实阶段，调用方多传一个键不该改变百分比。
     """
     done = {str(key) for key in completed}
     groups: dict[str, dict[str, Any]] = {}

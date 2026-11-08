@@ -27,7 +27,7 @@ import time
 from collections.abc import Callable, Iterable
 from typing import Any
 
-__all__ = ["GhostStartGate", "PartitionSequencer", "SequencerLease"]
+__all__ = ["GhostStartGate", "PartitionSequencer"]
 
 # 排队期间的轮询间隔：取消要能在一个可接受的时间内被感知（测试断言 300 ms 内）。
 POLL_SECONDS = 0.2
@@ -148,20 +148,6 @@ class PartitionSequencer:
             if number not in self._done:
                 return number
         return None
-
-
-class SequencerLease:
-    """``with seq.lease(disk):`` —— 无论正常/异常退出都会 :meth:`PartitionSequencer.done`。"""
-
-    def __init__(self, sequencer: PartitionSequencer, disk_number: int) -> None:
-        self._sequencer = sequencer
-        self._disk = int(disk_number)
-
-    def __enter__(self) -> PartitionSequencer:
-        return self._sequencer
-
-    def __exit__(self, *_exc: object) -> None:
-        self._sequencer.done(self._disk)
 
 
 class GhostStartGate:

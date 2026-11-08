@@ -22,7 +22,7 @@
 约定
 ----
 
-- 载荷必须能被 ``json.dumps`` 序列化：它会原样写进 ``JobSpec`` 随任务一起落盘。
+- 载荷必须能被 ``json.dumps`` 序列化：它会原样写进 ``JobSpec`` 留在任务内存里。
 - 空值不写：``build_task_payload`` 会丢掉空字符串 / ``None`` / 空列表，
   这样 ``payload == {}`` 与「什么都没配」等价，下游的 ``or {}`` 判断不会失效。
 - 键名一律用长名（``c_size_gb``）。短名（``c_size`` / ``efi_size`` / ``win_gho``）

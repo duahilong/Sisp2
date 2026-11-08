@@ -9,31 +9,12 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from typing import Any
 
-BYTES_PER_MB = 1024 * 1024
-BYTES_PER_GB = 1024 * 1024 * 1024
-
-
-def format_size(size_bytes: Any) -> str:
-    """把字节数格式化成 ``12.34 GB``。
-
-    与 ``app.modules.disk_info.service.format_size`` 的输出保持一致；
-    这里单独实现一份，避免应用层契约反向依赖 PowerShell 模块。
-    """
-    if size_bytes is None or isinstance(size_bytes, bool) or not isinstance(size_bytes, (int, float)):
-        return "未知"
-    value = float(size_bytes)
-    if math.isnan(value) or math.isinf(value) or value < 0:
-        return "大小异常"
-    units = ["B", "KB", "MB", "GB", "TB"]
-    for unit in units:
-        if value < 1024 or unit == units[-1]:
-            return f"{value:.2f} {unit}"
-        value /= 1024
-    return f"{size_bytes} B"
+# 字节换算与显示只有一份实现（app/units.py），这里重导出是为了让
+# ``from app.application.contracts import format_size`` 的旧调用点继续可用。
+from app.units import format_size
 
 
 @dataclass(frozen=True)

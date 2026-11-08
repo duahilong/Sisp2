@@ -1,8 +1,8 @@
 import json
-import math
 from typing import Any
 
 from app.modules.common.service import POWERSHELL_SCAN_TIMEOUT, run_powershell
+from app.units import format_size
 
 # 保留分区明细：``POWERSHELL_SCRIPT`` 采集每个分区的号、盘符、大小、偏移、
 # 类型、GPT 类型和卷信息，``normalize_partition`` 把原始结构拍平成界面可直接
@@ -106,8 +106,6 @@ $letters += Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Name -match '
 $letters | Select-Object -Unique | Sort-Object
 """.strip()
 
-INVALID_SIZE_DISPLAY = "大小异常"
-UNKNOWN_SIZE_DISPLAY = "未知"
 
 # 一次会话开始/刷新时，把"磁盘快照 + 已用盘符"合并成一次 PowerShell 往返：
 # 两者本来就是同一种只读查询，分两次启动解释器只会白等一倍冷启动时间。
@@ -125,26 +123,6 @@ $letters = @($letters | Select-Object -Unique | Sort-Object)
 } | ConvertTo-Json -Depth 6
 """
 ).strip()
-
-
-def format_size(size_bytes: Any) -> str:
-    if size_bytes is None:
-        return UNKNOWN_SIZE_DISPLAY
-    if isinstance(size_bytes, bool):
-        return INVALID_SIZE_DISPLAY
-    if not isinstance(size_bytes, (int, float)):
-        return INVALID_SIZE_DISPLAY
-
-    value = float(size_bytes)
-    if math.isnan(value) or math.isinf(value) or value < 0:
-        return INVALID_SIZE_DISPLAY
-
-    units = ["B", "KB", "MB", "GB", "TB"]
-    for unit in units:
-        if value < 1024 or unit == units[-1]:
-            return f"{value:.2f} {unit}"
-        value /= 1024
-    return f"{size_bytes} B"
 
 
 def _disk_numbers_env(disk_numbers: Any = None) -> dict[str, str] | None:

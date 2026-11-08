@@ -140,7 +140,7 @@ class ExecutionPlan:
 
 @dataclass(frozen=True)
 class JobSpec:
-    """交给执行器的输入；必须可 JSON 序列化，便于落盘与重放。"""
+    """交给执行器的输入；必须可 JSON 序列化。"""
 
     disk_number: int
     # 这次装机要用的全部参数（形状见 ``app.application.payload.TaskPayload``）。
@@ -148,7 +148,7 @@ class JobSpec:
     expected_identity: dict[str, Any] = field(default_factory=dict)
     drive_letters: dict[str, str] = field(default_factory=dict)
     # 执行器的可选项（临时目录、无人值守应答文件、驱动目录等）；
-    # 由界面设置注入，不写进业务配置文件。
+    # 由界面设置注入，只对本次任务生效。
     runner_options: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:

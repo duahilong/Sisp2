@@ -158,9 +158,9 @@ def test_install_wizard_can_add_extra_partition() -> None:
     assert "addExtraPartition" in state_js
     assert "removeExtraPartition" in state_js
     # 加 E 时与 D 平分容量（走 fitLayout 的 even 分支，和快捷容量同一套算法）；
-    # 文件系统统一走 dataFs()
+    # 文件系统不再由前端传：后端 partitions.DATA_FS_CHOICES 固定 NTFS。
     assert "even: true" in state_js
-    assert "export function dataFs()" in state_js
+    assert "dataFs" not in state_js
 
     css = (UI / "css" / "app.css").read_text(encoding="utf-8")
     assert ".addpart" in css
@@ -435,6 +435,7 @@ def test_last_data_partition_is_always_sent_as_auto(tmp_path: Path) -> None:
     assert len(parts) == 2
     assert parts[0]["size_gb"] == 178.3
     assert parts[-1]["size_gb"] == "auto"
-    assert all(entry["file_system"] == "NTFS" for entry in parts)
+    # 载荷不再携带 file_system：后端按 DATA_FS_CHOICES（NTFS）归一。
+    assert all("file_system" not in entry for entry in parts)
     # 用户把 D 的数字改小也不会改变结果：最后一项永远是 auto（输入框只读）
     assert got["shrunk"]["data_size"] == "auto"

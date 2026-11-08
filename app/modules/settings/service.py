@@ -260,9 +260,6 @@ class SettingsStore:
     def get(self) -> dict[str, Any]:
         return dict(self._data)
 
-    def get_warnings(self) -> list[str]:
-        return list(self._warnings)
-
     def update(self, patch: dict[str, Any] | None) -> dict[str, Any]:
         """合并、整体校验、落盘；任何一项不合法都不写入。"""
         if not isinstance(patch, dict):
@@ -357,9 +354,6 @@ class SettingsStore:
             if found:
                 return str(found)
         return ""
-
-    def probe_all(self) -> dict[str, dict[str, Any]]:
-        return {key: self.probe(key).to_dict() for key in _PATH_KEYS}
 
     # ------------------------------------------------------------------ 业务桥接
     def partition_info(self) -> dict[str, Any]:

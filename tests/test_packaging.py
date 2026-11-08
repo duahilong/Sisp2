@@ -16,7 +16,13 @@ import sys
 from pathlib import Path
 
 from app import resources
-from app.version import VERSION_TUPLE, __version__
+from app.version import __version__
+
+# Windows 版本资源用四段数字；这里按 ``__version__`` 现场算，
+# 不再让运行时代码保留一个只给测试看的常量。
+VERSION_TUPLE = tuple(int(part) for part in __version__.split(".")) + (0,) * (
+    4 - len(__version__.split("."))
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 PACKAGING = ROOT / "packaging"

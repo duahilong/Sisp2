@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from app.modules.settings.service import (
+    _PATH_KEYS,
     DEFAULTS,
     SettingsError,
     SettingsStore,
@@ -30,7 +31,7 @@ def test_loads_defaults_when_file_missing(store: SettingsStore) -> None:
     assert settings["theme"] == "light"
     assert settings["sysDefaultGb"] == 120
     assert settings["dataDefaultGb"] == "auto"
-    assert store.get_warnings() == []
+    assert store.to_dict()["warnings"] == []
 
 
 def test_update_persists_and_reloads(store: SettingsStore) -> None:
@@ -87,7 +88,7 @@ def test_corrupt_file_falls_back_to_defaults(tmp_path: Path) -> None:
     path.write_text("{ not json", encoding="utf-8")
     store = SettingsStore(path, which=lambda _name: None)
     assert store.get()["theme"] == "light"
-    assert any("无法解析" in warning for warning in store.get_warnings())
+    assert any("无法解析" in warning for warning in store.to_dict()["warnings"])
 
 
 def test_invalid_stored_field_is_dropped(tmp_path: Path) -> None:
@@ -99,7 +100,7 @@ def test_invalid_stored_field_is_dropped(tmp_path: Path) -> None:
     store = SettingsStore(path, which=lambda _name: None)
     assert store.get()["theme"] == "light"  # 回到默认
     assert store.get()["sysDefaultGb"] == 300  # 合法项保留
-    assert store.get_warnings()
+    assert store.to_dict()["warnings"]
 
 
 def test_reset_restores_defaults(store: SettingsStore) -> None:
@@ -167,8 +168,9 @@ def test_probe_can_check_a_draft_value(tmp_path: Path) -> None:
     assert store.probe("theme", str(saved)).state == "na"
 
 
-def test_probe_all_covers_every_path_key(store: SettingsStore) -> None:
-    probed = store.probe_all()
+def test_every_path_key_is_probeable(store: SettingsStore) -> None:
+    """每个路径设置项都能单独探测（REST 只提供逐项接口）。"""
+    probed = {key: store.probe(key).to_dict() for key in _PATH_KEYS}
     assert "extGhost" in probed
     assert "sysImageA" in probed
     assert probed["sysImageA"]["state"] == "na"
@@ -213,7 +215,7 @@ def test_load_tolerates_utf8_bom(tmp_path: Path) -> None:
 
     loaded = SettingsStore(path, which=lambda _name: None)
 
-    assert loaded.get_warnings() == []
+    assert loaded.to_dict()["warnings"] == []
     assert loaded.get()["sysDefaultGb"] == 300
     assert loaded.get()["logDir"] == r"D:\logs"
     assert loaded.get()["logLevel"] == "debug"

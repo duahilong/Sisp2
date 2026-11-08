@@ -247,17 +247,6 @@ export function targetError(target) {
   );
 }
 
-/** 数据分区（D 与 E）统一使用的文件系统：恒为 NTFS。
- *
- * 曾经跟随设置里的 `defaultFs`（NTFS / exFAT）。exFAT 已从产品里去掉：
- * 它对装机盘没有实际收益（没有 NTFS 的权限/日志/压缩），却让“格式化参数”
- * 多出一处必须和设置页同步的分叉点。这里保留函数名，是为了让调用点
- * （`view-install.js` 的显示、`selectionPayload()` 的 `file_system`）不必改动。
- */
-export function dataFs() {
-  return 'NTFS';
-}
-
 /** 加一个数据分区（E）。平分剩余容量；放不下两张下限时返回 false。 */
 export function addExtraPartition(diskNumber) {
   const target = targetOf(diskNumber);
@@ -283,7 +272,7 @@ export function addExtraPartition(diskNumber) {
     && fit.dataGb >= MIN_DATA_GB;
   if (!even) return false;
 
-  target.extras.push({ sizeGb: MIN_EXTRA_GB, fs: dataFs() });
+  target.extras.push({ sizeGb: MIN_EXTRA_GB });
   applyFit(target, fit);
   state.wizard.ack = false;
   return true;
@@ -340,19 +329,16 @@ export function removeExtraPartition(diskNumber, index) {
  */
 export function selectionPayload() {
   const selection = {};
-  const fs = dataFs();
   for (const target of state.wizard.targets) {
     const extras = Array.isArray(target.extras) ? target.extras : [];
     const entry = { c_size: Number(target.sysGb) };
     if (extras.length) {
       // 有额外分区时必须给出显式列表：第一个是 D（显式），最后一个是 auto。
-      // 文件系统统一取 dataFs()，界面上的 E 没有选择器（与 D 一致）。
+      // 数据分区恒为 NTFS（后端 partitions.DATA_FS_CHOICES），所以不再逐项发
+      // file_system：少一个“界面/后端各写一遍”的常量。
       const list = [
-        { size_gb: Number(target.dataGb), file_system: fs },
-        ...extras.map((extra) => ({
-          size_gb: Number(extra.sizeGb),
-          file_system: fs,
-        })),
+        { size_gb: Number(target.dataGb) },
+        ...extras.map((extra) => ({ size_gb: Number(extra.sizeGb) })),
       ];
       list[list.length - 1].size_gb = 'auto';
       entry.data_partitions = list;

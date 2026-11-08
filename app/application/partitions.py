@@ -34,11 +34,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
-from app.application.contracts import format_size
 from app.application.payload import PartitionLayoutError, require_layout_keys
 from app.application.runner_utils import to_int, to_text
-
-BYTES_PER_MB = 1024 * 1024
+from app.units import BYTES_PER_MB, format_size
 
 # EFI 分区：太小放不下引导文件，太大浪费；与设置页的范围保持一致。
 EFI_MIN_MB = 64

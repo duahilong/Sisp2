@@ -602,14 +602,6 @@ def test_eight_three_partition_disks_fill_the_pool() -> None:
     assert allocations[7] == {"efi": "Z", "windows": "A", "data": "B"}
 
 
-def test_service_fallback_pool_matches_drive_letters() -> None:
-    """service 里的本地兜底池必须和 app.drive_letters 完全一致，否则行为分叉。"""
-    from app.application import service
-    from app.drive_letters import AVAILABLE_DRIVE_LETTERS
-
-    assert service.AVAILABLE_DRIVE_LETTERS == AVAILABLE_DRIVE_LETTERS
-
-
 def test_drive_letters_report_short_pool() -> None:
     with pytest.raises(RuntimeError) as excinfo:
         build_drive_letter_allocations([1], [letter for letter in "EFGHIJKLMNOPQRSTUVWXY"], {1: 1})
@@ -648,6 +640,9 @@ class _FakeService:
 
     def scan_protected_disks(self, excluded_names: Any = None) -> list[DiskInfo]:
         return list(self.disks)
+
+    def scan_protected_snapshot(self) -> tuple[list[DiskInfo], tuple[str, ...]]:
+        return list(self.disks), ()
 
     def build_selection_plan(self, payload, summaries, selected, **kwargs):
         self.extra_counts = dict(kwargs.get("extra_counts") or {})

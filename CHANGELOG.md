@@ -7,6 +7,54 @@ tag 上的提交树就是那一版的完整代码与文档快照。
 定版（`v1.1.0`）之后只做优化与修复：功能以 tag 为准，`main` 继续向前走，
 需要回到某一版时 `git checkout v1.1.0` 或 `git archive v1.1.0`。
 
+## 1.2.1 — 清理非业务代码（无行为变化）
+
+这一版不新增功能，只删除“为测试 / 为兼容 / 为已下线功能”而留在生产路径上的
+代码，并把重复的小工具收敛成一份。删除依据是逐符号的引用扫描（AST + 全仓
+grep + 测试/文档/前端），保留的每一项都有真实调用方。
+
+**安全向**
+
+- 删掉 `SispService.scan_disks()` / `scan_snapshot()` 在 `disk_info` 无法导入时
+  的静默回退（`_SCAN_SCRIPT` / `_scan_with_powershell` / `_normalize_summary`）。
+  回退摘要没有分区与盘符，"包含系统盘符"的保护会静默失效；现在缺模块直接报错。
+  同时删除构造参数 `powershell=`（只服务于那条回退）。
+- `WebApi._gate()` 不再对"没有 `require_disk_writable` 的测试替身"降级为只读扫描，
+  写盘闸门只有一条路径。
+- 盘符分配只保留 `app.drive_letters` 一份实现，删除 `service` 内的本地兜底池
+  （`AVAILABLE_DRIVE_LETTERS` / `LETTERS_PER_DISK` / `DRIVE_LETTER_ROLES`）。
+
+**删除的死代码 / 测试专用入口**
+
+- `workflow._apply_image_defaults()`、`workflow._image_blocker()`
+- `coordination.SequencerLease`
+- `image.find_default_image()`、`list_directory()`、`KIND_LEGACY`/`KIND_ISO`、
+  `LIST_SUFFIXES`（目录列举链整条下线；镜像入口只有设置 A/B 槽位）
+- `real_runner.data_fs_token()` / `_FS_TOKENS`、`_partition_verdict` 别名
+- `SettingsStore.get_warnings()`、`probe_all()` 与 `POST /api/settings/probe_all`
+  （设置页一直用的是逐项 `probe`）
+- `version.VERSION_TUPLE`（测试按 `__version__` 现场计算）
+- `api.ProbeImages(directory=...)` 兼容参数、`server` 里的 `directory` 转发
+- 前端：`state.dataFs()`、extras 的 `fs` 字段、payload 里的 `file_system`
+  （数据分区恒为 NTFS，后端 `DATA_FS_CHOICES` 是唯一判定）
+
+**一致性**
+
+- 新增 `app/units.py`：`BYTES_PER_MB` / `BYTES_PER_GB` / `format_size` 的唯一实现；
+  `contracts`、`partitions`、`service`、`disk_info` 改为引用它（`contracts` 继续
+  重导出，旧 import 不受影响）。
+- `service` 的 `_text`/`_as_int` 改用 `runner_utils.to_text`/`to_int`。
+- 清掉"业务配置文件 / 任务落盘 / 重放"等已不存在机制的注释。
+
+**版本与验证**
+
+- 版本号升到 1.2.1，`packaging/version_info.txt` 同步。
+- 测试同步：删除随功能一起消失的用例，新增/改写权限与探测用例；全部测试与
+  真实写盘只在 Windows VM 上执行（见 `Docs/历史测试记录.md`）。
+- `tools/ui_smoke.mjs` 改为选择**容量最大**的可选盘，并前置断言该盘 ≥ 240 GB：
+  原来固定选第一块盘，小盘上「快捷容量 200」会让第 2 步整组断言失真（旧 `HEAD` 上
+  同样失败，属测试工具的环境假设，不是界面回归）。已在 500 GB VHD 上验证 `problems` 为空。
+
 ## 1.2.0 — 移除演练模式（破坏性）
 
 启动即真实模式。`--dry-run`、`SispService(dry_run=...)`、`JobSpec/ExecutionPlan.dry_run`、
@@ -51,10 +99,11 @@ tag 上的提交树就是那一版的完整代码与文档快照。
   误写 `manager.executor`（`JobManager` 读的是 `_executor`，旧代码靠 dry-run 短路才“通过”）；
   `test_service_without_runner_refuses_execution` 未给白名单/身份，断言的是白名单文案而非执行器文案。
 
-## 未发布（main）— 死代码清理
+## 历史：1.2.0 之后的死代码清理（已并入 1.2.1）
 
 定版后只做优化与修复，不改变既有功能语义。这一批只删“定义了但没人用”的代码，
-行为、接口与失败文案均未变（22 个文件，+16 / −252 行）。
+行为、接口与失败文案均未变（22 个文件，+16 / −252 行）。下面的删除项已包含在
+1.2.1 中，保留本节是为了对照当时的提交（`d3d49ee`）。
 
 ### 清理
 
@@ -73,7 +122,7 @@ tag 上的提交树就是那一版的完整代码与文档快照。
   `gui_web.main._wait_until_ready(server → 去掉)`；对应测试的 monkeypatch 同步收敛为单参。
 - **前端死导出**：`dom.setText/timeOf`、`shell.pushJobLog/isModalOpen`、
   `state.totalPartitions/activeJobs/targetsValid/diskFreeGb`、`view-main.jobProgressText`、
-  `view-settings.probeAllSettings`。REST 接口 `probe_all` 与 `api.probeAllPaths()` 保留。
+  `view-settings.probeAllSettings`。（当时保留的 `probe_all` 接口已在 1.2.1 删除。）
 - 文档同步：`Docs/安全边界.md` 删掉“可选 JSONL 事件落盘”的说法（该功能已不存在）。
 
 ### 测试（全部在 VM 上执行）
@@ -89,7 +138,7 @@ tag 上的提交树就是那一版的完整代码与文档快照。
   `bcdboot F:\Windows /s E: /f UEFI` 成功，`boot` 步骤校验通过；收尾释放 EFI 盘符 E；
   日志里 8 条静默心跳（每 20 s 一条），证明写镜像期间仍可观察。
 
-## 未发布（main）— 执行可见性与定向扫描
+## 历史：执行可见性与定向扫描（已含在 1.2.0）
 
 定版后只做优化与修复，不改变既有功能语义。这一批改了两处。
 

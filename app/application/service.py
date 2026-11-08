@@ -17,74 +17,39 @@
 ``WorkflowController.prepare()`` 与 ``partitions.preview_segments()``；
 ``execute_spec()`` 一旦被调用就是要写盘。
 
-导入说明：本模块对 ``app.modules.disk_info`` / ``app.drive_letters`` 的引用
-放在函数内部并带 ``ImportError`` 兜底，这两个模块不可用时仍能 ``import``
-本模块，并退回到内置的只读扫描与同规则盘符分配。
+扫描依赖 ``app.modules.disk_info``：它不可用时直接报错，不再退回一份
+不查分区的内置脚本——那种摘要没有 ``partitions`` / ``drive_letters``，
+会让“包含系统盘符”的保护静默失效。
 """
 
 from __future__ import annotations
 
 import inspect
-import json
 import logging
 import os
-import shutil
-import subprocess
 import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from app.application.contracts import (
-    DiskInfo,
-    SelectionPlan,
-    format_size,
-)
+from app.application.contracts import DiskInfo, SelectionPlan
+from app.application.runner_utils import to_int
 from app.models import WorkerResult
+
+# 通过模块属性调用（而不是 from ... import 绑定局部名）：测试用
+# monkeypatch.setattr(disk_info, "scan_disk_summaries", ...) 替换扫描实现，
+# 绑死局部名会让替身静默失效——这正是 2026-11-06 事故的形态。
+# 注意要拿 service 模块本身：`from app.modules import disk_info` 拿到的是包，
+# 包里没有这些函数。
+from app.modules.disk_info import service as disk_info_service
 from app.orchestrator import build_worker_disk_identity, identity_matches
+from app.units import format_size
 
 _LOGGER = logging.getLogger(__name__)
 
-# 与 app.drive_letters 保持一致的三分区布局；本地兜底时复用同一套常量。
-# E–Z 优先，A/B 兜底（见 app/drive_letters.py 的说明）。
-AVAILABLE_DRIVE_LETTERS = [*list("EFGHIJKLMNOPQRSTUVWXYZ"), "A", "B"]
-LETTERS_PER_DISK = 3
-DRIVE_LETTER_ROLES = ("efi", "windows", "data")
-
 # 进度回调签名：on_step(step_key, status, message)；status 取 app.models.STEP_*。
 StepReporter = Callable[..., None]
-
-POWERSHELL_TIMEOUT = 60.0
-BYTES_PER_MB = 1024 * 1024
-BYTES_PER_GB = 1024 * 1024 * 1024
-
-# 只读扫描脚本：不 select、不 clean，只 Get-Disk / Get-Partition。
-_SCAN_SCRIPT = r"""
-$ErrorActionPreference = 'Stop'
-$items = foreach ($disk in Get-Disk) {
-    $letters = @(
-        Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue |
-            Where-Object { $_.DriveLetter } |
-            ForEach-Object { [string]$_.DriveLetter }
-    )
-    [pscustomobject]@{
-        disk_number     = [int]$disk.Number
-        model           = [string]$disk.FriendlyName
-        serial_number   = [string]$disk.SerialNumber
-        unique_id       = [string]$disk.UniqueId
-        size_bytes      = [long]$disk.Size
-        partition_style = [string]$disk.PartitionStyle
-        bus_type        = [string]$disk.BusType
-        is_boot         = [bool]$disk.IsBoot
-        is_system       = [bool]$disk.IsSystem
-        is_offline      = [bool]$disk.IsOffline
-        is_read_only    = [bool]$disk.IsReadOnly
-        drive_letters   = $letters
-    }
-}
-@($items) | ConvertTo-Json -Depth 4 -Compress
-"""
 
 
 def _call_runner(
@@ -104,28 +69,6 @@ def _call_runner(
     return runner(spec, cancel_event)
 
 
-def _text(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _as_int(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    if isinstance(value, str):
-        try:
-            return int(float(value.strip()))
-        except ValueError:
-            return None
-    return None
-
-
 def _wanted_numbers(disk_numbers: Sequence[int] | None) -> list[int] | None:
     """整理定向扫描的盘号；``None`` 表示全盘，空列表也按全盘处理。
 
@@ -140,7 +83,7 @@ def _wanted_numbers(disk_numbers: Sequence[int] | None) -> list[int] | None:
     except TypeError:
         return None
     for item in items:
-        number = _as_int(item)
+        number = to_int(item)
         if number is not None and number >= 0 and number not in numbers:
             numbers.append(number)
     return numbers or None
@@ -154,35 +97,6 @@ def _system_drive_letter() -> str | None:
     return Path("/").anchor[:1].upper() or None
 
 
-def _normalize_summary(raw: Mapping[str, Any]) -> dict[str, Any]:
-    """把 PowerShell 的原始字段统一成 ``DiskInfo.from_summary`` 认得的形状。"""
-    size_bytes = _as_int(raw.get("size_bytes", raw.get("Size")))
-    letters = raw.get("drive_letters") or raw.get("DriveLetters") or []
-    if isinstance(letters, str):
-        letters = [letters]
-    normalized_letters = [
-        str(letter).strip().upper()
-        for letter in letters
-        if str(letter).strip()
-    ]
-    return {
-        "disk_number": _as_int(raw.get("disk_number", raw.get("Number"))) or 0,
-        "model": _text(raw.get("model") or raw.get("friendly_name") or raw.get("FriendlyName")),
-        "serial_number": _text(raw.get("serial_number") or raw.get("SerialNumber")),
-        "unique_id": _text(raw.get("unique_id") or raw.get("UniqueId")),
-        "size_bytes": size_bytes,
-        "size_display": format_size(size_bytes),
-        "partition_style": _text(raw.get("partition_style") or raw.get("PartitionStyle")),
-        "bus_type": _text(raw.get("bus_type") or raw.get("BusType")),
-        "drive_letters": normalized_letters,
-        "is_boot": bool(raw.get("is_boot", raw.get("IsBoot", False))),
-        "is_system": bool(raw.get("is_system", raw.get("IsSystem", False))),
-        "is_offline": bool(raw.get("is_offline", raw.get("IsOffline", False))),
-        "is_read_only": bool(raw.get("is_read_only", raw.get("IsReadOnly", False))),
-        "partitions": list(raw.get("partitions") or []),
-    }
-
-
 class SispService:
     """应用服务门面；所有外部依赖都可注入，默认实现全部是只读的。"""
 
@@ -192,7 +106,6 @@ class SispService:
         allowed_disk_numbers: Iterable[int] | None = None,
         real_runner: Callable[[Any, threading.Event], WorkerResult] | None = None,
         disk_scanner: Callable[[], list[dict[str, Any]]] | None = None,
-        powershell: str | None = None,
         protect_system_disk: bool = True,
     ) -> None:
         # 安全开关由界面设置里的 protectSystemDisk 驱动。
@@ -206,7 +119,6 @@ class SispService:
         )
         self._real_runner = real_runner
         self._disk_scanner = disk_scanner
-        self._powershell = powershell
 
     # ------------------------------------------------------------------ 扫描
     def scan_disks(
@@ -219,27 +131,20 @@ class SispService:
         冷启动 + 全部分区/卷），现在只查目标盘；实测 3 块盘约 0.99 s → 0.85 s，
         主要成本仍是 PowerShell 解释器启动。
 
-        优先用 ``app.modules.disk_info.service.scan_disk_summaries``；
-        该模块不可用时退回到本模块内置的 ``Get-Disk`` 扫描（不支持定向，
-        查完再按盘号过滤）。
+        扫描实现是 ``app.modules.disk_info.service.scan_disk_summaries``；
+        它不可用时直接报错（没有“预装之外还能跑”的降级脚本）。
         """
         wanted = _wanted_numbers(disk_numbers)
         if self._disk_scanner is not None:
             items = [dict(item) for item in self._disk_scanner()]
         else:
-            try:
-                from app.modules.disk_info.service import scan_disk_summaries
-            except ImportError:
-                _LOGGER.debug("disk_info 模块不可用，使用内置只读扫描")
-                items = self._scan_with_powershell()
-            else:
-                items = [dict(item) for item in scan_disk_summaries(wanted)]
+            items = [dict(item) for item in disk_info_service.scan_disk_summaries(wanted)]
         if wanted is None:
             return items
         return [
             item
             for item in items
-            if _as_int(item.get("disk_number")) in wanted
+            if to_int(item.get("disk_number")) in wanted
         ]
 
     def scan_snapshot(self) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
@@ -250,45 +155,10 @@ class SispService:
         """
         if self._disk_scanner is not None:
             return ([dict(item) for item in self._disk_scanner()], ())
-        try:
-            from app.modules.disk_info.service import scan_snapshot
-        except ImportError:
-            _LOGGER.debug("disk_info 模块不可用，快照退化为单次全盘扫描")
-            return (self.scan_disks(), ())
-        data = scan_snapshot()
+        data = disk_info_service.scan_snapshot()
         disks = [dict(item) for item in data.get("disks") or ()]
         letters = tuple(str(item).strip().upper() for item in data.get("used_letters") or () if str(item).strip())
         return (disks, letters)
-
-    def _scan_with_powershell(self) -> list[dict[str, Any]]:
-        shell = self._powershell or shutil.which("powershell") or shutil.which("pwsh")
-        if not shell:
-            raise RuntimeError("未找到 powershell/pwsh，无法扫描硬盘")
-
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-        completed = subprocess.run(  # noqa: S603 - 固定脚本，不含用户输入
-            [shell, "-NoProfile", "-NonInteractive", "-Command", _SCAN_SCRIPT],
-            capture_output=True,
-            timeout=POWERSHELL_TIMEOUT,
-            creationflags=creationflags,
-            check=False,
-        )
-        if completed.returncode != 0:
-            detail = (completed.stderr or b"").decode("mbcs", errors="replace").strip()
-            raise RuntimeError(f"硬盘扫描失败（退出码 {completed.returncode}）: {detail[:500]}")
-
-        text = completed.stdout.decode("utf-8-sig", errors="replace").strip()
-        if not text:
-            return []
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"硬盘扫描输出不是合法 JSON: {exc}") from exc
-        if isinstance(payload, Mapping):
-            payload = [payload]
-        if not isinstance(payload, list):
-            raise TypeError("硬盘扫描输出格式异常")
-        return [_normalize_summary(item) for item in payload if isinstance(item, Mapping)]
 
     def scan_protected_disks(self) -> list[DiskInfo]:
         """扫描并标记保护状态；被保护的盘 ``is_selectable=False``。"""
@@ -377,7 +247,7 @@ class SispService:
 
         by_number: dict[int, Mapping[str, Any]] = {}
         for summary in summaries:
-            number = _as_int(summary.get("disk_number"))
+            number = to_int(summary.get("disk_number"))
             if number is None:
                 continue
             by_number[number] = summary
@@ -406,17 +276,12 @@ class SispService:
                     used_letters.add(text)
         else:
             try:
-                from app.modules.disk_info.service import scan_used_drive_letters
-            except ImportError:
-                _LOGGER.debug("disk_info 模块不可用，跳过系统盘符扫描")
-            else:
-                try:
-                    for letter in scan_used_drive_letters():
-                        text = str(letter).strip().upper()
-                        if text:
-                            used_letters.add(text)
-                except Exception as exc:  # noqa: BLE001 - 扫描失败不阻断建计划
-                    _LOGGER.warning("扫描系统已用盘符失败，仅使用磁盘摘要中的盘符: %s", exc)
+                for letter in disk_info_service.scan_used_drive_letters():
+                    text = str(letter).strip().upper()
+                    if text:
+                        used_letters.add(text)
+            except Exception as exc:  # noqa: BLE001 - 扫描失败不阻断建计划
+                _LOGGER.warning("扫描系统已用盘符失败，仅使用磁盘摘要中的盘符: %s", exc)
 
         if resource_resolver is not None:
             for number in disk_numbers:
@@ -427,7 +292,7 @@ class SispService:
                     break
                 if not isinstance(required, int) or required <= 0:
                     break
-                size_bytes = _as_int(by_number[number].get("size_bytes")) or 0
+                size_bytes = to_int(by_number[number].get("size_bytes")) or 0
                 if size_bytes and size_bytes < required:
                     raise ValueError(
                         f"硬盘 {number} 容量不足：需要 {format_size(required)}，"
@@ -447,31 +312,12 @@ class SispService:
         forbidden: set[str],
         extra_counts: Mapping[int, int] | None = None,
     ) -> dict[int, dict[str, str]]:
-        """优先复用 ``app.drive_letters``；不可用时用同规则本地分配。"""
-        extra_counts = dict(extra_counts or {})
-        try:
-            from app.drive_letters import build_drive_letter_allocations
-        except ImportError:
-            pass
-        else:
-            return build_drive_letter_allocations(
-                list(disk_numbers), sorted(forbidden), extra_counts
-            )
+        """盘符分配只有一份实现（``app.drive_letters``），这里不复制规则。"""
+        from app.drive_letters import build_drive_letter_allocations
 
-        from app.drive_letters import letter_roles
-
-        pool = [letter for letter in AVAILABLE_DRIVE_LETTERS if letter not in forbidden]
-        allocations: dict[int, dict[str, str]] = {}
-        index = 0
-        for number in disk_numbers:
-            extra = max(0, min(int(extra_counts.get(number, 0)), 1))
-            need = LETTERS_PER_DISK + extra
-            if index + need > len(pool):
-                raise ValueError(f"可用盘符不足，无法为硬盘 {number} 分配 {need} 个盘符")
-            letters = pool[index:index + need]
-            allocations[number] = dict(zip(letter_roles(extra), letters, strict=False))
-            index += need
-        return allocations
+        return build_drive_letter_allocations(
+            list(disk_numbers), sorted(forbidden), dict(extra_counts or {})
+        )
 
     # ------------------------------------------------------------------ 执行
     def execute_spec(
@@ -564,6 +410,6 @@ class SispService:
         """按盘号定向复核（只查这一块盘，不再全盘扫描）。"""
         number = int(disk_number)
         for summary in self.scan_disks([number]):
-            if _as_int(summary.get("disk_number")) == number:
+            if to_int(summary.get("disk_number")) == number:
                 return summary
         return None

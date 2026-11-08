@@ -82,6 +82,9 @@ class _FakeService:
     def scan_protected_disks(self, excluded_names: Any = None) -> list[DiskInfo]:
         return list(self.disks)
 
+    def scan_protected_snapshot(self) -> tuple[list[DiskInfo], tuple[str, ...]]:
+        return list(self.disks), ()
+
     def build_selection_plan(self, payload, summaries, selected, **kwargs):
         letters = {number: {"efi": "E", "windows": "F", "data": "G"} for number in selected}
         return SimpleNamespace(drive_letter_allocations=letters)
@@ -155,20 +158,7 @@ def test_prepare_grants_only_selected_disks_when_no_explicit_allowlist():
     assert "选中" in checks["write_allowlist"].message
 
 
-def test_image_blocker_helper_is_pure(tmp_path):
-    """``_image_blocker`` 只看 payload 里的镜像路径，不碰磁盘。"""
-    from app.application.workflow import _image_blocker
-
-    exists = tmp_path / "ok.GHO"
-    exists.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
-    assert _image_blocker(None) is None
-    assert _image_blocker({"image_info": {}}) is None
-    assert _image_blocker({"image_info": {"image_path": str(exists)}}) is None
-    missing = _image_blocker({"image_info": {"image_path": str(tmp_path / "no.GHO")}})
-    assert missing and "镜像文件不存在" in missing
-
-
-def test_per_disk_image_override_recomputes_image_blocker(tmp_path):
+def test_per_disk_image_override_recomputes_image_problems(tmp_path):
     """第 3 步换了镜像之后，计划里的“镜像文件不存在”必须跟着重算。
 
     会话级预检只在 ``start()`` 里按配置文件算一次；如果计划直接沿用那份阻断项，

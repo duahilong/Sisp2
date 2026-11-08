@@ -36,7 +36,6 @@ from app.modules.image.service import (
     configured_versions,
     find_version,
     inspect_image,
-    list_directory,
 )
 from app.safety_guard import RealDiskBlocked, ensure_command_allowed, is_dangerous_command
 
@@ -227,24 +226,6 @@ def test_inspect_image_rejects_non_gho(tmp_path, name: str) -> None:
     target.write_bytes(b"x")
     with pytest.raises(ImageError):
         inspect_image(target)
-
-
-def test_list_directory_marks_kinds(tmp_path) -> None:
-    (tmp_path / "a.GHO").write_bytes(GHO_MAGIC)
-    (tmp_path / "b.ISO").write_bytes(b"x")
-    (tmp_path / "c.wim").write_bytes(b"x")
-    (tmp_path / "readme.txt").write_bytes(b"x")
-    listing = list_directory(tmp_path)
-    kinds = {item["name"]: item["kind"] for item in listing["images"]}
-    assert kinds == {"a.GHO": "gho", "b.ISO": "iso", "c.wim": "legacy"}
-    assert [item["installable"] for item in listing["images"] if item["kind"] == "gho"] == [True]
-
-
-def test_list_directory_requires_directory(tmp_path) -> None:
-    with pytest.raises(ImageError):
-        list_directory("")
-    with pytest.raises(ImageError):
-        list_directory(tmp_path / "nope")
 
 
 # ---------------------------------------------------------------- 阶段

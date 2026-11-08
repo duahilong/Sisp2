@@ -41,7 +41,7 @@ python -m app.gui_web.main --serve --port 8765
 | `GET /api/jobs/{job_id}` | 单任务查询（含 `progress`） |
 | `GET /api/jobs/{job_id}/log?tail=200` | 任务日志尾部；只允许日志目录（`logDir`，留空时是 `%APPDATA%\Sisp\logs`）下的 `.log` 文件，越界返回 `E_PATH`。任务运行中 `details["log_path"]` 还不存在，此时按文件名里的盘号（`disk-runner-d<N>-*.log`）找「不早于任务启动时刻」的最新一份；都没有则返回 `message` 说明原因 |
 | `POST /api/partition/preview` | `{disk_number?}`；返回**真实会执行的三段 diskpart 脚本**（只读，需先 `/api/prepare`；与执行器同源生成） |
-| `POST /api/images` | 不带 `path` 时返回设置里的两个系统槽位 `{versions: [{id, label, path, ok, exists, reason, size_display}], default}`（每个都读文件头 `FE EF`）；带 `path` 时只校验那一个 GHO（返回 `magic_ok`）。`directory` 参数仅兼容旧请求体，已不再使用。全部是纯文件读取，不 spawn 任何进程 |
+| `POST /api/images` | 不带 `path` 时返回设置里的两个系统槽位 `{versions: [{id, label, path, ok, exists, reason, size_display}], default}`（每个都读文件头 `FE EF`）；带 `path` 时只校验那一个 GHO（返回 `magic_ok`）。请求体只需要 `path`；不传就是设置槽位列表。全部是纯文件读取，不 spawn 任何进程 |
 | `GET /api/boot/report` | 扫描各盘的 Windows 目录与 ESP，返回可修复性报告 |
 | `POST /api/boot/repair` | `{disk_number}`；临时盘符挂 ESP → `bcdboot … /f UEFI` → 重新扫描，结束必定释放盘符；真实模式受写盘闸门约束 |
 | `POST /api/events/poll` | `{cursor, limit}`，游标轮询补发 |
@@ -49,7 +49,6 @@ python -m app.gui_web.main --serve --port 8765
 | `GET /api/settings`、`PUT /api/settings`、`DELETE /api/settings` | 读取、patch 更新、重置设置；patch 任一项非法整体拒绝 |
 | `POST /api/settings/export`、`POST /api/settings/import` | 导出/导入设置（封套 `{"version":1,"settings":{…}}`；导入任一字段非法则整体拒绝） |
 | `POST /api/settings/probe` | `{key, path?}` 路径探测；给 `path` 时探测这个“草稿值”（设置页选完还没保存），不给就探测已保存值 |
-| `POST /api/settings/probe_all` | 探测路径设置 |
 | `POST /api/settings/open_folder` | 打开设置文件夹（Windows） |
 | `POST /api/dialog/pick` | `{key, kind}` 弹原生文件/目录选择框（`file` / `dir` / `save`）。由本进程用 System.Windows.Forms / `IFileOpenDialog` 弹，**不依赖 pywebview 窗口**（桌面模式下窗口在父进程，API 在提权子进程）；只返回 `{path}`，**不写入设置**，由界面放进草稿等“保存设置” |
 
