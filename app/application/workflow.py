@@ -72,7 +72,6 @@ _CHECK_KEYS = {
 
 # 基础三分区布局；额外数据分区（E）会再加一个 ``data2``
 _PLAN_STEP_KEYS = ("efi", "windows", "data")
-_DRY_RUN_WARNING = "dry-run 模式：只展示执行计划，不会执行任何写盘操作"
 _DESTRUCTIVE_WARNING = "破坏性操作：将清空目标硬盘全部数据，请再次核对硬盘编号和身份"
 _CANCEL_WARNING = "取消为协作式：当前步骤完成后才会停止"
 BYTES_PER_MB = 1024 * 1024
@@ -94,14 +93,12 @@ class SessionState:
     disks: tuple[DiskInfo, ...] = ()
     blockers: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
-    dry_run: bool = False
     # 会话快照里顺带扫到的系统已用盘符（含幽灵盘符），`prepare()` 分配盘符时
     # 直接复用，不再单独启动一次 PowerShell。
     used_letters: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "dry_run": self.dry_run,
             "checks": [check.to_dict() for check in self.checks],
             "disks": [disk.to_dict() for disk in self.disks],
             "blockers": list(self.blockers),
@@ -362,7 +359,6 @@ class WorkflowController:
         job_manager: JobManager | None = None,
         *,
         preflight_runner: PreflightRunner | None = None,
-        dry_run: bool = False,
         worker_interval: float = 0.0,
         max_parallel: int = 0,
         log_dir: str | None = None,
@@ -375,10 +371,6 @@ class WorkflowController:
         protect_system_disk: bool = True,
         settings_provider: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
-        self._dry_run = bool(dry_run)
-        # 构造时的 True 是硬上限：--dry-run 启动后，UI 或 API 只能把会话
-        # 降级为演练，不能反过来升级为真实写盘。
-        self._forced_dry_run = bool(dry_run)
         self._worker_interval = max(float(worker_interval), 0.0)
         # 0 表示“按本批任务数放开”：几张盘就几个线程，分区组由
         # ``PartitionSequencer`` 串行化，系统组（Ghost/引导）并行。
@@ -407,11 +399,10 @@ class WorkflowController:
         self._settings_provider = settings_provider
         # 上一次 prepare() 因“无显式白名单”而隐式加入的盘号；下次 prepare/start 时撤销。
         self._implicit_allowlist: set[int] = set()
-        # 服务必须跟着控制器的开关走——dry-run、写盘白名单、执行器
-        # 三者由控制器统一装配，不各自取默认值。
+        # 服务必须跟着控制器走——白名单与执行器由控制器统一装配，不各自取默认值。
         self._service_injected = service is not None
         self._service = service if service is not None else self._build_service()
-        # 默认执行器直接调本会话的 service；旧的 JobManager 会另造一个 dry-run 服务。
+        # 默认执行器直接调本会话的 service。
         self._manager = job_manager or JobManager(
             executor=self._execute_spec,
         )
@@ -435,7 +426,6 @@ class WorkflowController:
                 bcdboot=self._tool_paths.get("bcdboot"),
             )
         return SispService(
-            dry_run=bool(self._dry_run),
             allowed_disk_numbers=self._allowed_disk_numbers or (),
             real_runner=runner,
             protect_system_disk=self._protect_system_disk,
@@ -449,13 +439,9 @@ class WorkflowController:
     ) -> WorkerResult:
         """``JobManager`` 的默认执行器：走本会话的 service，不再另造一个。
 
-        策略同步的边界：**只降不升**。这个任务是演练时把共享 service 降级为
-        演练（多盘并发下所有任务同模式，赋值幂等）；升级（真实模式）由控制面
-        ``start()`` / ``prepare()`` / ``confirm()`` 统一处理——每个任务都去改
-        同一个 service 对象，并发时就是数据竞争。
+        写盘白名单与保护开关由控制面 ``start()`` / ``prepare()`` / ``confirm()``
+        统一处理；任务本身不再修改共享 service 的策略，避免并发数据竞争。
         """
-        if bool(getattr(spec, "dry_run", False)):
-            self._sync_service_policy(dry_run=True)
         execute = self._service.execute_spec
         try:
             accepts = "on_step" in inspect.signature(execute).parameters
@@ -492,19 +478,8 @@ class WorkflowController:
             return frozenset(int(number) for number in attribute)
         return None
 
-    def _resolve_dry_run(self, dry_run: bool | None = None) -> bool:
-        """计算本次操作的有效模式；``_forced_dry_run`` 为真时永远是演练。"""
-        if self._forced_dry_run:
-            return True
-        if dry_run is None:
-            return bool(self._dry_run)
-        return bool(dry_run)
-
-    def _sync_service_policy(self, *, dry_run: bool | None = None) -> None:
-        """把控制器的当前开关同步给服务；外部注入的 service 只同步白名单。"""
-        if dry_run is not None and not self._service_injected:
-            # 即使调用方误传 False，构造时锁定的演练上限也不能被突破。
-            self._service.dry_run = self._resolve_dry_run(dry_run)
+    def _sync_service_policy(self) -> None:
+        """把控制器的白名单同步给服务；外部注入的 service 只同步白名单。"""
         allowlist = self._explicit_allowlist()
         if allowlist is not None:
             self._service.allowed_disk_numbers = frozenset(allowlist)
@@ -524,8 +499,6 @@ class WorkflowController:
                 for parameter in signature.parameters.values()
             )
         kwargs: dict[str, Any] = {}
-        if variadic or "dry_run" in accepts:
-            kwargs["dry_run"] = self._dry_run
         if (variadic or "settings" in accepts) and self._settings_provider is not None:
             kwargs["settings"] = self._settings()
         return self._preflight_runner(**kwargs)
@@ -576,20 +549,16 @@ class WorkflowController:
             "copy_source": str(settings.get("copySource") or "").strip(),
         }
 
-    def authorize_disks(
-        self, disk_numbers: Iterable[int], *, dry_run: bool | None = None
-    ) -> list[int]:
+    def authorize_disks(self, disk_numbers: Iterable[int]) -> list[int]:
         """把“刚在界面上确认过”的盘加入隐式白名单。
 
         整盘安装走 ``prepare()``，它会顺手授权选中的盘；而修复引导是单盘操作，
         不经过 ``prepare()``，如果这里不授权，真实执行永远会被
-        “不在白名单内”挡掉（演练模式不看白名单，所以本地测不出来）。
-        用户在界面上勾选磁盘并确认，就是与 CLI ``--allow-disks`` 等价的授权。
+        “不在白名单内”挡掉。用户在界面上勾选磁盘并确认，就是与 CLI
+        ``--allow-disks`` 等价的授权。
         """
         numbers = [int(number) for number in disk_numbers]
-        active_dry_run = self._resolve_dry_run(dry_run)
-        self._sync_service_policy(dry_run=active_dry_run)
-        if active_dry_run or self._explicit_allowlist() is not None:
+        if self._explicit_allowlist() is not None:
             return numbers
         before = set(self._service.allowed_disk_numbers)
         added = {number for number in numbers} - before
@@ -636,10 +605,8 @@ class WorkflowController:
         return [job.result for job in self.jobs() if job.result is not None]
 
     # ------------------------------------------------------------------ 启动与扫描
-    def start(self, *, dry_run: bool | None = None) -> SessionState:
+    def start(self) -> SessionState:
         """执行运行前检查、从设置算出任务载荷并扫描硬盘。"""
-        if dry_run is not None:
-            self._dry_run = self._resolve_dry_run(dry_run)
         # 扫描前先对齐设置里的保护开关，否则刚改的设置要重启才生效。
         self._apply_live_safety_flags()
 
@@ -697,14 +664,12 @@ class WorkflowController:
             disks=disks,
             blockers=tuple(dict.fromkeys(blockers)),
             warnings=tuple(warnings),
-            dry_run=self._dry_run,
             used_letters=tuple(used_letters),
         )
         self._session = session
         self._prepared = {}
-        # 会话是“这次运行的真实模式”，服务必须立刻跟上（覆盖构造时的默认值）。
         self._drop_implicit_allowlist()
-        self._sync_service_policy(dry_run=self._dry_run)
+        self._sync_service_policy()
         return session
 
     def refresh_disks(self) -> list[DiskInfo]:
@@ -742,8 +707,6 @@ class WorkflowController:
     def prepare(
         self,
         selected_disk_numbers: Sequence[int] | Mapping[int, Mapping[str, Any]] | None = None,
-        *,
-        dry_run: bool | None = None,
     ) -> list[PreparedJob]:
         """为选中硬盘生成执行计划和任务输入。
 
@@ -774,15 +737,14 @@ class WorkflowController:
         if not selected:
             raise WorkflowError("尚未选择任何硬盘")
 
-        active_dry_run = self._resolve_dry_run(dry_run)
-        # 真实模式下先把服务的 dry_run 与白名单对齐。
+        # 先把服务的白名单对齐。
         # 没有显式白名单时（GUI 走这条），把“本次选中的硬盘”加入白名单——
         # 用户在界面上勾选 + 后续确认本身就是授权动作，与 CLI 的
         # --allow-disks 等价，但只对本会话选过的盘放行。
         self._drop_implicit_allowlist()
-        self._sync_service_policy(dry_run=active_dry_run)
+        self._sync_service_policy()
         implicit_allowlist = False
-        if not active_dry_run and self._explicit_allowlist() is None:
+        if self._explicit_allowlist() is None:
             before = set(self._service.allowed_disk_numbers)
             added = {int(number) for number in selected} - before
             if added:
@@ -845,7 +807,6 @@ class WorkflowController:
                     session,
                     disk,
                     drive_letters,
-                    dry_run=active_dry_run,
                     payload=payloads[disk_number],
                     implicit_allowlist=implicit_allowlist,
                 )
@@ -860,7 +821,6 @@ class WorkflowController:
         disk: DiskInfo,
         drive_letters: dict[str, str],
         *,
-        dry_run: bool,
         payload: dict[str, Any] | None = None,
         implicit_allowlist: bool = False,
     ) -> PreparedJob:
@@ -894,50 +854,39 @@ class WorkflowController:
             reasons = "、".join(disk.protection_reasons) or "受保护"
             blockers.append(f"硬盘 {disk.disk_number} 不可操作：{reasons}")
 
-        if not dry_run:
-            allowed = sorted(int(number) for number in self._service.allowed_disk_numbers)
-            checks.append(
-                CheckItem(
-                    key="write_allowlist",
-                    label="写盘白名单",
-                    passed=disk.disk_number in allowed,
-                    message=(
-                        "按本会话选中的硬盘授权（未显式指定白名单）"
-                        if implicit_allowlist
-                        else f"白名单：{allowed or '空'}"
-                    ),
-                    details={"allowed_disk_numbers": allowed},
-                )
+        allowed = sorted(int(number) for number in self._service.allowed_disk_numbers)
+        checks.append(
+            CheckItem(
+                key="write_allowlist",
+                label="写盘白名单",
+                passed=disk.disk_number in allowed,
+                message=(
+                    "按本会话选中的硬盘授权（未显式指定白名单）"
+                    if implicit_allowlist
+                    else f"白名单：{allowed or '空'}"
+                ),
+                details={"allowed_disk_numbers": allowed},
             )
-            if disk.disk_number not in allowed:
-                blockers.append(f"硬盘 {disk.disk_number} 不在写盘白名单内")
+        )
+        if disk.disk_number not in allowed:
+            blockers.append(f"硬盘 {disk.disk_number} 不在写盘白名单内")
 
-        if dry_run:
-            checks.append(
-                CheckItem(
-                    key="identity",
-                    label="硬盘身份复核",
-                    passed=True,
-                    message="dry-run 不要求 UniqueId 或 SerialNumber",
-                )
+        # 身份不再作为“必要条件”（设置里的 blockUnverified 已移除）：
+        # 执行前的闸门会重新扫描并按盘号/容量/型号（有 UniqueId、
+        # SerialNumber 时再比它们）复核，确保“确认的盘”就是“要写的盘”。
+        has_identity = _is_strong_identity(identity)
+        checks.append(
+            CheckItem(
+                key="identity",
+                label="硬盘身份复核",
+                passed=True,
+                message=(
+                    "已具备 UniqueId 或 SerialNumber，执行前按标识复核"
+                    if has_identity
+                    else "该盘没有 UniqueId/SerialNumber，执行前按盘号+容量+型号复核"
+                ),
             )
-        else:
-            # 身份不再作为“必要条件”（设置里的 blockUnverified 已移除）：
-            # 执行前的闸门会重新扫描并按盘号/容量/型号（有 UniqueId、
-            # SerialNumber 时再比它们）复核，确保“确认的盘”就是“要写的盘”。
-            has_identity = _is_strong_identity(identity)
-            checks.append(
-                CheckItem(
-                    key="identity",
-                    label="硬盘身份复核",
-                    passed=True,
-                    message=(
-                        "已具备 UniqueId 或 SerialNumber，执行前按标识复核"
-                        if has_identity
-                        else "该盘没有 UniqueId/SerialNumber，执行前按盘号+容量+型号复核"
-                    ),
-                )
-            )
+        )
 
         letters_complete = all(
             str(drive_letters.get(key) or "").strip() for key in _PLAN_STEP_KEYS
@@ -987,7 +936,7 @@ class WorkflowController:
             )
         )
 
-        warnings.append(_DRY_RUN_WARNING if dry_run else _DESTRUCTIVE_WARNING)
+        warnings.append(_DESTRUCTIVE_WARNING)
         warnings.append(_CANCEL_WARNING)
 
         plan = ExecutionPlan(
@@ -996,7 +945,6 @@ class WorkflowController:
             size_display=disk.size_display,
             identity=identity,
             drive_letters=dict(drive_letters),
-            dry_run=dry_run,
             warnings=tuple(warnings),
             checks=tuple(checks),
             blockers=tuple(dict.fromkeys(blockers)),
@@ -1010,7 +958,6 @@ class WorkflowController:
             task_payload=task_payload,
             expected_identity=identity,
             drive_letters=dict(drive_letters),
-            dry_run=dry_run,
             runner_options=self._runner_options(),
         )
         return PreparedJob(spec=spec, plan=plan, disk=disk)
@@ -1076,7 +1023,7 @@ class WorkflowController:
             jobs.append(job)
 
         if not require_confirmation:
-            self._sync_service_policy(dry_run=self._dry_run)
+            self._sync_service_policy()
             self._sequencer.set_order(sorted(job.disk_number for job in jobs))
             try:
                 self._manager.confirm_batch(
@@ -1114,12 +1061,12 @@ class WorkflowController:
         # 用户确认（勾选“明白分区会被删除”）本身就是授权：这里重新补齐隐式白名单。
         # 否则“刷新页面（新会话）/再 prepare 别的盘”会把之前那次 prepare 的隐式授权
         # 撤掉，已排队的任务确认时报“不在允许写盘的白名单内（当前白名单: 空）”。
-        real_disks = [job.disk_number for job in waiting if not bool(job.spec.dry_run)]
+        real_disks = [job.disk_number for job in waiting]
         if real_disks:
             self.authorize_disks(real_disks)
 
         # 共享的 service 策略在这里一次性对齐（并发任务不能各自再改）。
-        self._sync_service_policy(dry_run=self._dry_run)
+        self._sync_service_policy()
         # 分区组按盘号升序串行；系统组（Ghost/引导）各自并行。
         self._sequencer.set_order(sorted(job.disk_number for job in waiting))
         parallel = self._max_parallel or len(waiting)

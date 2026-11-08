@@ -122,7 +122,6 @@ def _check_free_space(
 
 def run_preflight_checks(
     *,
-    dry_run: bool = False,
     admin_checker: Callable[[], bool] | None = None,
     command_lookup: Callable[[str], str | None] | None = None,
     disk_usage: Callable[[str], Any] | None = None,
@@ -132,9 +131,6 @@ def run_preflight_checks(
 
     参数都是可注入的，方便单元测试在没有管理员权限、没有 PowerShell
     的机器上覆盖失败分支。
-
-    ``dry_run=True`` 时把管理员权限检查降级为“不要求”：演练模式不碰硬盘，
-    普通权限也应该能看计划。
     """
     results: list[dict[str, Any]] = []
 
@@ -155,9 +151,7 @@ def run_preflight_checks(
     except Exception as exc:  # noqa: BLE001
         add(CHECK_ADMIN, False, f"无法判断当前权限: {exc}")
     else:
-        if dry_run:
-            add(CHECK_ADMIN, True, "dry-run 模式不要求管理员权限")
-        elif elevated:
+        if elevated:
             add(CHECK_ADMIN, True, "已以管理员身份运行")
         else:
             add(
@@ -232,7 +226,6 @@ def run_preflight_checks(
     return {
         # 可选检查（例如没配镜像、没配外部工具）失败不算“没通过”
         "all_passed": all(item["passed"] for item in results if not item.get("optional")),
-        "dry_run": bool(dry_run),
         "results": results,
     }
 

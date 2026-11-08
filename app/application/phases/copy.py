@@ -341,19 +341,6 @@ class CopyAssetsPhase:
                 ctx,
             )
 
-        if getattr(ctx, "dry_run", False):
-            return PhaseOutcome.succeeded(
-                PhaseResult.ok(
-                    "copy",
-                    f"演练：将拷贝 {stats.files} 个文件 / {stats.dirs} 个目录"
-                    f"（{_format_bytes(stats.bytes)}）到 {dest}",
-                    target=dest,
-                    files=stats.files,
-                    dirs=stats.dirs,
-                    bytes=stats.bytes,
-                )
-            )
-
         command = robocopy_command(str(source), dest, program=program)
         ctx.notify("copy", "running", f"拷贝文件（{stats.files} 个文件）")
         ctx.log.write(" ".join(command))

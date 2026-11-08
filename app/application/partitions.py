@@ -1,7 +1,7 @@
 """分区布局：把 ``partition_info`` 变成一份明确的“要建哪些分区”的列表。
 
 整盘装机的分区结构以前散在三个地方（真实执行器拼 diskpart 脚本、容量预检算
-算术、dry-run 生成脚本预览），加一个数据分区要同时改三处，很容易漂移。这里把
+算术、确认页生成脚本预览），加一个数据分区要同时改三处，很容易漂移。这里把
 布局收敛成一个纯函数，执行器 / 预检 / 预览 / 界面摘要都消费同一份结果：
 
     EFI（FAT32） → Windows（NTFS） → Data（NTFS） → Data2（可选，NTFS）
@@ -484,7 +484,7 @@ def diskpart_lines(parts: Sequence[PlannedPartition]) -> list[str]:
 # ---------------------------------------------------------------- 脚本生成（纯）
 #
 # 三段 diskpart 脚本的**行生成**都在这里，而不是散在执行器里：
-# ``SispService.build_diskpart_preview()``（dry-run 预览）与真实执行器共用同一个
+# ``SispService`` 的确认页预览与真实执行器共用同一个
 # 生成器，改段数 / 加语句不可能只改一端——预览与真跑漂移是历史上真实存在过的坑。
 
 def wipe_lines(disk_number: int) -> list[str]:
@@ -515,7 +515,7 @@ def preview_segments(
     disk_number: int,
     parts: Sequence[PlannedPartition],
 ) -> list[dict[str, Any]]:
-    """dry-run / 确认页用的分段预览（真实脚本就是这些 ``lines``）。
+    """确认页用的分段预览（真实脚本就是这些 ``lines``）。
 
     ``dynamic`` 为真的段在执行时才知道具体行（MSR 分区号要现场查），
     预览里用 ``REM`` 占位并附一句 ``note``。
@@ -552,9 +552,9 @@ def preview_segments(
 
 
 def preview_text(disk_number: int, parts: Sequence[PlannedPartition]) -> str:
-    """把三段预览拼成一段可直接展示的文本（确认页 / dry-run 日志用）。"""
+    """把三段预览拼成一段可直接展示的文本（确认页用）。"""
     segments = preview_segments(disk_number, parts)
-    lines = ["REM === dry-run 预览：以下命令不会被执行 ==="]
+    lines = ["REM === 分区脚本预览：确认页展示的就是真实会执行的命令 ==="]
     for index, segment in enumerate(segments, start=1):
         lines.append(f"REM === {index}/{len(segments)} {segment['title']} ===")
         lines.extend(segment["lines"])

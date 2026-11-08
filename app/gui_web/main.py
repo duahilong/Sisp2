@@ -179,7 +179,7 @@ def relaunch_as_admin(argv: list[str] | None = None, *, n_show: int = SW_SHOWNOR
 def backend_argv(args, port: int, parent_pid: int) -> list[str]:
     """提权后端子进程的命令行。
 
-    界面把用户选的设置/演练开关原样传下去，所以“界面里看到的计划”和
+    界面把用户选的设置/调试开关原样传下去，所以“界面里看到的计划”和
     “后端执行用的参数”是同一份——没有两套启动条件。
     """
     argv = [
@@ -189,8 +189,6 @@ def backend_argv(args, port: int, parent_pid: int) -> list[str]:
         "--port", str(int(port)),
         "--parent-pid", str(int(parent_pid)),
     ]
-    if args.dry_run:
-        argv.append("--dry-run")
     if args.settings:
         argv += ["--settings", str(args.settings)]
     if args.debug:
@@ -279,7 +277,7 @@ def webview_storage_path() -> str | None:
         return None
 
 
-def build_api(dry_run: bool, settings_path: str | None = None):
+def build_api(settings_path: str | None = None):
     """构造 WorkflowController + WebApi，并立刻建立会话。"""
     from app.application.workflow import WorkflowController
     from app.gui_web.api import WebApi
@@ -287,8 +285,6 @@ def build_api(dry_run: bool, settings_path: str | None = None):
 
     store = build_store(settings_path)
     settings = store.get()
-    # 演练模式只由命令行 --dry-run 决定（设置里不再有这个开关）。
-    effective_dry_run = bool(dry_run)
 
     # 设置里留空时也要有日志目录：否则任务跑完一份 disk-runner-*.log 都没有，
     # 界面上的日志面板永远是空的（%APPDATA%\\Sisp\\logs）。
@@ -303,7 +299,6 @@ def build_api(dry_run: bool, settings_path: str | None = None):
 
     prune_runner_logs(log_dir, int(settings.get("logRetentionDays", 30)))
     wf = WorkflowController(
-        dry_run=effective_dry_run,
         log_dir=log_dir,
         partition_defaults=store.partition_info(),
         tool_paths={
@@ -314,7 +309,7 @@ def build_api(dry_run: bool, settings_path: str | None = None):
         # 预检与执行器可选项都从设置里取最新值（改完设置不用重建控制器）。
         settings_provider=store.get,
     )
-    wf.start(dry_run=effective_dry_run)
+    wf.start()
     return WebApi(wf, settings=store, log_dir=log_dir), wf
 
 
@@ -398,7 +393,7 @@ def _serve_in_thread(app, host: str, port: int):
 
 def _run_serve(args) -> int:
     """浏览器模式（也用于被界面拉起的提权后端）。"""
-    api, wf = build_api(args.dry_run, args.settings)
+    api, wf = build_api(args.settings)
 
     # ---------------------------------------------------------- 服务装配
     from app.gui_web.server import create_app
@@ -452,7 +447,7 @@ def _run_desktop(args) -> int:
         else:
             # 提权被取消：退回进程内服务，界面照常打开；写盘会被预检拦住。
             print("提权被取消：以普通权限运行，真实写盘会被预检拒绝。", file=sys.stderr)
-            api, wf = build_api(args.dry_run, args.settings)
+            api, wf = build_api(args.settings)
             from app.gui_web.server import create_app
 
             app = create_app(api, wf, host_check=True)
@@ -512,7 +507,6 @@ def _run_desktop(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     _ensure_std_streams()
     parser = argparse.ArgumentParser(description="Sisp2 Web 界面")
-    parser.add_argument("--dry-run", action="store_true", help="演练：不真正分区/写盘")
     parser.add_argument("--elevate", action="store_true", help="需要时通过 UAC 提权重启（主要给 --serve 用）")
     parser.add_argument("--debug", action="store_true", help="打开 devtools")
     parser.add_argument("--serve", action="store_true", help="浏览器模式：前台起本机 HTTP 服务，用 Edge/Chromium 打开界面（不依赖 pywebview）")

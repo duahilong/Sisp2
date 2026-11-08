@@ -36,7 +36,6 @@ from app.application.partitions import (
     unallocated_bytes,
     wipe_lines,
 )
-from app.application.service import SispService
 from app.application.workflow import WorkflowController
 from app.drive_letters import build_drive_letter_allocations
 
@@ -84,29 +83,6 @@ def test_msr_delete_is_a_separate_step_before_layout() -> None:
     layout = create_partition_lines(1, parts)
     assert "delete partition override" not in layout
     assert layout[1] == "create partition efi size=100"
-
-
-def test_dry_run_preview_shows_three_phases() -> None:
-    """演练预览如实展示三段：清盘 → 删 MSR（含复查说明）→ 建分区。"""
-    service = SispService(disk_scanner=list, dry_run=True)
-    text = service.build_diskpart_preview(
-        1,
-        {"partition_info": {"efi_size_mb": 100, "c_size_gb": 120}},
-        {"efi": "F", "windows": "G", "data": "H"},
-    )
-    lines = text.splitlines()
-    assert "REM === 1/3 清盘 + 转 GPT ===" in lines
-    assert "REM === 2/3 删除 convert gpt 自动生成的 MSR（删完立刻复查） ===" in lines
-    assert "REM === 3/3 建分区（最后一项不带 size=，由 diskpart 吃掉剩余空间） ===" in lines
-    # MSR 那两条只以 REM 出现（预览时不知道真实分区号）
-    assert "REM select partition <MSR 分区号>" in lines
-    assert "REM delete partition override" in lines
-    assert not any(line.startswith("delete partition") for line in lines)
-    assert "create partition efi size=100" in lines
-    assert "create partition primary" in lines
-
-
-# ------------------------------------------- 分区阶段的验收（对照计划逐项验证）
 
 
 def _part_payload(
@@ -667,7 +643,6 @@ def _disk(number: int = 1, size_bytes: int = 100 * GIB) -> DiskInfo:
 class _FakeService:
     def __init__(self, disks: list[DiskInfo]) -> None:
         self.disks = disks
-        self.dry_run = True
         self.allowed_disk_numbers = frozenset()
         self.extra_counts: dict[int, int] | None = None
 
@@ -684,7 +659,7 @@ class _FakeService:
     def execute_spec(self, spec, cancel_event):
         from app.models import WorkerResult
 
-        return WorkerResult.dry_run_plan(int(getattr(spec, "disk_number", 0) or 0))
+        return WorkerResult(disk_number=int(getattr(spec, "disk_number", 0) or 0), success=True, message="ok")
 
 
 def _controller(tmp_path, image_name: str = "win11.GHO") -> WorkflowController:
@@ -692,12 +667,11 @@ def _controller(tmp_path, image_name: str = "win11.GHO") -> WorkflowController:
     image = tmp_path / image_name
     image.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
 
-    def preflight(*, dry_run: bool = False) -> dict[str, Any]:
+    def preflight() -> dict[str, Any]:
         return {"results": [{"name": "运行前检查", "passed": True, "message": "ok"}]}
 
     return WorkflowController(
         service=_FakeService([_disk(1)]),
-        dry_run=True,
         preflight_runner=preflight,
         partition_defaults={
             "efi_size_mb": 300,
@@ -711,7 +685,7 @@ def _controller(tmp_path, image_name: str = "win11.GHO") -> WorkflowController:
 
 def test_prepare_allocates_fourth_letter_for_extra_partition(tmp_path) -> None:
     controller = _controller(tmp_path)
-    controller.start(dry_run=True)
+    controller.start()
 
     prepared = controller.prepare(
         {
@@ -750,7 +724,7 @@ def test_prepare_allocates_fourth_letter_for_extra_partition(tmp_path) -> None:
 
 def test_prepare_rejects_invalid_extra_partition(tmp_path) -> None:
     controller = _controller(tmp_path)
-    controller.start(dry_run=True)
+    controller.start()
 
     with pytest.raises(Exception) as excinfo:
         controller.prepare(
@@ -768,7 +742,7 @@ def test_prepare_rejects_invalid_extra_partition(tmp_path) -> None:
 
 def test_prepare_blocks_when_extra_partition_does_not_fit(tmp_path) -> None:
     controller = _controller(tmp_path)
-    controller.start(dry_run=True)
+    controller.start()
 
     with pytest.raises(Exception) as excinfo:
         controller.prepare(
@@ -787,7 +761,7 @@ def test_prepare_blocks_when_extra_partition_does_not_fit(tmp_path) -> None:
 
 def test_prepare_without_extra_partition_keeps_three_letters(tmp_path) -> None:
     controller = _controller(tmp_path)
-    controller.start(dry_run=True)
+    controller.start()
 
     prepared = controller.prepare([1])[0]
     assert prepared.plan.drive_letters == {"efi": "E", "windows": "F", "data": "G"}
@@ -804,12 +778,11 @@ def _no_flag_controller(tmp_path) -> WorkflowController:
     image = tmp_path / "win11.GHO"
     image.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
 
-    def preflight(*, dry_run: bool = False) -> dict[str, Any]:
+    def preflight() -> dict[str, Any]:
         return {"results": [{"name": "运行前检查", "passed": True, "message": "ok"}]}
 
     return WorkflowController(
         service=_FakeService([_disk(1)]),
-        dry_run=True,
         preflight_runner=preflight,
         partition_defaults={"efi_size_mb": 300, "c_size_gb": 20},
         settings_provider=lambda: {"sysImageA": str(image)},
@@ -860,13 +833,13 @@ def test_allow_small_partitions_flag_relaxes_minimums() -> None:
 
 def test_prepare_rejects_tiny_layout_unless_flag(tmp_path) -> None:
     controller = _no_flag_controller(tmp_path)
-    controller.start(dry_run=True)
+    controller.start()
 
     with pytest.raises(Exception, match="分区过小"):
         controller.prepare([1])
 
     allowed = _controller(tmp_path)  # 同一个布局，但显式带了 allow_small_partitions
-    allowed.start(dry_run=True)
+    allowed.start()
     assert allowed.prepare([1])[0].spec.disk_number == 1
 
 

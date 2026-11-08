@@ -19,11 +19,9 @@ python -m pip install -r requirements-web.txt
 python -m app.gui_web.main
 # 浏览器模式
 python -m app.gui_web.main --serve
-# 显式演练启动
-python -m app.gui_web.main --dry-run
 ```
 
-扫盘、装机向导、修复引导、镜像索引全部在界面里完成，命令行已经不是必需入口（`app.cli` 已移除）。**分区只在装机向导里做**（整盘重建 EFI + 系统 + 数据分区）：单盘级的新建/格式化/删分区属于破坏性操作，请用 Windows 磁盘管理（`diskmgmt.msc`）——历史上那套 `/api/partition/*` 已于 2026-11 移除。实际模式只由命令行 `--dry-run` 决定（设置里不再有“默认演练”开关），且该演练状态是硬上限，启动后的界面操作或 Web API 不能把它升级为真实执行。不传 `--dry-run` 时可能进入真实模式；启动 GUI 不等同于安全演练，请显式传 `--dry-run`。
+扫盘、装机向导、修复引导、镜像索引全部在界面里完成，命令行已经不是必需入口（`app.cli` 已移除）。**分区只在装机向导里做**（整盘重建 EFI + 系统 + 数据分区）：单盘级的新建/格式化/删分区属于破坏性操作，请用 Windows 磁盘管理（`diskmgmt.msc`）——历史上那套 `/api/partition/*` 已于 2026-11 移除。启动即真实模式：**确认后会把选中的磁盘重新分区**。要看“会执行什么”，用只读的计划与脚本预览——向导第 4 步、`POST /api/prepare`、`GET /api/partition/preview` 都不执行命令；真正写盘只发生在 `POST /api/confirm` 之后。启动 GUI/服务不等同于安全操作，请先备份并核对盘号与身份。
 
 GUI 默认监听 `127.0.0.1:8765`；可用 `--host`、`--port` 改变监听参数。接口文档默认在 `/docs`。非 loopback 监听没有鉴权，属于高风险配置，详见[安全边界](Docs/安全边界.md)及[Web API](Docs/Web接口与部署.md)。
 
@@ -37,7 +35,7 @@ python packaging/build.py
 # → dist/Sisp2.exe（图形界面，约 22 MB）
 ```
 
-exe 的参数与源码运行一致（`--dry-run` / `--serve` / `--settings` 等）；设置保存在 `%APPDATA%\Sisp`，没有额外的配置文件要维护。细节（提权、日志位置、体积、未签名等限制）见[打包说明](Docs/打包与分发.md)。
+exe 的参数与源码运行一致（`--serve` / `--settings` 等）；设置保存在 `%APPDATA%\Sisp`，没有额外的配置文件要维护。细节（提权、日志位置、体积、未签名等限制）见[打包说明](Docs/打包与分发.md)。
 
 ## 配置
 
@@ -49,9 +47,9 @@ exe 的参数与源码运行一致（`--dry-run` / `--serve` / `--settings` 等�
 
 ## 当前安全行为与限制
 
-- `SispService` 默认 dry-run；GUI 的演练模式只来自命令行 `--dry-run`（设置里已没有“默认演练”开关），**不传就是真实模式**。
+- `SispService` 没有演练开关：不是 `--serve` 的只读模式，也没有“只看不写”的降级；执行层在拿不到真实执行器时直接拒绝，绝不静默跳过。
 - 真实模式下，工作流会把本次在界面上勾选并确认过的硬盘加入服务白名单（没有独立的白名单文件）；第 4 步的勾选「我明白这些分区会被删除」就是授权动作。
-- 写盘要过四道闸门：非 dry-run、白名单、执行前重扫比对身份（有 UniqueId/SerialNumber 比标识，没有比盘号+容量+型号）、执行瞬间仍可选；受保护硬盘不能操作。
+- 写盘要过三道闸门：白名单、执行前重扫比对身份（有 UniqueId/SerialNumber 比标识，没有比盘号+容量+型号）、执行瞬间仍可选；受保护硬盘不能操作。
 - 第 4 步的勾选「我明白这些分区会被删除」是唯一的人工授权动作：勾上并点「开始安装」即提交，不再弹第二次确认框（`confirmBeforeStart` 已删除）。
 - Web 默认 loopback。Host 校验仅校验 Host 名称、不是身份认证；改为非 loopback 监听时没有鉴权，网络可达的写盘接口具有高风险。
 - SSE 重放依赖进程内有限缓冲；队列满会丢弃新事件，缓冲淘汰也会使旧事件无法补发，不能保证完整事件历史。
@@ -75,13 +73,14 @@ python -m pytest tests/ -q
 
 ## 版本与定版
 
-当前定版：**v1.1.0**（2026-11-08，功能全部落地）。定版之后只做优化与修复，
-功能语义以 tag 上的代码与文档为准；变更历史见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本：**v1.2.0**（破坏性变更：移除演练模式，启动即真实写盘；预览改用只读的
+`prepare` + `/api/partition/preview`）。功能语义以 tag 上的代码与文档为准；
+变更历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 - 版本号只有一处来源：`app/version.py` 的 `__version__`，`packaging/version_info.txt`
   与它由 `tests/test_packaging.py` 强校验（界面标题、`/api/info`、exe 的 FileVersion 都用它）。
 - 定版就是一个**注释 tag**：tag 指向的提交树 = 那一版的完整快照（源码 + 文档），
-  所以「回到某一版」不需要额外备份：`git checkout v1.1.0`，或 `git archive v1.1.0 -o sisp-1.1.0.zip`。
+  所以「回到某一版」不需要额外备份：`git checkout v1.1.0`，或 `git archive v1.1.0 -o sisp-1.1.0.zip`（1.2.0 同理）。
 - 打新版（例：`1.1.1` 只修 bug）：改 `app/version.py` 与 `packaging/version_info.txt` →
   在 VM 上跑 `ruff` / `pytest` / `tools/ui_check.py` / `ui_smoke` → 本地 `python packaging/build.py` →
   提交 → `git tag -a v1.1.1 -m "..."` → `git push origin main --tags`。
@@ -97,7 +96,7 @@ python -m pytest tests/ -q
 
 | 文档 | 内容 |
 | --- | --- |
-| [架构与工作流](Docs/架构与工作流.md) | 分层、一次工作流、分区/MSR/盘符/验收、演练与真实模式判定 |
+| [架构与工作流](Docs/架构与工作流.md) | 分层、一次工作流、分区/MSR/盘符/验收、确认与执行的边界 |
 | [配置说明](Docs/配置说明.md) | 唯一的设置来源、每个字段的真实行为与生效时机 |
 | [Web接口与部署](Docs/Web接口与部署.md) | 启动与部署、路由、Host 校验、SSE、前端目录与开发约定 |
 | [安全边界](Docs/安全边界.md) | 写盘门禁、Web 暴露面、事件与日志、预检边界 |

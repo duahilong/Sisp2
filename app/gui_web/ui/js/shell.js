@@ -155,16 +155,13 @@ export function renderChrome(info) {
   if (version) {
     version.textContent = info && info.version ? `v${info.version}` : '—';
   }
-  const dry = info ? Boolean(info.dry_run) : true;
   const chipMode = $('#chipMode');
   if (chipMode) {
-    chipMode.classList.toggle('dry', dry);
-    chipMode.classList.toggle('alert', !dry);
-    chipMode.title = dry
-      ? '演练模式：只生成计划，不会动磁盘'
-      : '真实模式：确认后会把选中的磁盘重新分区';
+    chipMode.classList.remove('dry');
+    chipMode.classList.add('alert');
+    chipMode.title = '真实模式：确认后会把选中的磁盘重新分区';
   }
-  $('#chipModeText').textContent = dry ? '演练模式' : '真实写盘';
+  $('#chipModeText').textContent = '真实写盘';
 
   const partitionCount = state.disks.reduce((sum, disk) => sum + ((disk.partitions || []).length), 0);
   $('#chipDisksText').textContent = `${state.disks.length} 块磁盘`;

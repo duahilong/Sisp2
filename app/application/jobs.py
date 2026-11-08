@@ -103,7 +103,6 @@ class ExecutionPlan:
     size_display: str = ""
     identity: dict[str, Any] = field(default_factory=dict)
     drive_letters: dict[str, str] = field(default_factory=dict)
-    dry_run: bool = False
     warnings: tuple[str, ...] = ()
     checks: tuple[Any, ...] = ()
     blockers: tuple[str, ...] = ()
@@ -126,7 +125,6 @@ class ExecutionPlan:
             "size_display": self.size_display,
             "identity": dict(self.identity),
             "drive_letters": dict(self.drive_letters),
-            "dry_run": self.dry_run,
             "warnings": list(self.warnings),
             "checks": [
                 check.to_dict() if hasattr(check, "to_dict") else dict(check)
@@ -149,7 +147,6 @@ class JobSpec:
     task_payload: dict[str, Any] = field(default_factory=dict)
     expected_identity: dict[str, Any] = field(default_factory=dict)
     drive_letters: dict[str, str] = field(default_factory=dict)
-    dry_run: bool = False
     # 执行器的可选项（临时目录、无人值守应答文件、驱动目录等）；
     # 由界面设置注入，不写进业务配置文件。
     runner_options: dict[str, Any] = field(default_factory=dict)
@@ -160,7 +157,6 @@ class JobSpec:
             "task_payload": dict(self.task_payload),
             "expected_identity": dict(self.expected_identity),
             "drive_letters": dict(self.drive_letters),
-            "dry_run": self.dry_run,
             "runner_options": dict(self.runner_options),
         }
 
@@ -209,7 +205,6 @@ class Job:
             "id": self.id,
             "disk_number": self.disk_number,
             "status": self.status.value,
-            "dry_run": bool(self.spec.dry_run),
             "plan": self.plan.to_dict(),
             "spec": self.spec.to_dict(),
             "result": self.result.to_dict() if self.result is not None else None,
@@ -247,8 +242,8 @@ class JobManager:
     """创建任务、推进状态、按并发/间隔调度，并广播事件。
 
     ``executor`` 不传时使用默认实现：懒加载 ``SispService().execute_spec``。
-    默认服务是 dry-run 且没有任何写盘白名单，因此**真实执行会失败**——
-    这是刻意的：真跑必须显式注入 ``SispService(dry_run=False, ...)`` 或自定义执行器。
+    默认服务没有任何写盘白名单，因此**真实执行会失败**——
+    这是刻意的：真跑必须注入带白名单的 ``SispService`` 或自定义执行器。
     """
 
     def __init__(
@@ -413,7 +408,7 @@ class JobManager:
                 job.status = JobStatus.RUNNING
                 job.started_at = _now()
                 job.updated_at = job.started_at
-            self._emit("job.started", job, disk_number=job.disk_number, dry_run=job.spec.dry_run)
+            self._emit("job.started", job, disk_number=job.disk_number)
 
             try:
                 result = self._execute(job)
@@ -438,8 +433,8 @@ class JobManager:
     def _make_reporter(self, job: Job) -> Callable[..., None]:
         """构造 ``on_step`` 回调：更新 ``Job.progress`` 并广播 ``job.step``。
 
-        只有真实写盘的七个阶段算进度（含独立的「分区验收」）；像
-        ``diskpart_preview`` 这种演练期附加步骤照样发事件，但不进 ``completed``。
+        只有真实写盘的七个阶段算进度（含独立的「分区验收」）；接口收到的未知
+        步骤 key 照样发事件，但不进 ``completed``——分母只算真实阶段。
         """
         total = _step_total()
         keys = list(_step_keys())

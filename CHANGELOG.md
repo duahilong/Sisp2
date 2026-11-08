@@ -7,6 +7,50 @@ tag 上的提交树就是那一版的完整代码与文档快照。
 定版（`v1.1.0`）之后只做优化与修复：功能以 tag 为准，`main` 继续向前走，
 需要回到某一版时 `git checkout v1.1.0` 或 `git archive v1.1.0`。
 
+## 1.2.0 — 移除演练模式（破坏性）
+
+启动即真实模式。`--dry-run`、`SispService(dry_run=...)`、`JobSpec/ExecutionPlan.dry_run`、
+`POST /api/session|prepare` 的 `dry_run` 字段全部删除，涉及 19 个 Python 文件、6 个前端文件。
+
+### 为什么删
+
+- “看计划”本来就不需要演练模式：`prepare()` 与 `GET /api/partition/preview` 一直是只读的
+  （只扫描、算布局、生成与真跑同源的 diskpart 脚本），写盘只发生在 `POST /api/confirm` 之后。
+- 两套模式让“以为在演练、其实在写盘”成为可能：旧实现里 `SispService` 默认 `dry_run=True`，
+  真实入口再显式覆盖；漏传一处就静默降级成空跑，或者反过来把演练请求当成真跑。
+- 删掉之后执行路径只有一条：没有执行器就拒绝（`PermissionError`），不存在“静默跳过”。
+
+### 行为对照
+
+| 旧行为 | 现在 |
+|---|---|
+| `--dry-run` 启动只演练 | 参数已删除；要预览用第 4 步/`prepare`/`partition/preview` |
+| `SispService(dry_run=True)` | 构造参数已删除；未注入 `real_runner` 时执行层直接拒绝 |
+| `POST /api/session|prepare` 带 `dry_run` | 字段已删除；`prepare` 只读，`confirm` 才写盘 |
+| 任务 `progress` 里多一个 `diskpart_preview` 步骤 | 不再产生；进度仍是 7 个真实阶段 |
+| 界面“演练模式”横幅/徽标/“未执行（演练）”文案 | 删除；只显示“真实写盘” |
+
+### 迁移
+
+- 脚本/自动化若传 `dry_run`，请求仍可解析（多余字段被忽略），但**不会**再进入演练：确认后会真写盘。
+- 需要“先看后写”的流程：`POST /api/prepare` → `GET /api/partition/preview` → `POST /api/confirm`。
+- 版本号升到 1.2.0，exe 的 Windows 版本资源同步更新。
+
+### 验证（2026-11-08，VM）
+
+- 单测：`D:\venv-sisp\Scripts\python.exe -m pytest -q` → **531 passed**（12.31 s）；
+  `ruff check app tests` 全绿。
+- 源码真实写盘（120 GB 动态 VHD，Disk 3）：`status=ok`，**165.0 s**；
+  GPT 三区 `#1 100 MB FAT32 EFI(E:)`、`#2 60 GB NTFS(F:)`、`#3 59.9 GB NTFS(G:)`；
+  `F:\Windows\System32\config\SYSTEM`、`ntoskrnl.exe`、`explorer.exe` 均在；
+  ESP 内 `EFI\Microsoft\Boot\bootmgfw.efi` 与 `EFI\BOOT\BOOTX64.EFI` 均在；EFI 盘符已释放。
+- 打包后 exe 真实写盘（同 VHD，`--serve --port 8898`）：`status=ok`，**167 s**；
+  盘符 E/J/K，步骤 `efi/windows/data/layout/image/boot` 全 ok、`copy` skipped；
+  产物 `Sisp2.exe` 17.3 MB，`/api/info` 报 `version=1.2.0`。
+- 回归中修掉的两个测试自身缺陷：`test_step_events_are_broadcast_for_every_stage`
+  误写 `manager.executor`（`JobManager` 读的是 `_executor`，旧代码靠 dry-run 短路才“通过”）；
+  `test_service_without_runner_refuses_execution` 未给白名单/身份，断言的是白名单文案而非执行器文案。
+
 ## 未发布（main）— 死代码清理
 
 定版后只做优化与修复，不改变既有功能语义。这一批只删“定义了但没人用”的代码，

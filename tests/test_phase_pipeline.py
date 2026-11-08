@@ -100,7 +100,7 @@ def test_phases_payload_is_declarative():
 
 
 def test_group_progress_ignores_extra_steps():
-    """演练期附加步骤（如 diskpart_preview）不能把分组进度顶满。"""
+    """历史遗留的附加步骤（如 diskpart_preview）不能把分组进度顶满。"""
     groups = group_progress(["efi", "windows", "data", "layout", "diskpart_preview"], None)
     assert groups["partition"]["percent"] == 100
     assert groups["system"]["percent"] == 0
@@ -298,14 +298,15 @@ def test_preview_text_contains_every_real_line():
         assert line in text.splitlines()
 
 
-def test_service_preview_uses_same_generator():
-    from app.application.service import SispService
+def test_api_preview_uses_same_generator():
+    """确认页（/api/partition/preview）与真跑共用分区脚本生成器。"""
+    from app.application.partitions import preview_segments
 
-    service = SispService(disk_scanner=list, dry_run=True)
     parts = _parts()
-    text = service.build_diskpart_preview(1, PAYLOAD, LETTERS)
+    segments = preview_segments(1, parts)
+    assert [segment["key"] for segment in segments] == ["wipe", "msr", "create"]
     for line in create_partition_lines(1, parts):
-        assert line in text.splitlines()
+        assert line in segments[2]["lines"]
 
 
 # ---------------------------------------------------------------- 系统组仍可独立用
@@ -502,9 +503,8 @@ def test_real_runner_fills_job_progress(tmp_path):
             disk_number=2,
             task_payload=payload,
             drive_letters=LETTERS,
-            dry_run=False,
         ),
-        ExecutionPlan(disk_number=2, dry_run=False),
+        ExecutionPlan(disk_number=2),
     )
     manager.confirm_batch([job.id])
     manager.wait_all(10)

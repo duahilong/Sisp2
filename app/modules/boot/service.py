@@ -331,7 +331,6 @@ class BootRepairer:
         diskpart: str | None = None,
         temp_dir: str | None = None,
         log_dir: str | None = None,
-        dry_run: bool = False,
         which: Callable[[str], str | None] | None = None,
         allow_real_disk: bool = False,
     ) -> None:
@@ -345,7 +344,6 @@ class BootRepairer:
         self.diskpart = diskpart or self._which("diskpart.exe")
         self.temp_dir = temp_dir
         self.log_dir = log_dir
-        self.dry_run = bool(dry_run)
 
     # ------------------------------------------------------------------ 只读
     def report(self) -> dict[str, Any]:
@@ -357,9 +355,7 @@ class BootRepairer:
         disk_number: int,
         *,
         identity: Mapping[str, Any] | None = None,
-        dry_run: bool | None = None,
     ) -> dict[str, Any]:
-        effective_dry_run = self.dry_run if dry_run is None else bool(dry_run)
         snapshot = self._scanner()
         report = analyze(snapshot)
         target = next(
@@ -378,12 +374,11 @@ class BootRepairer:
         temp_letter: str | None = None
         esp_letter = target.get("esp_letter")
         steps: list[dict[str, Any]] = []
-        if not effective_dry_run:
-            if self._gate is None:
-                raise BootError("缺少写盘闸门：修复引导必须经过 SispService 的白名单校验")
-            self._gate(int(disk_number), dict(identity or {}))
-            if not self.bcdboot:
-                raise BootError("找不到 bcdboot.exe，无法重写引导")
+        if self._gate is None:
+            raise BootError("缺少写盘闸门：修复引导必须经过 SispService 的白名单校验")
+        self._gate(int(disk_number), dict(identity or {}))
+        if not self.bcdboot:
+            raise BootError("找不到 bcdboot.exe，无法重写引导")
 
         plan = {
             "disk_number": int(disk_number),
@@ -399,18 +394,6 @@ class BootRepairer:
             plan["temp_letter"] = temp_letter
         command = [self.bcdboot or "bcdboot", f"{target['windows_letter']}:\\Windows", "/s", f"{esp_letter}:", "/f", "UEFI"]
         plan["command"] = " ".join(command)
-        plan["dry_run"] = effective_dry_run
-
-        if effective_dry_run:
-            steps.append(_step("mount", "挂载 EFI 分区", "skipped", f"将使用盘符 {esp_letter}"))
-            steps.append(_step("bcdboot", "重写引导", "skipped", plan["command"]))
-            steps.append(_step("verify", "校验引导文件", "skipped", "演练模式不执行"))
-            return {
-                **plan,
-                "success": True,
-                "message": "演练模式：只生成修复步骤，未执行任何命令",
-                "steps": steps,
-            }
 
         log = _RunLog(self.log_dir, f"boot-disk{disk_number}")
         steps = []

@@ -106,7 +106,6 @@ def _disk(number: int = 1) -> DiskInfo:
 class _FakeService:
     def __init__(self, disks: list[DiskInfo]) -> None:
         self.disks = disks
-        self.dry_run = True
         self.allowed_disk_numbers = frozenset()
 
     def scan_protected_disks(self, excluded_names: Any = None) -> list[DiskInfo]:
@@ -117,19 +116,18 @@ class _FakeService:
         return SimpleNamespace(drive_letter_allocations=letters)
 
     def execute_spec(self, spec, cancel_event):
-        return WorkerResult.dry_run_plan(int(getattr(spec, "disk_number", 0) or 0))
+        return WorkerResult(disk_number=int(getattr(spec, "disk_number", 0) or 0), success=True, message="ok")
 
 
 
 def _controller(image_path: str) -> WorkflowController:
     """载荷来源只有两条：构造时的分区默认值快照 + 现读的设置（镜像路径）。"""
 
-    def preflight(*, dry_run: bool = False) -> dict[str, Any]:
+    def preflight() -> dict[str, Any]:
         return {"results": [{"name": "运行前检查", "passed": True, "message": "ok"}]}
 
     return WorkflowController(
         service=_FakeService([_disk(1)]),
-        dry_run=True,
         preflight_runner=preflight,
         partition_defaults={
             "efi_size_mb": 300,
@@ -145,7 +143,7 @@ def test_prepare_blocks_iso_image_and_disables_start(tmp_path):
     iso = tmp_path / "win11.iso"
     iso.write_bytes(b"iso")
     controller = _controller(str(iso))
-    controller.start(dry_run=True)
+    controller.start()
 
     prepared = controller.prepare([1])[0]
 
@@ -159,7 +157,7 @@ def test_prepare_blocks_iso_image_and_disables_start(tmp_path):
 def test_prepare_keeps_applicable_image_executable(tmp_path):
     wim = _gho(tmp_path)
     controller = _controller(str(wim))
-    controller.start(dry_run=True)
+    controller.start()
 
     prepared = controller.prepare([1])[0]
 
@@ -172,7 +170,6 @@ def test_preflight_flags_iso_image(tmp_path):
     iso = tmp_path / "win11.iso"
     iso.write_bytes(b"iso")
     report = run_preflight_checks(
-        dry_run=True,
         admin_checker=lambda: True,
         command_lookup=lambda name: "found",
         settings={"sysImageA": str(iso)},
@@ -186,7 +183,6 @@ def test_preflight_flags_iso_image(tmp_path):
 def test_preflight_accepts_applicable_image(tmp_path):
     wim = _gho(tmp_path)
     report = run_preflight_checks(
-        dry_run=True,
         admin_checker=lambda: True,
         command_lookup=lambda name: "found",
         settings={"sysImageA": str(wim)},
@@ -215,7 +211,6 @@ def test_preflight_iso_check_maps_to_image_type_key(tmp_path):
     iso = tmp_path / "win11.iso"
     iso.write_bytes(b"iso")
     report = run_preflight_checks(
-        dry_run=True,
         admin_checker=lambda: True,
         command_lookup=lambda name: "found",
         settings={"sysImageA": str(iso)},
@@ -229,12 +224,11 @@ def test_preflight_iso_check_maps_to_image_type_key(tmp_path):
 def _settings_controller(settings: dict, image_path: str = "") -> WorkflowController:
     """``settings`` 是活字典：测试会中途改它，验证“改完不必重启”。"""
 
-    def preflight(*, dry_run: bool = False) -> dict[str, Any]:
+    def preflight() -> dict[str, Any]:
         return {"results": [{"name": "运行前检查", "passed": True, "message": "ok"}]}
 
     return WorkflowController(
         service=_FakeService([_disk(1)]),
-        dry_run=True,
         preflight_runner=preflight,
         partition_defaults={
             "efi_size_mb": 100,
@@ -257,7 +251,7 @@ def test_prepare_reflects_live_settings_image(tmp_path):
     settings: dict[str, Any] = {"sysImageA": str(iso)}
 
     controller = _settings_controller(settings, str(iso))
-    controller.start(dry_run=True)
+    controller.start()
 
     blocked = controller.prepare([1])[0]
     assert blocked.plan.executable is False
@@ -282,7 +276,7 @@ def test_per_disk_overrides_beat_settings_defaults(tmp_path):
         "dataDefaultGb": 200,
     }
     controller = _settings_controller(settings, str(wim))
-    controller.start(dry_run=True)
+    controller.start()
 
     prepared = controller.prepare({1: {"c_size": 30, "data_size": 20, "win_gho": str(other)}})[0]
     info = prepared.spec.task_payload["partition_info"]
@@ -301,7 +295,7 @@ def test_image_path_is_normalized_for_ghost(tmp_path):
     assert "/" in slashed or _Path(wim).drive  # 单字符路径在 Linux 上无分隔符，跳过
 
     controller = _settings_controller({"sysImageA": slashed}, slashed)
-    controller.start(dry_run=True)
+    controller.start()
     prepared = controller.prepare([1])[0]
 
     assert prepared.spec.task_payload["image_info"]["image_path"] == str(wim)

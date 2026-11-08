@@ -875,8 +875,6 @@ input.confirm.bad{border-color:var(--danger);box-shadow:0 0 0 2px var(--danger-b
 .chip b{font-weight:600;color:var(--ink2)}
 .chip.alert{border-color:#E4CFA4;background:var(--warn-bg);color:var(--warn)}
 .chip.alert i{background:var(--warn)}
-.chip.dry{border-color:#B9CDE9;background:var(--accent-bg);color:var(--accent2)}
-.chip.dry i{background:var(--accent)}
 
 /* 任务状态徽标（对应 JobStatus） */
 .badge.running,.badge.waiting_confirmation{background:var(--accent-bg);color:var(--accent2)}

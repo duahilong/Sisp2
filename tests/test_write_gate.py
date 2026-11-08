@@ -10,12 +10,14 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from app.application.jobs import JobSpec
 from app.application.service import SispService
 from app.application.workflow import WorkflowController, WorkflowError
 from app.models import WorkerResult
@@ -48,9 +50,29 @@ def _summary(
     }
 
 
+def test_service_without_runner_refuses_execution() -> None:
+    """没有注入真实执行器时，执行层必须拒绝——不能悄悄降级成“什么都不做”。"""
+    service = SispService(
+        allowed_disk_numbers=[1],
+        disk_scanner=lambda: [_summary()],
+    )
+    spec = JobSpec(
+        disk_number=1,
+        expected_identity={
+            "disk_number": 1,
+            "unique_id": "unique-1",
+            "serial_number": "SN-1",
+            "model": "test disk",
+            "size_bytes": 60 * _GIB,
+        },
+    )
+    with pytest.raises(PermissionError, match="未注入 real_runner"):
+        service.execute_spec(spec, threading.Event())
+
+
 def _service(disk: dict[str, Any], **kwargs: Any) -> SispService:
-    runner = kwargs.pop("real_runner", None) or (lambda spec, event: WorkerResult.dry_run_plan(1))
-    return SispService(disk_scanner=lambda: [disk], dry_run=False, real_runner=runner, **kwargs)
+    runner = kwargs.pop("real_runner", None) or (lambda spec, event: WorkerResult(disk_number=1, success=True, message="ok"))
+    return SispService(disk_scanner=lambda: [disk], real_runner=runner, **kwargs)
 
 
 @pytest.fixture(autouse=True)
@@ -100,7 +122,6 @@ def test_disk_without_identity_is_selectable() -> None:
 def _spec(number: int = 1, *, unique_id: str | None = "unique-1", serial: str | None = "SN-1"):
     return SimpleNamespace(
         disk_number=number,
-        dry_run=False,
         task_payload={"partition_info": {"c_size_gb": 30}},
         expected_identity={
             "disk_number": number,
@@ -127,7 +148,7 @@ def test_execute_spec_allows_disk_without_identity() -> None:
 
     def runner(spec, event):
         calls.append(int(spec.disk_number))
-        return WorkerResult.dry_run_plan(int(spec.disk_number))
+        return WorkerResult(disk_number=int(spec.disk_number), success=True, message="ok")
 
     service = _service(disk, allowed_disk_numbers=[1], real_runner=runner)
     service.execute_spec(_spec(1, unique_id=None, serial=None))
@@ -150,7 +171,7 @@ def test_execute_spec_runs_runner_for_clean_disk() -> None:
 
     def runner(spec, event):
         calls.append(int(spec.disk_number))
-        return WorkerResult.dry_run_plan(int(spec.disk_number))
+        return WorkerResult(disk_number=int(spec.disk_number), success=True, message="ok")
 
     service = _service(_summary(), allowed_disk_numbers=[1], real_runner=runner)
     service.execute_spec(_spec())
@@ -175,7 +196,7 @@ _DEFAULT_PARTITIONS: dict[str, Any] = {
 _DEFAULT_SETTINGS: dict[str, Any] = {"sysImageA": _FAKE_IMAGE}
 
 
-def _preflight(*, dry_run: bool = False) -> dict[str, Any]:
+def _preflight() -> dict[str, Any]:
     return {"results": [{"name": "运行前检查", "passed": True, "message": "ok"}]}
 
 
@@ -190,12 +211,11 @@ def _controller() -> tuple[WorkflowController, list[str]]:
     service = _service(_summary(), allowed_disk_numbers=[1])
     wf = _wire(
         service=service,
-        dry_run=False,
         preflight_runner=_preflight,
         worker_interval=0.0,
     )
-    wf.start(dry_run=False)
-    prepared = wf.prepare([1], dry_run=False)
+    wf.start()
+    prepared = wf.prepare([1])
     jobs = wf.submit(prepared, require_confirmation=True)
     return wf, [job.id for job in jobs]
 
@@ -218,7 +238,6 @@ def test_settings_provider_updates_protection_live() -> None:
     service = _service(_summary(0, is_system=True), allowed_disk_numbers=[0])
     wf = _wire(
         service=service,
-        dry_run=False,
         settings_provider=lambda: dict(settings),
     )
 
@@ -240,11 +259,10 @@ def test_refresh_disks_applies_live_protection_setting() -> None:
     service = _service(_summary(0, is_system=True), allowed_disk_numbers=[0])
     wf = _wire(
         service=service,
-        dry_run=False,
         preflight_runner=_preflight,
         settings_provider=lambda: dict(settings),
     )
-    session = wf.start(dry_run=True)
+    session = wf.start()
     assert session.disks[0].is_selectable is False
 
     settings["protectSystemDisk"] = False
@@ -255,49 +273,37 @@ def test_refresh_disks_applies_live_protection_setting() -> None:
 # ------------------------------------------------------------------ 省略选择
 def _controller_multi(disks: list[dict[str, Any]], **kwargs: Any) -> WorkflowController:
     """多盘控制器：验证“不传 selection”时按可选性自动挑盘。"""
-    service = SispService(disk_scanner=lambda: list(disks), dry_run=False, **kwargs)
+    service = SispService(disk_scanner=lambda: list(disks), **kwargs)
     wf = _wire(
         service=service,
-        dry_run=False,
         preflight_runner=_preflight,
         worker_interval=0.0,
     )
-    wf.start(dry_run=False)
+    wf.start()
     return wf
 
 
 def test_prepare_without_selection_uses_selectable_disks() -> None:
     wf = _controller_multi([_summary(1), _summary(2, is_system=True)])
-    prepared = wf.prepare(dry_run=True)
+    prepared = wf.prepare()
     assert [item.disk.disk_number for item in prepared] == [1]
 
 
 def test_prepare_empty_selection_is_still_rejected() -> None:
     wf = _controller_multi([_summary(1)])
     with pytest.raises(WorkflowError) as excinfo:
-        wf.prepare([], dry_run=True)
+        wf.prepare([])
     assert "尚未选择" in str(excinfo.value)
 
 
 def test_prepare_without_selection_fails_when_all_protected() -> None:
     wf = _controller_multi([_summary(1, is_system=True)])
     with pytest.raises(WorkflowError) as excinfo:
-        wf.prepare(dry_run=True)
+        wf.prepare()
     assert "没有可操作" in str(excinfo.value)
 
 
 # --------------------------------------------------- 四道闸门（逐条分支）
-def test_gate_service_dry_run_refuses() -> None:
-    service = SispService(
-        disk_scanner=lambda: [_summary()],
-        dry_run=True,
-        allowed_disk_numbers=[1],
-        real_runner=lambda spec, event: WorkerResult.dry_run_plan(1),
-    )
-    with pytest.raises(PermissionError, match="dry-run"):
-        service.require_disk_writable(1, {"unique_id": "unique-1", "serial_number": "SN-1"})
-
-
 def test_gate_disk_outside_allowlist_refuses() -> None:
     service = _service(_summary(), allowed_disk_numbers=[2])
     with pytest.raises(PermissionError, match="白名单"):
@@ -354,16 +360,14 @@ def _gui_controller() -> WorkflowController:
     """模拟 GUI：没有显式白名单，授权完全来自 prepare/confirm 的隐式加入。"""
     service = SispService(
         disk_scanner=lambda: [_summary()],
-        dry_run=False,
-        real_runner=lambda spec, event: WorkerResult.dry_run_plan(1),
+        real_runner=lambda spec, event: WorkerResult(disk_number=1, success=True, message="ok"),
     )
     controller = _wire(
         service=service,
-        dry_run=False,
         preflight_runner=_preflight,
         worker_interval=0.0,
     )
-    controller.start(dry_run=False)
+    controller.start()
     return controller
 
 
@@ -373,9 +377,9 @@ def test_confirm_regrants_allowlist_after_session_restart() -> None:
     旧行为：确认时白名单是空的 → 闸门报「不在允许写盘的白名单内（当前白名单: 空）」。
     """
     controller = _gui_controller()
-    jobs = controller.submit(controller.prepare([1], dry_run=False), require_confirmation=True)
+    jobs = controller.submit(controller.prepare([1]), require_confirmation=True)
 
-    controller.start(dry_run=False)  # 模拟页面刷新
+    controller.start()  # 模拟页面刷新
     assert controller.service.allowed_disk_numbers == frozenset()
 
     controller.confirm([jobs[0].id])

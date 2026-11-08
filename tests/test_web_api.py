@@ -75,11 +75,10 @@ def _disk(number: int = 1) -> DiskInfo:
 
 
 class _FakeService:
-    """只实现工作流用到的几个方法；真实执行不会被触发（dry_run=True）。"""
+    """只实现工作流用到的几个方法；执行器是替身，不会碰盘。"""
 
     def __init__(self, disks: list[DiskInfo]) -> None:
         self.disks = disks
-        self.dry_run = True
         self.allowed_disk_numbers = frozenset()
 
     def scan_protected_disks(self, excluded_names: Any = None) -> list[DiskInfo]:
@@ -90,11 +89,11 @@ class _FakeService:
         return SimpleNamespace(drive_letter_allocations=letters)
 
     def execute_spec(self, spec, cancel_event):
-        return WorkerResult.dry_run_plan(int(getattr(spec, "disk_number", 0) or 0))
+        return WorkerResult(disk_number=int(getattr(spec, "disk_number", 0) or 0), success=True, message="ok")
 
 
 
-def _preflight(*, dry_run: bool = False) -> dict[str, Any]:
+def _preflight() -> dict[str, Any]:
     return {
         "results": [{"name": "运行前检查", "passed": True, "message": "ok"}],
     }
@@ -105,12 +104,11 @@ def _build_client(
 ) -> tuple[TestClient, WorkflowController]:
     wf = WorkflowController(
         service=_FakeService([_disk(1), _disk(2)]),
-        dry_run=True,
         preflight_runner=_preflight,
         partition_defaults=_PARTITION_DEFAULTS,
         settings_provider=lambda: dict(_SETTINGS),
     )
-    wf.start(dry_run=True)
+    wf.start()
     store = build_store(tmp_path / "settings.json")
     api = WebApi(wf, settings=store, log_dir=log_dir)
     app = create_app(api, wf, host_check=host_check)
@@ -139,7 +137,6 @@ def test_health_and_index(client: TestClient) -> None:
 
 def test_app_info(client: TestClient) -> None:
     data = _unwrap(client.get("/api/info"))
-    assert data["dry_run"] is True
     assert "python" in data
 
 
@@ -159,22 +156,11 @@ def test_host_check_allows_loopback(tmp_path: Path) -> None:
 
 # ---------------------------------------------------------------- 会话与磁盘
 def test_session_and_disks(client: TestClient) -> None:
-    session = _unwrap(client.post("/api/session", json={"dry_run": True}))
+    session = _unwrap(client.post("/api/session", json={}))
     assert len(session["disks"]) == 2
-    assert session["dry_run"] is True
 
     disks = _unwrap(client.get("/api/disks"))
     assert {disk["disk_number"] for disk in disks} == {1, 2}
-
-
-def test_session_cannot_upgrade_forced_dry_run(tmp_path: Path) -> None:
-    """控制器以 dry-run 启动后，API 传 dry_run=false 也不能升级为真实模式。"""
-    client, wf = _build_client(tmp_path)
-
-    session = _unwrap(client.post("/api/session", json={"dry_run": False}))
-
-    assert session["dry_run"] is True
-    assert wf.service.dry_run is True
 
 
 def test_config_check_endpoint_is_gone(client: TestClient) -> None:
@@ -185,7 +171,7 @@ def test_config_check_endpoint_is_gone(client: TestClient) -> None:
 
 # ---------------------------------------------------------------- 任务全流程
 def test_full_job_flow_over_rest(client: TestClient, tmp_path: Path) -> None:
-    prepared = _unwrap(client.post("/api/prepare", json={"selection": [1], "dry_run": True}))
+    prepared = _unwrap(client.post("/api/prepare", json={"selection": [1]}))
     assert len(prepared) == 1
     assert prepared[0]["plan"]["blockers"] == []
 
@@ -197,7 +183,7 @@ def test_full_job_flow_over_rest(client: TestClient, tmp_path: Path) -> None:
     confirmed = _unwrap(client.post("/api/confirm", json={"job_ids": [job_id]}))
     assert confirmed[0]["id"] == job_id
 
-    # dry-run 执行很快；轮询等待完成
+    # 替身执行器很快；轮询等待完成
     deadline = time.monotonic() + 5
     job: dict[str, Any] = {}
     while time.monotonic() < deadline:
@@ -206,7 +192,6 @@ def test_full_job_flow_over_rest(client: TestClient, tmp_path: Path) -> None:
             break
         time.sleep(0.05)
     assert job["status"] == "ok", job
-    assert job["result"]["dry_run"] is True
 
     # 事件缓冲里应该能捞到这条任务的创建与结束事件
     polled = _unwrap(client.post("/api/events/poll", json={"cursor": 0, "limit": 100}))
@@ -217,7 +202,7 @@ def test_full_job_flow_over_rest(client: TestClient, tmp_path: Path) -> None:
 
 
 def test_duplicate_submit_is_rejected(client: TestClient) -> None:
-    _unwrap(client.post("/api/prepare", json={"selection": [1], "dry_run": True}))
+    _unwrap(client.post("/api/prepare", json={"selection": [1]}))
     _unwrap(client.post("/api/submit"))
 
     body = client.post("/api/submit").json()
@@ -235,7 +220,7 @@ def test_prepare_accepts_per_disk_override_mapping(client: TestClient) -> None:
     prepared = _unwrap(
         client.post(
             "/api/prepare",
-            json={"selection": {"1": {"c_size": 20, "data_size": 30}}, "dry_run": True},
+            json={"selection": {"1": {"c_size": 20, "data_size": 30}}},
         )
     )
     assert len(prepared) == 1
@@ -431,7 +416,7 @@ def test_sse_streams_snapshot_and_events(tmp_path: Path) -> None:
                     with httpx.Client(timeout=5.0, trust_env=False) as producer:
                         producer.post(
                             base + "/api/prepare",
-                            json={"selection": [1], "dry_run": True},
+                            json={"selection": [1]},
                         )
                         producer.post(base + "/api/submit")
                 except Exception:  # noqa: BLE001, S110 - 测试里失败由帧断言兜底
@@ -552,20 +537,11 @@ def test_job_log_rejects_non_log_suffix(tmp_path: Path, monkeypatch: pytest.Monk
 
 # ---------------------------------------------------------------- 危险操作确认
 
-def test_session_without_dry_run_keeps_process_mode(tmp_path: Path) -> None:
-    """界面刷新会话时不传 dry_run，不能把演练模式的进程切成真实写盘。"""
-    client, wf = _build_client(tmp_path)
-    session = _unwrap(client.post("/api/session", json={}))
-    assert session["dry_run"] is True
-    assert wf.service.dry_run is True
-
-
-# ------------------------------------------------- 分区/引导：真实操作的强身份
 def test_resolve_identity_prefers_caller_then_scans(tmp_path: Path, monkeypatch) -> None:
     """界面只传盘号时，闸门也要拿到这块盘的身份（执行前复核用）。
 
     以前这里是 ``identity or {}``，于是**真实分区操作和修复引导全部被拒**——
-    在打包好的 exe 上实测才会发现（演练模式不拦，所以本地测不出来）。
+    在打包好的 exe 上实测才会发现（本地替身拦不住真实子进程）。
     """
     _client, wf = _build_client(tmp_path)
     api = WebApi(wf, settings=build_store(tmp_path / "settings.json"))

@@ -10,7 +10,7 @@ python -m app.gui_web.main --serve          # 前台服务
 python -m app.gui_web.main --serve --port 8765
 ```
 
-参数：`--dry-run`、`--elevate`、`--debug`、`--serve`、`--port`（默认 8765）、`--host`（默认 `127.0.0.1`）、`--settings`、`--width`、`--height`。（`-j/--config` 已移除。）桌面模式需要 pywebview；`--serve` 不依赖它。两种模式都加载同一个本机 HTTP 服务。
+参数：`--elevate`、`--debug`、`--serve`、`--port`（默认 8765）、`--host`（默认 `127.0.0.1`）、`--settings`、`--width`、`--height`。（`-j/--config` 与 `--dry-run` 已移除。）桌面模式需要 pywebview；`--serve` 不依赖它。两种模式都加载同一个本机 HTTP 服务。
 
 桌面模式的进程模型：**窗口进程不提权**（exe 清单 `asInvoker`），它会用 UAC 拉起
 `Sisp2.exe --backend --serve --host 127.0.0.1 --port <N> --parent-pid <界面 pid>`
@@ -21,7 +21,7 @@ python -m app.gui_web.main --serve --port 8765
 - 后端只监听回环地址，且父进程消失时自己退出；
 - 提权被取消时退回进程内服务（普通权限），此时真实写盘会被预检拦住。
 
-有效 GUI dry-run 只来自命令行 `--dry-run`（设置里的默认演练开关已移除）。该值在启动时锁定为硬上限，`POST /api/session` 传 `dry_run:false` 或 `POST /api/prepare` 传 `dry_run:false` 都不能升级为真实执行。`POST /api/session` 与 `POST /api/prepare` 的 `dry_run` 可省略，省略表示**沿用进程模式**（前端刷新会话时不再把强制演练悄悄降级成真实模式）。服务必须单进程单 worker，因为任务和缓冲状态保存在内存。端口被占用入口返回 4；FastAPI 自动文档地址默认为 `http://127.0.0.1:8765/docs`（地址随 host/port 改变）。
+服务没有演练模式：`/api/session`、`/api/prepare`、`/api/boot/repair` 都不接受 `dry_run`。`/api/prepare` 与 `/api/partition/preview` 本身就是只读的（生成计划与脚本，不执行命令），真正写盘只发生在 `POST /api/confirm` 之后。服务必须单进程单 worker，因为任务和缓冲状态保存在内存。端口被占用入口返回 4；FastAPI 自动文档地址默认为 `http://127.0.0.1:8765/docs`（地址随 host/port 改变）。
 
 ## 路由
 
@@ -30,10 +30,10 @@ python -m app.gui_web.main --serve --port 8765
 | `GET /` | 托管 `ui/index.html` |
 | `GET /static/*` | 托管 `ui/css`、`ui/js`（无构建步骤，直接送 ES 模块） |
 | `GET /health` | 健康探针 |
-| `GET /api/info` | 版本、平台、会话 dry-run |
-| `POST /api/session` | `{dry_run?}`；重启会话并清空 WebApi 事件缓冲 |
+| `GET /api/info` | 版本、平台 |
+| `POST /api/session` | 无请求体；重启会话并清空 WebApi 事件缓冲 |
 | `GET /api/disks` | 重扫硬盘 |
-| `POST /api/prepare` | `{selection, dry_run}`；selection 为盘号数组或盘号到覆盖对象的映射（每盘覆盖支持 `c_size`、`data_size`、`data_partitions`、`win_gho`）；省略 selection 表示「本次扫描里所有可选定的盘」，显式传空数组仍然报错（`E_PREPARE`） |
+| `POST /api/prepare` | `{selection}`；selection 为盘号数组或盘号到覆盖对象的映射（每盘覆盖支持 `c_size`、`data_size`、`data_partitions`、`win_gho`）；省略 selection 表示「本次扫描里所有可选定的盘」，显式传空数组仍然报错（`E_PREPARE`） |
 | `POST /api/submit` | 登记等待确认任务 |
 | `POST /api/confirm` | `{job_ids}`；把等待确认的任务放行（授权来自界面上的勾选，不需要额外文本）|
 | `POST /api/cancel` | `{job_id}`，协作式取消 |
@@ -164,11 +164,11 @@ ui/
 ```powershell
 python tools/ui_check.py                                                  # 语法/引用/纯函数行为
 node tools/ui_smoke.mjs --url http://127.0.0.1:8765/ --out build/shots     # 浏览器冒烟 + 截图
-node tools/ui_smoke.mjs --url http://127.0.0.1:8901/ --start --out build/shots  # 再跑到进度页（只配 --dry-run）
+node tools/ui_smoke.mjs --url http://127.0.0.1:8901/ --start --allow-write --out build/shots  # 再跑到进度页（会真实写盘，只对临时盘）
 ```
 
 `ui_check.py` 也需要 `node`（只做语法与纯函数行为，不挂浏览器依赖）；没有 `node`
 时打印“跳过”并以 0 退出。`ui_smoke.mjs` 用 headless Chrome 的 DevTools 协议走一遍
 主页面、四步向导、设置页、菜单和修复引导弹窗，把 `{ok, problems, steps}` 打到 stdout，
-截图落到 `--out` 指定的目录；加 `--start` 时会先确认服务处于演练模式，再勾选、点“开始安装”，
+截图落到 `--out` 指定的目录；加 `--start --allow-write` 时会勾选、点“开始安装”（**真实写盘**，只能对临时盘/空盘使用），
 对进度页（`.jcard` / 3 行 `.phrow` / 折叠日志 `.plogbox` / 取消按钮样式）做断言。

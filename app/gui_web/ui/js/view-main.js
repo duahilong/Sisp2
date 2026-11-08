@@ -32,9 +32,6 @@ function renderBanners() {
   if (!box) return;
   const banners = [];
   const session = state.session;
-  if (state.info && state.info.dry_run) {
-    banners.push(['ok', '演练模式：界面可以完整走一遍，但不会真的写盘。要真写请在设置里关掉“默认演练”。']);
-  }
   for (const blocker of (session && session.blockers) || []) {
     banners.push(['danger', blocker]);
   }
@@ -191,7 +188,6 @@ function renderHead(disk) {
   if (disk.is_read_only) flags.push('<span class="flag warn">只读磁盘</span>');
   if (disk.is_offline) flags.push('<span class="flag warn">脱机</span>');
   if (isSelectable(disk)) flags.push('<span class="flag acc">可操作</span>');
-  if (state.info && state.info.dry_run) flags.push('<span class="flag">演练模式</span>');
 
   head.innerHTML = `
     <span class="hname">磁盘 ${esc(disk.disk_number)}</span>

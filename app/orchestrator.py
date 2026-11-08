@@ -104,11 +104,11 @@ def identity_matches(
 ) -> bool:
     """确认“确认时看到的盘”和“worker 现在摸到的盘”是同一块。
 
-    - ``require_strong=True``（默认，真实写盘必须用）时，期望身份必须带
-      UniqueId 或 SerialNumber，且期望里出现的标识字段都要对得上；
-      期望里没写的字段不参与比较（扫描结果可能缺序列号）；
-    - ``require_strong=False`` 时允许只比对硬盘编号 + 容量 + 型号，
-      仅供 dry-run 或展示使用。
+    - ``require_strong=True`` 时，期望身份必须带 UniqueId 或 SerialNumber，
+      且期望里出现的标识字段都要对得上（适合“有无标识都必须强校验”的调用方）；
+    - ``require_strong=False`` 时允许只比对硬盘编号 + 容量 + 型号。
+      写盘闸门用的就是这一档：有标识仍逐项比对，没有标识的盘（部分 USB
+      桥接/虚拟盘）也不会被一律拒绝。
     """
     if not isinstance(expected, Mapping) or not isinstance(actual, Mapping):
         return False

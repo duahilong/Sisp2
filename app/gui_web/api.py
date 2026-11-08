@@ -128,15 +128,10 @@ class WebApi:
         })
 
     # ------------------------------------------------------------------ 会话
-    def start_session(self, dry_run: bool | None = None) -> dict[str, Any]:
-        """启动会话。
-
-        ``dry_run`` 省略（``None``）表示“保持进程当前的模式”——GUI 的模式在
-        ``gui_web/main.py`` 里已经按 ``--dry-run`` 定好了，
-        界面不该在每次刷新会话时把它改回真实写盘。
-        """
+    def start_session(self) -> dict[str, Any]:
+        """启动会话（运行前检查 + 扫描硬盘 + 生成任务载荷快照）。"""
         try:
-            session = self._wf.start(dry_run=None if dry_run is None else bool(dry_run))
+            session = self._wf.start()
         except Exception as exc:  # noqa: BLE001 - 任何异常都要变成信封返回给界面
             return err("E_START", str(exc))
         with self._lock:
@@ -152,14 +147,14 @@ class WebApi:
         return ok([disk.to_dict() for disk in disks])
 
     # ------------------------------------------------------------------ 计划与执行
-    def prepare(self, selection: Any, dry_run: bool | None = None) -> dict[str, Any]:
-        """生成执行计划。
+    def prepare(self, selection: Any) -> dict[str, Any]:
+        """生成执行计划（只读：不碰盘、不执行命令）。
 
         ``selection`` 可以是 ``[1, 3]``，也可以是 ``{1: {"c_size": 400}}``
-        （按盘覆盖配置，需要后端打上 workflow 的 G3 补丁）。
+        （按盘覆盖配置）。
         """
         try:
-            prepared = self._wf.prepare(selection, dry_run=dry_run)
+            prepared = self._wf.prepare(selection)
         except Exception as exc:  # noqa: BLE001
             return err("E_PREPARE", str(exc))
         return ok([
@@ -381,17 +376,16 @@ class WebApi:
         self,
         disk_number: Any,
         identity: dict[str, Any] | None = None,
-        dry_run: bool | None = None,
     ) -> dict[str, Any]:
         """重写指定硬盘的 UEFI 引导；写盘前过同一套闸门。"""
         try:
             number = int(disk_number)
         except (TypeError, ValueError):
             return err("E_BOOT", "硬盘编号不合法")
-        self._wf.authorize_disks([number], dry_run=dry_run)
+        self._wf.authorize_disks([number])
         try:
             result = self._boot_repairer().repair(
-                number, identity=self._resolve_identity(number, identity), dry_run=dry_run
+                number, identity=self._resolve_identity(number, identity)
             )
         except PermissionError as exc:
             return err("E_CONFIRM", str(exc))
@@ -407,7 +401,6 @@ class WebApi:
             self._gate,
             bcdboot=str(settings.get("extBcdboot") or "") or None,
             log_dir=self._log_root,
-            dry_run=self._service_dry_run(),
             # GUI 是生产入口：用户点"修复引导"就是要真写盘，这里显式授权。
             allow_real_disk=True,
         )
@@ -438,15 +431,12 @@ class WebApi:
         }
 
     def _gate(self, disk_number: int, identity: dict[str, Any]) -> Any:
-        """分区/引导共用的写盘闸门；dry-run 下由各 runner 自己短路。"""
+        """分区/引导共用的写盘闸门。"""
         service = self._wf.service
         gate = getattr(service, "require_disk_writable", None)
         if gate is None:  # 测试替身没有该方法时退回“只读扫描”
             return _scan_summary(disk_number)
         return gate(disk_number, identity)
-
-    def _service_dry_run(self) -> bool:
-        return bool(getattr(self._wf.service, "dry_run", True))
 
     # ------------------------------------------------------------------ 设置
     def get_settings(self) -> dict[str, Any]:
@@ -590,12 +580,10 @@ class WebApi:
             return err("E_SETTINGS", str(exc))
 
     def app_info(self) -> dict[str, Any]:
-        session = self._wf.session
         return ok({
             "version": self._version,
             "python": sys.version.split()[0],
             "platform": platform.platform(),
-            "dry_run": bool(session.dry_run) if session is not None else False,
         })
 
     # ------------------------------------------------------------------ 收尾

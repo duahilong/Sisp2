@@ -43,8 +43,6 @@ class PhaseContext:
     # 本任务独占的 Ghost 工作目录（放 ghosterr.txt / ghost32.dmp）；结束后由
     # runner 归档失败原因并删除。None 时退回日志目录（单测用）。
     work_dir: str | None = None
-    # 演练任务：阶段可以报“将会做什么”，但绝不执行命令（拷贝阶段用它区分文案）。
-    dry_run: bool = False
 
     def __post_init__(self) -> None:
         # 回调可以是老的 ``on_step(key, status, message)``，也可以多接一个

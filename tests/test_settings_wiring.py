@@ -23,7 +23,6 @@ from app.preflight import CHECK_SETTING_PATHS, CHECK_TOOLS, run_preflight_checks
 
 def _preflight(settings: dict[str, Any], tmp_path) -> dict[str, Any]:
     return run_preflight_checks(
-        dry_run=True,
         admin_checker=lambda: True,
         command_lookup=lambda name: f"C:/{name}.exe",
         disk_usage=lambda root: (0, 0, 10 * 1024**3),
@@ -84,8 +83,7 @@ def test_workflow_passes_release_switch_both_ways() -> None:
     for value, expected in ((True, True), (False, False)):
         wf = WorkflowController(
             service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
-            dry_run=True,
-            preflight_runner=lambda *, dry_run=False: {"results": []},
+            preflight_runner=lambda : {"results": []},
             settings_provider=lambda v=value: {"releaseEfiLetter": v},
         )
         assert wf._runner_options()["release_efi_letter"] is expected
@@ -94,8 +92,7 @@ def test_workflow_passes_release_switch_both_ways() -> None:
 def test_workflow_release_switch_defaults_to_on() -> None:
     wf = WorkflowController(
         service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
-        dry_run=True,
-        preflight_runner=lambda *, dry_run=False: {"results": []},
+        preflight_runner=lambda : {"results": []},
         settings_provider=dict,
     )
     assert wf._runner_options()["release_efi_letter"] is True
@@ -104,8 +101,7 @@ def test_workflow_release_switch_defaults_to_on() -> None:
 def test_workflow_maps_settings_to_runner_options() -> None:
     wf = WorkflowController(
         service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
-        dry_run=True,
-        preflight_runner=lambda *, dry_run=False: {"results": []},
+        preflight_runner=lambda : {"results": []},
         settings_provider=lambda: {
             # 临时目录 / 引导源目录的设置项已移除：老配置文件里就算还留着，
             # 也不该再被翻译成执行器选项。
@@ -128,8 +124,7 @@ def test_workflow_passes_copy_source_without_trimming_path() -> None:
     """附加文件目录只去首尾空白，其余原样下发（可用性由拷贝阶段判断）。"""
     wf = WorkflowController(
         service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
-        dry_run=True,
-        preflight_runner=lambda *, dry_run=False: {"results": []},
+        preflight_runner=lambda : {"results": []},
         settings_provider=lambda: {"copySource": r"  D:\素材  "},
     )
     assert wf._runner_options()["copy_source"] == r"D:\素材"
@@ -138,13 +133,12 @@ def test_workflow_passes_copy_source_without_trimming_path() -> None:
 def test_workflow_preflight_receives_settings() -> None:
     seen: list[dict[str, Any]] = []
 
-    def preflight(*, dry_run=False, settings=None):
+    def preflight(settings=None):
         seen.append(dict(settings or {}))
         return {"results": []}
 
     wf = WorkflowController(
         service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
-        dry_run=True,
         preflight_runner=preflight,
         settings_provider=lambda: {"sysImageA": r"D:\a.gho"},
     )
@@ -158,8 +152,7 @@ def test_workflow_survives_broken_settings_provider() -> None:
 
     wf = WorkflowController(
         service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
-        dry_run=True,
-        preflight_runner=lambda *, dry_run=False: {"results": []},
+        preflight_runner=lambda : {"results": []},
         settings_provider=boom,
     )
     assert wf._settings() == {}
@@ -330,8 +323,7 @@ def test_runner_accepts_runner_options_on_spec(
 def test_workflow_ignores_blank_setting_values(bad: str) -> None:
     wf = WorkflowController(
         service=SimpleNamespace(allowed_disk_numbers=frozenset({1})),
-        dry_run=True,
-        preflight_runner=lambda *, dry_run=False: {"results": []},
+        preflight_runner=lambda : {"results": []},
         settings_provider=lambda: {"sysImageA": bad, "extGhost": bad},
     )
     # 执行器选项只剩布尔开关与拷贝目录：坏掉的镜像路径不该混进来
@@ -339,7 +331,7 @@ def test_workflow_ignores_blank_setting_values(bad: str) -> None:
 
 
 def _noop(*_args: Any, **_kwargs: Any) -> WorkerResult:
-    return WorkerResult.failure(1, "unused", dry_run=True)
+    return WorkerResult.failure(1, "unused")
 
 
 def test_diskpart_script_written_into_configured_temp_dir(tmp_path) -> None:
@@ -374,10 +366,9 @@ def test_diskpart_script_written_into_configured_temp_dir(tmp_path) -> None:
 def _controller(settings: dict[str, Any], payload: dict[str, Any] | None = None) -> WorkflowController:
     return WorkflowController(
         service=SimpleNamespace(
-            allowed_disk_numbers=frozenset({1}), dry_run=True, scan_protected_disks=lambda names: []
+            allowed_disk_numbers=frozenset({1}), scan_protected_disks=lambda names: []
         ),
-        dry_run=True,
-        preflight_runner=lambda *, dry_run=False: {"results": []},
+        preflight_runner=lambda : {"results": []},
         partition_defaults=dict(payload or {}),
         settings_provider=lambda: dict(settings),
         worker_interval=0.0,
@@ -409,18 +400,17 @@ def test_start_scans_without_excluded_names() -> None:
         return []
 
     wf = WorkflowController(
-        service=SimpleNamespace(allowed_disk_numbers=frozenset({1}), dry_run=True, scan_protected_disks=scan),
-        dry_run=True,
-        preflight_runner=lambda *, dry_run=False: {"results": []},
+        service=SimpleNamespace(allowed_disk_numbers=frozenset({1}), scan_protected_disks=scan),
+        preflight_runner=lambda : {"results": []},
         worker_interval=0.0,
     )
-    wf.start(dry_run=True)
+    wf.start()
     assert seen == [((), {})]
 
 
 def test_default_system_image_from_settings() -> None:
     wf = _controller({"sysImageA": r"D:\\sisp-test\\test.GHO", "imageDefaultIndex": 3})
-    wf.start(dry_run=True)
+    wf.start()
     payload = wf.session.task_payload
     assert payload["image_info"]["image_path"] == str(Path(r"D:\\sisp-test\\test.GHO"))
     # 分区块序号不开放设置：载荷里只有路径，执行层固定写 ``:1``；
@@ -431,7 +421,7 @@ def test_default_system_image_from_settings() -> None:
 def test_settings_image_is_the_only_source() -> None:
     """``sysImageA`` 是镜像路径的唯一来源：会话载荷里就是设置里那一份。"""
     wf = _controller({"sysImageA": r"D:\sisp-test\test.GHO"})
-    wf.start(dry_run=True)
+    wf.start()
     info = wf.session.task_payload["image_info"]
     assert info["image_path"] == str(Path(r"D:\sisp-test\test.GHO"))
 
@@ -439,7 +429,7 @@ def test_settings_image_is_the_only_source() -> None:
 def test_default_system_image_falls_back_to_slot_b() -> None:
     """只配了系统 B 时默认镜像就是 B —— 两个槽位是并列的，没有“主槽位”。"""
     wf = _controller({"sysImageB": r"D:\sisp-test\win11.GHO"})
-    wf.start(dry_run=True)
+    wf.start()
     assert wf.session.task_payload["image_info"]["image_path"] == str(
         Path(r"D:\sisp-test\win11.GHO")
     )
@@ -449,7 +439,7 @@ def test_default_system_image_prefers_slot_a() -> None:
     wf = _controller(
         {"sysImageA": r"D:\sisp-test\win10.GHO", "sysImageB": r"D:\sisp-test\win11.GHO"}
     )
-    wf.start(dry_run=True)
+    wf.start()
     assert wf.session.task_payload["image_info"]["image_path"] == str(
         Path(r"D:\sisp-test\win10.GHO")
     )
@@ -458,7 +448,7 @@ def test_default_system_image_prefers_slot_a() -> None:
 def test_legacy_image_index_setting_is_ignored() -> None:
     """旧设置 ``imageDefaultIndex`` 已删除，残留的键进不了载荷。"""
     wf = _controller({"sysImageA": r"D:\images	est.GHO", "imageDefaultIndex": 0})
-    wf.start(dry_run=True)
+    wf.start()
     assert "image_index" not in wf.session.task_payload["image_info"]
 
 
@@ -485,7 +475,6 @@ def test_preflight_image_check_flags_missing_file(tmp_path) -> None:
 
     missing = tmp_path / "missing.GHO"
     report = run_preflight_checks(
-        dry_run=True,
         admin_checker=lambda: True,
         command_lookup=lambda name: f"C:/{name}.exe",
         disk_usage=lambda root: (0, 0, 10 * 1024**3),

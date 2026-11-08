@@ -7,8 +7,7 @@
 
 - ``success`` 只表示“这次任务整体是否成功”。单步失败时 ``steps`` 仍然完整，
   界面据此定位是分区、格式化还是写镜像出的问题；
-- dry-run 任务同样返回 ``WorkerResult``，但 ``dry_run=True``、每个步骤的
-  ``status`` 为 ``skipped``，``details`` 里带“将要执行什么”的预览；
+- 计划阶段（``prepare``）只产出 ``ExecutionPlan``，不构造本对象；
 - 对象只装可序列化数据，不含文件句柄、线程或 Qt 控件，``to_dict()``
   的结果可以直接塞进 JSON 响应或日志。
 """
@@ -78,35 +77,11 @@ class WorkerResult:
     disk_number: int
     success: bool
     message: str = ""
-    dry_run: bool = False
     steps: tuple[StepResult, ...] = ()
     error: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
     duration_seconds: float = 0.0
-
-    @classmethod
-    def dry_run_plan(
-        cls,
-        disk_number: int,
-        steps: tuple[StepResult, ...] | list[StepResult] = (),
-        message: str = "dry-run 模式：仅生成执行计划，未执行任何命令",
-        *,
-        started_at: str | None = None,
-        finished_at: str | None = None,
-        duration_seconds: float = 0.0,
-    ) -> WorkerResult:
-        """构造一份 dry-run 结果：整体成功，但所有步骤都是“未执行”。"""
-        return cls(
-            disk_number=disk_number,
-            success=True,
-            message=message,
-            dry_run=True,
-            steps=tuple(steps),
-            started_at=started_at,
-            finished_at=finished_at,
-            duration_seconds=duration_seconds,
-        )
 
     @classmethod
     def failure(
@@ -115,7 +90,6 @@ class WorkerResult:
         error: str,
         *,
         message: str = "",
-        dry_run: bool = False,
         steps: tuple[StepResult, ...] | list[StepResult] = (),
     ) -> WorkerResult:
         """构造一份失败结果；``error`` 保留原始异常文本方便排查。"""
@@ -123,7 +97,6 @@ class WorkerResult:
             disk_number=disk_number,
             success=False,
             message=message or error,
-            dry_run=dry_run,
             steps=tuple(steps),
             error=error,
         )
@@ -133,7 +106,6 @@ class WorkerResult:
             "disk_number": self.disk_number,
             "success": self.success,
             "message": self.message,
-            "dry_run": self.dry_run,
             "steps": [step.to_dict() for step in self.steps],
             "error": self.error,
             "started_at": self.started_at,
@@ -157,7 +129,6 @@ class WorkerResult:
             disk_number=int(data.get("disk_number") or 0),
             success=bool(data.get("success")),
             message=str(data.get("message") or ""),
-            dry_run=bool(data.get("dry_run")),
             steps=steps,
             error=str(data["error"]) if data.get("error") else None,
             started_at=str(data["started_at"]) if data.get("started_at") else None,

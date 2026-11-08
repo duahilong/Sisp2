@@ -59,7 +59,7 @@ export const api = {
   refreshDisks: () => get('/api/disks'),
 
   // 计划与任务
-  prepare: (selection, dryRun) => post('/api/prepare', { selection, dry_run: dryRun }),
+  prepare: (selection) => post('/api/prepare', { selection }),
   submit: () => post('/api/submit'),
   confirm: (jobIds) => post('/api/confirm', { job_ids: jobIds }),
   cancel: (jobId) => post('/api/cancel', jobId ? { job_id: jobId } : {}),

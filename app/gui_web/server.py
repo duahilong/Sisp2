@@ -109,9 +109,8 @@ def create_app(
 
     # ------------------------------------------------------------- 会话与磁盘
     @app.post("/api/session")
-    def start_session(body: dict[str, Any] | None = None) -> dict[str, Any]:
-        raw = (body or {}).get("dry_run")
-        return api.start_session(None if raw is None else bool(raw))
+    def start_session() -> dict[str, Any]:
+        return api.start_session()
 
     @app.get("/api/disks")
     def refresh_disks() -> dict[str, Any]:
@@ -121,7 +120,7 @@ def create_app(
     @app.post("/api/prepare")
     def prepare(body: dict[str, Any] | None = None) -> dict[str, Any]:
         body = body or {}
-        return api.prepare(body.get("selection"), body.get("dry_run"))
+        return api.prepare(body.get("selection"))
 
     @app.post("/api/submit")
     def submit() -> dict[str, Any]:
@@ -174,7 +173,6 @@ def create_app(
         return api.boot_repair(
             payload.get("disk_number"),
             payload.get("identity"),
-            payload.get("dry_run"),
         )
 
     # ------------------------------------------------------------- 事件：轮询兜底

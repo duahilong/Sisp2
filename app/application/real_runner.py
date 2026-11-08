@@ -264,7 +264,7 @@ class WindowsDiskRunner:
         log = CommandLog(self.log_dir, disk_number=disk_number)
         env = runtime_env()
         started = datetime.now()
-        log.write(f"任务开始：disk={disk_number} dry_run=False letters={letters}")
+        log.write(f"任务开始：disk={disk_number} letters={letters}")
         log.write(f"配置：{json.dumps(payload, ensure_ascii=False)[:2000]}")
 
         parts, layout_error = JobPipeline.build_parts(payload, letters)
@@ -369,7 +369,6 @@ class WindowsDiskRunner:
                 if success
                 else f"硬盘 {disk_number} 执行失败：{pipeline_result.failure or '有步骤失败'}"
             ),
-            dry_run=False,
             steps=steps,
             error=None if success else (pipeline_result.failure or "有步骤失败"),
             started_at=started.isoformat(timespec="seconds"),

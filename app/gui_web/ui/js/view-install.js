@@ -124,9 +124,7 @@ function hintText(step) {
   if (step === 1) return `${state.disks.filter(isSelectable).length} 块盘可安装 · 系统盘和只读盘已置灰`;
   if (step === 2) return '拖分隔条调大小：最后一个数据分区永远吃满剩余，剩下多少就给它多少';
   if (step === 3) return images.loading ? '正在读取系统版本…' : '每块盘选一个系统版本，装完再写 UEFI 引导';
-  if (step === 4) return state.info && state.info.dry_run
-    ? '当前是演练模式：点开始只会走一遍计划，不会真的写盘'
-    : '点开始后先跑一轮预检，任何一项不通过都会拒绝写盘';
+  if (step === 4) return '点开始后先跑一轮预检，任何一项不通过都会拒绝写盘';
   return '';
 }
 
@@ -681,7 +679,7 @@ function partRowHtml(role, letter, size, fileSystem) {
  * （`convert gpt` 的临时产物，执行器会删，日志里有）。
  */
 function planCardsHtml() {
-  const mode = state.info && state.info.dry_run ? '演练（不写盘）' : '真实写盘';
+  const mode = '真实写盘';
   return state.plans.map((item) => {
     const plan = item.plan;
     const disk = item.disk || diskOf(plan.disk_number);
@@ -890,10 +888,10 @@ function layoutPanel(info, openKey) {
   const verdict = info.verdict;
   const problems = verdict.problems.length;
   const ok = info.status === 'ok' && problems === 0;
-  // 演练与未执行的步骤 status 不是 ok，但也没有问题——不能显示成“未通过”。
+  // 未执行的步骤 status 不是 ok，但也没有问题——不能显示成“未通过”。
   const label = ok
     ? '分区验收通过'
-    : (problems ? `分区验收未通过（${problems} 个问题）` : `分区验收${info.status === 'skipped' ? '未执行（演练）' : '未通过'}`);
+    : (problems ? `分区验收未通过（${problems} 个问题）` : '分区验收未通过');
   const rows = verdict.rows.map((row) => `<tr><td class="k">#${row.number} ${esc(row.label)}</td>
       <td>${esc(fmtSize(row.size))}${row.letter ? ` · ${esc(row.letter)}:` : ''}${row.fileSystem ? ` · ${esc(row.fileSystem)}` : ''}</td></tr>`).join('');
   return `<details class="vdbox" data-open-key="${esc(openKey)}"${openKey ? '' : ''}>

@@ -2,7 +2,7 @@
  * 无依赖的界面冒烟测试：用 Chrome DevTools Protocol 打开界面、点几下、截图。
  *
  * 用法（先起服务）：
- *   python -m app.gui_web.main --serve --port 8901 --dry-run
+ *   python -m app.gui_web.main --serve --port 8901
  *   node build/ui_smoke.mjs --url http://127.0.0.1:8901/ --out build/shots
  *
  * 它会：
@@ -11,9 +11,9 @@
  *   3. 依次切到 系统安装 → 选盘 → 分区大小 → 版本 → 确认，再切到 设置；
  *   4. 每屏截一张 png，最后把结果（含 JS 报错）打成一坨 JSON。
  *
- * 加 ``--start`` 时（**只对 --dry-run 服务**）会勾选确认框、点“开始安装”，
- * 等进度页出来后再截图与断言（任务卡片 / 3 行阶段 / 日志折叠）。真实模式下
- * 这个参数会被拒绝执行——它会写盘。
+ * 加 ``--start --allow-write`` 时会勾选确认框、点“开始安装”，等进度页出来后
+ * 再截图与断言（任务卡片 / 阶段行 / 日志折叠）。**这会真实写盘**：只允许在
+ * 测试机的临时盘（VHD/空盘）上跑，界面里选中的盘必须是可以清空的。
  *
  * 有 JS 异常 / 致命错误屏 / 关键节点为空 → 退出码 1。
  */
@@ -32,6 +32,7 @@ const argOf = (name, fallback) => {
 const URL_ = argOf('url', 'http://127.0.0.1:8901/');
 const OUT = argOf('out', 'build/shots');
 const START = args.includes('--start');
+const ALLOW_WRITE = args.includes('--allow-write');
 // 端口默认随机抽一个：固定端口一旦有残留的 headless Chrome 占着，就会连到上一轮的浏览器上。
 const PORT = Number(argOf('port', String(9300 + Math.floor(Math.random() * 600))));
 // 自动找一个 Chromium 内核的浏览器：开发机上通常是 Chrome，干净的测试机可能只有 Edge。
@@ -640,13 +641,10 @@ async function main() {
       });
     }
 
-    // 进度页：只在演练模式下真跑一次任务（真实模式点“开始安装”会写盘，绝不点）
+    // 进度页：--start 会真实写盘，必须显式加 --allow-write，且只用于临时盘
     if (START) {
-      const info = JSON.parse(
-        await evaluate(`fetch('/api/info').then((r) => r.json()).then((j) => JSON.stringify(j.data || {}))`),
-      );
-      if (!info.dry_run) {
-        problems.push('--start 只能配 --dry-run 服务使用；本次跳过进度页检查');
+      if (!ALLOW_WRITE) {
+        problems.push('--start 会真实写盘，必须同时加 --allow-write（只对临时盘使用）');
       } else {
         await evaluate(`(function () {
           const box = document.querySelector('#ackBox');

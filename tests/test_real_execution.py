@@ -2,10 +2,9 @@
 
 覆盖三处曾经的断点（历史 bug）：
 
-1. ``WorkflowController`` 从没把 ``dry_run`` 传给 ``SispService``（服务默认 True）；
-2. ``JobManager`` 的默认执行器会另造一个 ``SispService()``（也是 True），
-   控制器上挂的执行器因此被绕过；
-3. 真实模式要求注入 ``real_runner``，而仓库里从来没有人注入。
+1. ``WorkflowController`` 装配的 ``SispService`` 必须带上真实执行器，不能是空壳；
+2. ``JobManager`` 的默认执行器不能另造一个服务把控制器上挂的执行器绕开；
+3. 真实执行要求注入 ``real_runner``，没有执行器时必须在执行层拒绝。
 
 这些测试全部用替身执行器，不碰 diskpart/ghost。
 """
@@ -35,7 +34,6 @@ from app.application.real_runner import (
     build_real_runner,
     prune_runner_logs,
 )
-from app.application.service import SispService
 from app.application.workflow import WorkflowController
 from app.models import WorkerResult
 from tests.fakes import FakeDiskpartShell as FakeShell
@@ -76,9 +74,8 @@ def _disk(number: int = 1, *, selectable: bool = True, size_gb: int = 60) -> Dis
 class _FakeService:
     """只实现工作流用到的几个方法；executor 被调用时记一笔。"""
 
-    def __init__(self, disks: list[DiskInfo], *, dry_run: bool = True) -> None:
+    def __init__(self, disks: list[DiskInfo]) -> None:
         self.disks = disks
-        self.dry_run = dry_run
         self.allowed_disk_numbers = frozenset()
         self.executed: list[Any] = []
 
@@ -102,7 +99,7 @@ _SETTINGS: dict[str, Any] = {
 }
 
 
-def _preflight(*, dry_run: bool = False) -> dict[str, Any]:
+def _preflight() -> dict[str, Any]:
     return {"results": [{"name": "运行前检查", "passed": True, "message": "ok"}]}
 
 
@@ -115,47 +112,28 @@ def _wire(**kwargs: Any) -> WorkflowController:
 
 # ---------------------------------------------------------------- 装配（P0-1）
 def test_real_mode_builds_service_with_runner_and_allowlist():
-    controller = _wire(dry_run=False, allowed_disk_numbers=[1, 2])
+    controller = _wire(allowed_disk_numbers=[1, 2])
 
-    assert controller.service.dry_run is False
     assert controller.service.allowed_disk_numbers == frozenset({1, 2})
     # 默认执行器必须是真实实现，不能再是 None（旧实现从不注入）。
     assert isinstance(controller.service._real_runner, WindowsDiskRunner)
 
 
-def test_dry_run_mode_keeps_service_in_dry_run():
-    controller = _wire(dry_run=True, allowed_disk_numbers=[1])
-
-    assert controller.service.dry_run is True
-    assert controller.service.allowed_disk_numbers == frozenset({1})
-
-
 def test_default_executor_delegates_to_session_service():
-    controller = _wire(dry_run=True)
+    controller = _wire()
     fake = _FakeService([])
     controller._service = fake
 
-    spec = SimpleNamespace(dry_run=True)
+    spec = SimpleNamespace(disk_number=1)
     result = controller.job_manager._executor(spec, threading.Event())
 
     assert result == "executed"
     assert fake.executed == [spec]
 
 
-def test_injected_service_keeps_its_dry_run_but_gets_allowlist():
-    service = SispService(disk_scanner=list, dry_run=True)
-    controller = _wire(service=service, dry_run=False, allowed_disk_numbers=[3])
-
-    controller._sync_service_policy(dry_run=False)
-
-    # 外部注入的服务归调用方管，只同步白名单，不强行改 dry_run。
-    assert service.dry_run is True
-    assert service.allowed_disk_numbers == frozenset({3})
-
-
 def test_custom_job_manager_is_respected():
     manager = JobManager()
-    controller = _wire(dry_run=True, job_manager=manager)
+    controller = _wire(job_manager=manager)
 
     assert controller.job_manager is manager
 
@@ -165,10 +143,9 @@ def test_prepare_grants_only_selected_disks_when_no_explicit_allowlist():
     service = _FakeService([_disk(1)])
     controller = _wire(
         service=service,
-        dry_run=False,
         preflight_runner=_preflight,
     )
-    controller.start(dry_run=False)
+    controller.start()
 
     prepared = controller.prepare([1])
 
@@ -202,7 +179,7 @@ def test_per_disk_image_override_recomputes_image_blocker(tmp_path):
 
     missing = r"D:\images\missing.GHO"
 
-    def preflight(*, dry_run: bool = False) -> dict[str, Any]:
+    def preflight() -> dict[str, Any]:
         return {
             "results": [
                 {
@@ -215,12 +192,11 @@ def test_per_disk_image_override_recomputes_image_blocker(tmp_path):
 
     controller = _wire(
         service=_FakeService([_disk(1)]),
-        dry_run=True,
         preflight_runner=preflight,
         partition_defaults={"c_size_gb": 30, "allow_small_partitions": True},
         settings_provider=lambda: {"sysImageA": missing},
     )
-    controller.start(dry_run=True)
+    controller.start()
 
     stale = controller.prepare({1: {}})[0]
     assert any("镜像文件不存在" in item for item in stale.plan.blockers)
@@ -237,10 +213,9 @@ def test_authorize_disks_grants_single_disk_operations():
     service = _FakeService([_disk(1), _disk(2)])
     controller = _wire(
         service=service,
-        dry_run=False,
         preflight_runner=_preflight,
     )
-    controller.start(dry_run=False)
+    controller.start()
 
     assert service.allowed_disk_numbers == frozenset()
     controller.authorize_disks([1])
@@ -250,35 +225,14 @@ def test_authorize_disks_grants_single_disk_operations():
     assert service.allowed_disk_numbers == frozenset({1, 2})
 
 
-def test_authorize_disks_respects_explicit_allowlist_and_dry_run():
-    service = _FakeService([_disk(1), _disk(2)])
-    controller = _wire(
-        service=service,
-        dry_run=False,
-        allowed_disk_numbers=[1],
-        preflight_runner=_preflight,
-    )
-    controller.start(dry_run=False)
-
-    controller.authorize_disks([2])
-    assert service.allowed_disk_numbers == frozenset({1})  # 显式白名单不动
-
-    dry_service = _FakeService([_disk(1)])
-    dry = _wire(service=dry_service, dry_run=True, preflight_runner=_preflight)
-    dry.start(dry_run=True)
-    dry.authorize_disks([1])
-    assert dry_service.allowed_disk_numbers == frozenset()  # 演练模式不授权
-
-
 def test_prepare_keeps_explicit_allowlist_untouched():
     service = _FakeService([_disk(1), _disk(2)])
     controller = _wire(
         service=service,
-        dry_run=False,
         allowed_disk_numbers=[1],
         preflight_runner=_preflight,
     )
-    controller.start(dry_run=False)
+    controller.start()
 
     prepared = controller.prepare([1])
 
@@ -291,11 +245,10 @@ def test_real_plan_blocks_disk_outside_allowlist():
     service = _FakeService([_disk(1), _disk(2)])
     controller = _wire(
         service=service,
-        dry_run=False,
         allowed_disk_numbers=[2],
         preflight_runner=_preflight,
     )
-    controller.start(dry_run=False)
+    controller.start()
 
     prepared = controller.prepare([1])
 
@@ -476,49 +429,6 @@ def test_runner_honours_pre_cancelled_event(tmp_path):
 
 
 # ---------------------------------------------------------------- P0 回归
-def test_forced_dry_run_cannot_be_upgraded():
-    """构造时 dry_run=True 是硬上限，start/prepare 不能把它升级为真实写盘。"""
-    seen: list[bool] = []
-
-    def preflight(*, dry_run: bool = False) -> dict[str, Any]:
-        seen.append(dry_run)
-        return {"results": []}
-
-    controller = _wire(
-        service=_FakeService([_disk(1)], dry_run=True),
-        dry_run=True,
-        preflight_runner=preflight,
-    )
-
-    session = controller.start(dry_run=False)
-
-    assert session.dry_run is True
-    assert seen == [True]
-
-    prepared = controller.prepare([1], dry_run=False)
-    assert prepared[0].spec.dry_run is True
-    assert prepared[0].plan.dry_run is True
-
-
-def test_preflight_receives_effective_dry_run():
-    """非强制模式也要把当前 dry-run 传给预检，dry-run 不要求管理员。"""
-    seen: list[bool] = []
-
-    def preflight(*, dry_run: bool = False) -> dict[str, Any]:
-        seen.append(dry_run)
-        return {"results": []}
-
-    controller = _wire(
-        service=_FakeService([_disk(1)], dry_run=False),
-        dry_run=False,
-        preflight_runner=preflight,
-    )
-
-    controller.start(dry_run=False)
-
-    assert seen == [False]
-
-
 def test_concurrent_confirm_only_runs_once():
     """两个并发的 confirm 请求只能启动一个执行器，避免重复清盘。"""
     calls: list[int] = []
@@ -533,12 +443,11 @@ def test_concurrent_confirm_only_runs_once():
             disk_number=spec.disk_number,
             success=True,
             message="ok",
-            dry_run=True,
         )
 
     manager = JobManager(executor=executor)
     job = manager.submit(
-        JobSpec(disk_number=1, dry_run=True),
+        JobSpec(disk_number=1),
         ExecutionPlan(disk_number=1),
     )
 
@@ -566,7 +475,7 @@ def test_concurrent_confirm_only_runs_once():
 def test_duplicate_submit_for_same_disk_is_rejected():
     """同一块盘已有未结束任务时，第二次 submit 不能创建并发任务。"""
     manager = JobManager()
-    spec = JobSpec(disk_number=1, dry_run=True)
+    spec = JobSpec(disk_number=1)
     plan = ExecutionPlan(disk_number=1)
     manager.submit(spec, plan)
 
@@ -580,12 +489,11 @@ def test_partition_defaults_come_from_settings():
     settings = {"efiDefaultMb": 300, "sysDefaultGb": 500, "dataDefaultGb": "auto"}
     controller = _wire(
         service=_FakeService([_disk(1, size_gb=1000)]),
-        dry_run=True,
         preflight_runner=_preflight,
         partition_defaults={"efi_size_mb": 100, "c_size_gb": 120, "data_size_gb": 30},
         settings_provider=lambda: dict(settings),
     )
-    controller.start(dry_run=True)
+    controller.start()
 
     info = controller.prepare([1])[0].spec.task_payload["partition_info"]
 
@@ -599,12 +507,11 @@ def test_partition_defaults_snapshot_used_without_settings():
     """没有设置提供者时退回构造时的快照（CLI 场景）。"""
     controller = _wire(
         service=_FakeService([_disk(1, size_gb=1000)]),
-        dry_run=True,
         preflight_runner=_preflight,
         partition_defaults={"efi_size_mb": 100, "c_size_gb": 120, "data_size_gb": None},
         settings_provider=None,
     )
-    controller.start(dry_run=True)
+    controller.start()
 
     info = controller.prepare([1])[0].spec.task_payload["partition_info"]
 
@@ -613,7 +520,6 @@ def test_partition_defaults_snapshot_used_without_settings():
 
 def test_tool_paths_reach_default_real_runner():
     controller = _wire(
-        dry_run=False,
         tool_paths={
             "ghost": r"C:\tools\ghost64.exe",
             "bcdboot": r"C:\tools\bcdboot.exe",
@@ -639,10 +545,9 @@ def test_prepare_does_not_accumulate_implicit_allowlist():
     service = _FakeService([_disk(1), _disk(2)])
     controller = _wire(
         service=service,
-        dry_run=False,
         preflight_runner=_preflight,
     )
-    controller.start(dry_run=False)
+    controller.start()
 
     controller.prepare([1])
     assert service.allowed_disk_numbers == frozenset({1})
@@ -652,7 +557,7 @@ def test_prepare_does_not_accumulate_implicit_allowlist():
     assert service.allowed_disk_numbers == frozenset({2})
 
     # 开新会话同样清空隐式授权。
-    controller.start(dry_run=False)
+    controller.start()
     assert service.allowed_disk_numbers == frozenset()
 
 
@@ -1272,7 +1177,7 @@ def test_cancelled_job_reports_cancelled_even_if_executor_fails():
         return WorkerResult.failure(spec.disk_number, "任务已取消（镜像未写入）")
 
     manager = JobManager(executor=executor)
-    job = manager.submit(JobSpec(disk_number=1, dry_run=True), ExecutionPlan(disk_number=1))
+    job = manager.submit(JobSpec(disk_number=1), ExecutionPlan(disk_number=1))
     manager.confirm_batch([job.id])
     manager.wait_all(2)
 
@@ -1294,14 +1199,14 @@ def _step_manager() -> tuple[JobManager, Job, list[tuple[str, str]]]:
                 on_step(key, "running", f"执行 {key}")
                 on_step(key, "ok", f"{key} 完成")
                 seen.append((key, "ok"))
-            # 演练期的附加步骤：会发事件，但不该算进进度
+            # 未知/历史附加步骤：会发事件，但不该算进进度
             on_step("diskpart_preview", "skipped", "仅预览")
-        return WorkerResult(disk_number=spec.disk_number, success=True, message="ok", dry_run=True)
+        return WorkerResult(disk_number=spec.disk_number, success=True, message="ok")
 
     manager = JobManager(executor=executor)
     job = manager.submit(
-        JobSpec(disk_number=1, dry_run=True),
-        ExecutionPlan(disk_number=1, dry_run=True),
+        JobSpec(disk_number=1),
+        ExecutionPlan(disk_number=1),
     )
     manager.confirm_batch([job.id])
     manager.wait_all(5)
@@ -1309,7 +1214,7 @@ def _step_manager() -> tuple[JobManager, Job, list[tuple[str, str]]]:
 
 
 def test_progress_counts_only_real_stages():
-    """``diskpart_preview`` 这种演练步骤不能把进度顶到 8/7。"""
+    """历史遗留的 ``diskpart_preview`` 步骤不能把进度顶到 8/7。"""
     _, job, seen = _step_manager()
 
     assert [key for key, _ in seen] == list(_STAGES)
@@ -1330,13 +1235,15 @@ def test_step_events_are_broadcast_for_every_stage():
         on_step("efi", "running", "开始")
         on_step("efi", "ok", "完成")
         on_step("diskpart_preview", "skipped", "仅预览")
-        return WorkerResult(disk_number=spec.disk_number, success=True, message="ok", dry_run=True)
+        return WorkerResult(disk_number=spec.disk_number, success=True, message="ok")
 
-    manager.executor = executor  # type: ignore[assignment]
+    # JobManager 内部读的是 _executor；写成 manager.executor 只会多一个新属性，
+    # 真正的执行器仍会落到默认 SispService，事件一条都不会发。
+    manager._executor = executor
     manager.subscribe(seen.put)
     job = manager.submit(
-        JobSpec(disk_number=1, dry_run=True),
-        ExecutionPlan(disk_number=1, dry_run=True),
+        JobSpec(disk_number=1),
+        ExecutionPlan(disk_number=1),
     )
     manager.confirm_batch([job.id])
     manager.wait_all(5)

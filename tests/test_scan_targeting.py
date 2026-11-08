@@ -33,7 +33,6 @@ def test_disk_numbers_env_normalizes():
 
 def test_scan_disks_filters_injected_scanner():
     service = SispService(
-        dry_run=True,
         disk_scanner=lambda: [_summary(1), _summary(2)],
     )
     assert [item["disk_number"] for item in service.scan_disks([2])] == [2]
@@ -48,7 +47,7 @@ def test_find_disk_summary_asks_only_for_that_disk(monkeypatch):
         return [_summary(3)]
 
     monkeypatch.setattr(disk_info, "scan_disk_summaries", fake_scan)
-    service = SispService(dry_run=True)
+    service = SispService()
 
     found = service._find_disk_summary(3)
 
@@ -92,7 +91,7 @@ def test_service_snapshot_uses_single_powershell(monkeypatch):
 
     monkeypatch.setattr(disk_info, "_run_json", fake_run)
 
-    service = SispService(dry_run=True)
+    service = SispService()
     disks, letters = service.scan_snapshot()
 
     assert calls == ["snapshot"]
@@ -105,7 +104,7 @@ def test_known_letters_skip_secondary_scan(monkeypatch):
         raise AssertionError("给了 known_letters 就不该再扫盘符")
 
     monkeypatch.setattr(disk_info, "scan_used_drive_letters", boom)
-    service = SispService(dry_run=True)
+    service = SispService()
 
     plan = service.build_selection_plan(
         {},
@@ -150,7 +149,6 @@ class _SnapshotService:
     """只实现 prepare 用到的两个方法：快照扫描 + 盘符分配。"""
 
     def __init__(self) -> None:
-        self.dry_run = True
         self.allowed_disk_numbers = frozenset()
         self.plan_kwargs: dict | None = None
 
@@ -191,13 +189,12 @@ def _workflow(service):
 
     class _Service(_SnapshotService):
         def execute_spec(self, spec, cancel_event):
-            return WorkerResult.dry_run_plan(int(getattr(spec, "disk_number", 0) or 0))
+            return WorkerResult(disk_number=int(getattr(spec, "disk_number", 0) or 0), success=True, message="ok")
 
     actual = _Service()
     actual.__dict__.update(service.__dict__)
     controller = WorkflowController(
         service=actual,
-        dry_run=True,
         preflight_runner=lambda **kwargs: {
             "results": [{"name": "运行前检查", "passed": True, "message": "ok"}]
         },
@@ -214,7 +211,7 @@ def test_prepare_reuses_session_letters_until_a_job_runs():
     service = _SnapshotService()
     controller, actual = _workflow(service)
 
-    controller.start(dry_run=True)
+    controller.start()
     assert controller.session is not None
     assert controller.session.used_letters == ("E", "F")
 
@@ -227,7 +224,7 @@ def test_prepare_falls_back_to_fresh_scan_after_jobs_exist(monkeypatch):
     """跑过任务后 EFI 盘符可能保留，会话快照会过期，必须回到现场扫描。"""
     service = _SnapshotService()
     controller, actual = _workflow(service)
-    controller.start(dry_run=True)
+    controller.start()
     monkeypatch.setattr(controller._manager, "jobs", lambda: [object()])
 
     controller.prepare([1])

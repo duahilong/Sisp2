@@ -89,15 +89,13 @@ function bootBodyHtml(report) {
 }
 
 async function repairBoot(diskNumber, modal) {
-  if (!(state.info && state.info.dry_run)) {
-    const ok = await confirmDialog({
-      title: `修复磁盘 ${diskNumber} 的引导`,
-      body: `<p>会在该盘的 ESP 分区上重写 UEFI 引导文件，让这块盘自己能启动。</p>
-        <p style="margin-top:6px;color:var(--muted)">不改分区，也不动 Windows 本身。</p>`,
-      okText: '修复引导',
-    });
-    if (!ok) return;
-  }
+  const ok = await confirmDialog({
+    title: `修复磁盘 ${diskNumber} 的引导`,
+    body: `<p>会在该盘的 ESP 分区上重写 UEFI 引导文件，让这块盘自己能启动。</p>
+      <p style="margin-top:6px;color:var(--muted)">不改分区，也不动 Windows 本身。</p>`,
+    okText: '修复引导',
+  });
+  if (!ok) return;
   setStatus(`正在修复磁盘 ${diskNumber} 的引导…`);
   try {
     const result = await api.bootRepair({ disk_number: diskNumber });
@@ -110,7 +108,6 @@ async function repairBoot(diskNumber, modal) {
       <div class="opsum"><table><thead><tr><th>步骤</th><th style="width:70px">状态</th><th>说明</th></tr></thead>
         <tbody>${steps || '<tr><td colspan="3" class="dim">没有步骤</td></tr>'}</tbody></table></div>
       ${result.log_path ? `<div class="set-mono" style="margin-top:8px">${esc(result.log_path)}</div>` : ''}
-      ${result.dry_run ? '<div class="warnbox" style="margin-top:10px"><span class="wi">!</span><div>演练模式：只生成脚本，没有真的写引导。</div></div>' : ''}
       ${result.script ? `<div class="codebox" style="margin-top:10px">${esc(result.script.join('\n'))}</div>` : ''}`;
     pushLog(`修复引导 磁盘 ${diskNumber}：${result.exit === 0 ? '成功' : `失败（退出码 ${result.exit}）`}`, result.exit === 0 ? '' : 'err', 'boot');
     toast(result.exit === 0 ? '引导修复完成' : '引导修复失败，看日志', result.exit === 0 ? '' : 'err');
@@ -171,7 +168,6 @@ export function openAboutDialog() {
     body: `<div class="opsum"><table>
         <tr><td class="k">版本</td><td>${esc(info.version || '—')}</td></tr>
         <tr><td class="k">Python</td><td>${esc(info.python || '—')}</td></tr>
-        <tr><td class="k">模式</td><td>${info.dry_run ? '演练模式' : '真实写盘'}</td></tr>
         <tr><td class="k">日志目录</td><td class="set-mono">${esc((state.settings && state.settings.logDir) || '用户目录下的 Sisp 日志目录')}</td></tr>
       </table></div>
       <div class="set-d" style="margin-top:10px">本程序直接调用 Windows 自带的 diskpart / bcdboot，以及你指定的 Ghost。真实写盘前请确认已备份数据，并以管理员身份运行。</div>`,

@@ -4,19 +4,18 @@
 （扫描 → 计划 → 确认 → 执行）与真正的 PowerShell/diskpart 调用之间隔了一层，
 既方便替换实现，也方便在测试里完全绕开磁盘。
 
-**安全默认值（最重要的一条）**：``SispService()`` 默认 ``dry_run=True``，
-``execute_spec()`` 只返回“将要执行什么”的计划，不会调用 diskpart 或 Ghost，
-也不会写任何字节。真实写盘必须同时满足下列条件，缺一即抛 ``PermissionError``：
+写盘必须同时满足下列条件，缺一即抛 ``PermissionError``：
 
-1. 构造时显式传入 ``dry_run=False``；
-2. 目标硬盘编号在 ``allowed_disk_numbers`` 白名单里；
-3. ``spec.expected_identity`` 与**现在重新扫描到的那块盘**一致（有 UniqueId /
+1. 目标硬盘编号在 ``allowed_disk_numbers`` 白名单里；
+2. ``spec.expected_identity`` 与**现在重新扫描到的那块盘**一致（有 UniqueId /
    SerialNumber 就比标识，没有就比盘号 + 容量 + 型号；防止确认后换盘）；
-4. 目标盘此刻仍然“可选”（系统盘/启动盘/含系统盘符/离线/只读都会被拒），
+3. 目标盘此刻仍然“可选”（系统盘/启动盘/含系统盘符/离线/只读都会被拒），
    与计划阶段的判定同源，防止绕过确认直接执行；
-5. 注入了 ``real_runner``（真正的执行实现放在仓库外或由调用方提供）。
+4. 注入了 ``real_runner``（真正的执行实现放在仓库外或由调用方提供）。
 
-也就是说，默认构造 + 默认调用一定不会碰磁盘；这不是配置项，而是代码路径本身。
+没有“演练模式”开关：要看计划与 diskpart 脚本，用只读的
+``WorkflowController.prepare()`` 与 ``partitions.preview_segments()``；
+``execute_spec()`` 一旦被调用就是要写盘。
 
 导入说明：本模块对 ``app.modules.disk_info`` / ``app.drive_letters`` 的引用
 放在函数内部并带 ``ImportError`` 兜底，这两个模块不可用时仍能 ``import``
@@ -42,13 +41,7 @@ from app.application.contracts import (
     SelectionPlan,
     format_size,
 )
-from app.application.partitions import (
-    PartitionLayoutError,
-    plan_partitions,
-    preview_text,
-)
-from app.application.steps import STEP_TITLES
-from app.models import STEP_SKIPPED, StepResult, WorkerResult
+from app.models import WorkerResult
 from app.orchestrator import build_worker_disk_identity, identity_matches
 
 _LOGGER = logging.getLogger(__name__)
@@ -196,15 +189,12 @@ class SispService:
     def __init__(
         self,
         *,
-        dry_run: bool = True,
         allowed_disk_numbers: Iterable[int] | None = None,
         real_runner: Callable[[Any, threading.Event], WorkerResult] | None = None,
         disk_scanner: Callable[[], list[dict[str, Any]]] | None = None,
         powershell: str | None = None,
         protect_system_disk: bool = True,
     ) -> None:
-        # 默认 True：只要调用方没明确要求，就永远不写盘。
-        self.dry_run = bool(dry_run)
         # 安全开关由界面设置里的 protectSystemDisk 驱动。
         # protect_system_disk=False 只是“允许列出并操作系统盘”，
         # 白名单与执行前的身份复核依旧生效。
@@ -490,10 +480,11 @@ class SispService:
         cancel_event: threading.Event | None = None,
         on_step: StepReporter | None = None,
     ) -> WorkerResult:
-        """执行（或演练）一个 ``JobSpec``。
+        """执行一个 ``JobSpec``（真正写盘）。
 
-        dry-run 只生成步骤预览；真实执行必须通过五道闸门，否则抛
-        ``PermissionError``——失败信息会直接显示在任务状态里。
+        执行前必须通过三道写盘判定（白名单 / 定向复核身份 / 保护规则），
+        并且必须注入 ``real_runner``；任何一条不满足都抛 ``PermissionError``——
+        失败信息会直接显示在任务状态里。
 
         ``on_step(key, status, message)`` 是可选的进度回调：真实执行时由
         ``WindowsDiskRunner`` 在每一步开始/结束时调用，界面据此画进度条；
@@ -501,19 +492,6 @@ class SispService:
         """
         if spec is None:
             raise ValueError("缺少任务输入 JobSpec")
-
-        disk_number = int(getattr(spec, "disk_number", 0) or 0)
-        spec_dry_run = bool(getattr(spec, "dry_run", False))
-
-        if spec_dry_run:
-            return self._dry_run_result(spec, disk_number, cancel_event, on_step)
-        if self.dry_run:
-            # 明确拒绝，而不是悄悄降级成 dry-run：否则任务会显示“成功”，
-            # 使用者会误以为盘已经写过了。
-            raise PermissionError(
-                "SispService 处于 dry-run 模式，拒绝执行任何写盘操作；"
-                "真实执行需要显式构造 SispService(dry_run=False, ...)"
-            )
 
         self._require_write_allowed(spec)
         runner = self._real_runner
@@ -531,7 +509,7 @@ class SispService:
     ) -> dict[str, Any]:
         """非整盘任务（分区操作、修复引导）复用的同一条写盘闸门。
 
-        判定链与 ``_require_write_allowed`` 完全一致：dry-run → 白名单 →
+        判定链与 ``_require_write_allowed`` 完全一致：白名单 →
         **重新扫描后复核身份** → 保护规则。返回最新的硬盘摘要，
         调用方据此再决定具体命令，避免“界面上看到的盘”和“实际要动的盘”不是同一块。
         """
@@ -541,9 +519,9 @@ class SispService:
         )
 
     def _require_write_allowed(self, spec: Any) -> None:
-        """真实写盘的四道闸门；任何一道不通都抛 ``PermissionError``。
+        """真实写盘的三道判定；任何一道不通都抛 ``PermissionError``。
 
-        第 4 道是“目标盘现在仍然可选”：系统盘/启动盘/含系统盘符/离线/只读
+        第 3 道是“目标盘现在仍然可选”：系统盘/启动盘/含系统盘符/离线/只读
         一律拒绝。计划阶段已经有同样的判定，这里是执行层的纵深防御，防止绕过
         ``confirm()`` 直接调 ``execute_spec``。
         """
@@ -557,12 +535,7 @@ class SispService:
         disk_number: int,
         expected: Mapping[str, Any],
     ) -> dict[str, Any]:
-        """四道闸门的实现；返回重新扫描到的硬盘摘要。"""
-        if self.dry_run:
-            raise PermissionError(
-                "SispService 处于 dry-run 模式，拒绝执行任何写盘操作；"
-                "真实执行需要显式构造 SispService(dry_run=False, ...)"
-            )
+        """三道判定的实现；返回重新扫描到的硬盘摘要。"""
         if disk_number not in self.allowed_disk_numbers:
             raise PermissionError(
                 f"硬盘 {disk_number} 不在允许写盘的白名单内"
@@ -594,155 +567,3 @@ class SispService:
             if _as_int(summary.get("disk_number")) == number:
                 return summary
         return None
-
-    def _dry_run_result(
-        self,
-        spec: Any,
-        disk_number: int,
-        cancel_event: threading.Event | None,
-        on_step: StepReporter | None = None,
-    ) -> WorkerResult:
-        """dry-run：产出计划步骤和 diskpart 预览，绝不执行命令。"""
-        if cancel_event is not None and cancel_event.is_set():
-            return WorkerResult.failure(disk_number, "任务已取消", dry_run=True)
-
-        letters = dict(getattr(spec, "drive_letters", None) or {})
-        payload = dict(getattr(spec, "task_payload", None) or {})
-        options = dict(getattr(spec, "runner_options", None) or {})
-        copy_source = str(options.get("copy_source") or "").strip()
-        script = self.build_diskpart_preview(disk_number, payload, letters)
-
-        steps = (
-            StepResult(
-                key="efi",
-                title="创建 EFI 分区",
-                status=STEP_SKIPPED,
-                message="dry-run 未执行",
-                details={"letter": letters.get("efi"), "size_mb": self._efi_size_mb(payload)},
-            ),
-            StepResult(
-                key="windows",
-                title=STEP_TITLES["windows"],
-                status=STEP_SKIPPED,
-                message="dry-run 未执行",
-                details={"letter": letters.get("windows"), "size_gb": self._c_size_gb(payload)},
-            ),
-            StepResult(
-                key="data",
-                title="创建数据分区",
-                status=STEP_SKIPPED,
-                message="dry-run 未执行",
-                details={"letter": letters.get("data"), "size_gb": self._data_size_gb(payload)},
-            ),
-            StepResult(
-                key="layout",
-                title=STEP_TITLES["layout"],
-                status=STEP_SKIPPED,
-                message="dry-run 未执行",
-                details={"check": "partition_phase"},
-            ),
-            StepResult(
-                key="image",
-                title=STEP_TITLES["image"],
-                status=STEP_SKIPPED,
-                message="dry-run 未执行",
-                details={"image_path": self._image_path(payload)},
-            ),
-            StepResult(
-                key="boot",
-                title=STEP_TITLES["boot"],
-                status=STEP_SKIPPED,
-                message="dry-run 未执行",
-                details={},
-            ),
-            StepResult(
-                key="copy",
-                title=STEP_TITLES["copy"],
-                status=STEP_SKIPPED,
-                message=(
-                    "dry-run 未执行"
-                    if copy_source
-                    else "未设置拷贝目录，跳过"
-                ),
-                details={"source": copy_source, "target": letters.get("data")},
-            ),
-            StepResult(
-                key="diskpart_preview",
-                title="diskpart 脚本预览",
-                status=STEP_SKIPPED,
-                message="仅预览，未执行",
-                details={"script": script},
-            ),
-        )
-        if on_step is not None:
-            for step in steps:
-                on_step(step.key, step.status, step.message)
-        return WorkerResult.dry_run_plan(
-            disk_number,
-            steps=steps,
-            message="dry-run 模式：已生成执行计划，未执行任何写盘命令",
-        )
-
-    # ------------------------------------------------------------------ 预览
-    @staticmethod
-    def _partition_info(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        info = payload.get("partition_info")
-        return info if isinstance(info, Mapping) else {}
-
-    def _efi_size_mb(self, payload: Mapping[str, Any]) -> float:
-        raw = self._partition_info(payload).get("efi_size_mb")
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            return 100.0
-        return value if value > 0 else 100.0
-
-    def _c_size_gb(self, payload: Mapping[str, Any]) -> float | None:
-        raw = self._partition_info(payload).get("c_size_gb")
-        try:
-            return float(raw)
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _image_path(payload: Mapping[str, Any]) -> str:
-        info = payload.get("image_info")
-        if not isinstance(info, Mapping):
-            return ""
-        return str(info.get("image_path") or "")
-
-    def _data_size_gb(self, payload: Mapping[str, Any]) -> float | str | None:
-        raw = self._partition_info(payload).get("data_size_gb")
-        if raw in (None, "", "auto"):
-            return "剩余空间"
-        try:
-            return float(raw)
-        except (TypeError, ValueError):
-            return None
-
-    def build_diskpart_preview(
-        self,
-        disk_number: int,
-        payload: Mapping[str, Any],
-        letters: Mapping[str, str],
-    ) -> str:
-        """生成 diskpart 脚本文本用于预览；**不会**被本模块执行。
-
-        脚本来自 :func:`app.application.partitions.preview_segments`——与真实
-        执行器同一套生成器，所以"预览和真跑不一样"这类漂移在机制上不存在。
-        """
-        image_info = payload.get("image_info")
-        image_path = None
-        if isinstance(image_info, Mapping):
-            image_path = _text(image_info.get("image_path"))
-        try:
-            parts = plan_partitions(payload, letters=letters)
-        except PartitionLayoutError as exc:
-            # 分区配置不合法也要能看完预览，而不是把演练步弄成异常。
-            lines = ["REM === dry-run 预览：以下命令不会被执行 ===", f"REM 分区配置不合法：{exc}"]
-            return chr(10).join(lines)
-        script = preview_text(disk_number, parts)
-        if image_path:
-            script += chr(10) + f"REM 镜像：{image_path}（由应用层接管，不经 diskpart）"
-        return script
-
