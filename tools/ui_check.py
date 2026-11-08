@@ -46,7 +46,7 @@ _EXPORT_LIST_RE = re.compile(r"""export\s*\{([^}]*)\}""", re.S)
 _EXPORT_STAR_RE = re.compile(r"""export\s*\*""")
 
 DERIVE_SCRIPT = """
-import { fmtSize, fsClass, segments, checkSizes, checkLayout, unallocatedBytes, partShortName, fitLayout, reserveGb, autoPartitionRole, phaseGroups, progressByPhase, skippedByFailure, layoutVerdict, mergePlanNotes } from './derive.js';
+import { fmtSize, fsClass, segments, freeBytes, checkSizes, checkLayout, unallocatedBytes, partShortName, fitLayout, reserveGb, autoPartitionRole, phaseGroups, progressByPhase, skippedByFailure, layoutVerdict, mergePlanNotes } from './derive.js';
 
 const GB = 1024 ** 3;
 const esp = { partition_number: 1, size_bytes: 100 * 1024 * 1024,
@@ -56,7 +56,20 @@ const dat = { partition_number: 3, size_bytes: 380 * GB, file_system: 'EXFAT', d
 const disk = { size_bytes: 1000 * GB, partitions: [dat, win, esp] };
 
 const segs = segments(disk);
+// 真实 GPT 盘的首尾保留：首分区从 1 MiB 开始、末尾留 1 MiB 备份 GPT，
+// 这 2 MB 不该显示成“未分配空间”（Windows 磁盘管理也不显示它）。
+const gptSlack = freeBytes({ size_bytes: 500 * GB, partitions: [
+  { partition_number: 1, offset_bytes: 1 * 1024 * 1024, size_bytes: 100 * 1024 * 1024 },
+  { partition_number: 2, offset_bytes: 101 * 1024 * 1024, size_bytes: 500 * GB - 102 * 1024 * 1024 },
+] });
+// 真的留了一大截不分区，仍然要算作未分配（内部空洞 + 尾部大块）
+const gptGap = Math.round(freeBytes({ size_bytes: 200 * GB, partitions: [
+  { partition_number: 1, offset_bytes: 1 * 1024 * 1024, size_bytes: 10 * GB },
+  { partition_number: 2, offset_bytes: 20 * GB, size_bytes: 100 * GB },
+] }) / GB);
 const out = {
+  free_gpt_slack: gptSlack,
+  free_gpt_gap: gptGap,
   size_tb: fmtSize(2048 * GB),
   size_gb_int: fmtSize(120 * GB),
   size_mb: fmtSize(300 * 1024 * 1024),
@@ -196,6 +209,8 @@ EXPECTED = {
     "phases_fallback": [["partition", 4], ["system", 2]],
     "progress_groups": [["partition", 100, "done"], ["system", 0, "running"]],
     "skipped_after_layout": ["system"],
+    "free_gpt_slack": 0,
+    "free_gpt_gap": 90,
     "skipped_after_boot": [],
     "notes_warnings": [
         {"body": "取消为协作式：当前步骤完成后才会停止", "disks": [1, 2]},

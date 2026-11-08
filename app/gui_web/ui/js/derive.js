@@ -117,11 +117,42 @@ export function sortedParts(disk) {
   });
 }
 
-/** 未被任何分区占用的字节（按后端给出的分区大小求和）。 */
+/** GPT 首尾的固定开销：1 MB 对齐偏移 + 备份 GPT 表，合计最多 3 MB。
+ *
+ * ``diskpart`` 建出来的 GPT 盘，第一个分区从 1 MiB 开始（前 1 MB 是保护性 MBR + 主 GPT），
+ * 最后一个分区之后还留 1 MB 给备份 GPT；这 2 MB 从来不是“可用空间”，
+ * Windows 磁盘管理与 diskpart 的 ``list partition`` 都不显示它。
+ * 小于这个阈值的首尾空隙按保留处理，不当作未分配。
+ */
+const GPT_SLACK = 3 * MB;
+
+/**
+ * 未被任何分区占用的字节（真正可用的那部分）。
+ *
+ * 口径：``磁盘容量 − Σ 分区容量 − 首部保留 − 尾部保留``，其中首部（第一个分区之前的
+ * 偏移）与尾部（最后一个分区之后的空间）**只有在超过** :data:`GPT_SLACK` 时才算未分配。
+ * 这样 GPT 的 1 MB 头 + 1 MB 备份不会被当成“未分配空间”显示出来（用户视角里它不存在），
+ * 而真的留了一大截不分区时仍然会提示。
+ *
+ * 分区对象没有 ``offset_bytes`` 时（单测/老接口）退回纯算术口径。
+ */
 export function freeBytes(disk) {
   const total = diskTotal(disk);
-  const used = sortedParts(disk).reduce((sum, part) => sum + (Number(part.size_bytes) || 0), 0);
-  return Math.max(0, total - used);
+  const parts = sortedParts(disk);
+  const used = parts.reduce((sum, part) => sum + (Number(part.size_bytes) || 0), 0);
+  if (!parts.length) return Math.max(0, total - used);
+  const withOffsets = parts.every((part) => Number.isFinite(Number(part.offset_bytes)));
+  if (!withOffsets) return Math.max(0, total - used);
+
+  const lead = Math.max(0, Number(parts[0].offset_bytes) || 0);
+  const last = parts[parts.length - 1];
+  const lastEnd = (Number(last.offset_bytes) || 0) + (Number(last.size_bytes) || 0);
+  const tail = Math.max(0, total - lastEnd);
+
+  const interior = Math.max(0, total - used - lead - tail);
+  const extraLead = lead > GPT_SLACK ? lead : 0;
+  const extraTail = tail > GPT_SLACK ? tail : 0;
+  return Math.max(0, interior + extraLead + extraTail);
 }
 
 /**

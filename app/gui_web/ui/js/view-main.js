@@ -3,7 +3,8 @@
  *
  * 只读视图：这里不做任何写盘动作，按钮最多跳去安装向导或打开诊断弹窗。
  * 所有数字都来自 `GET /api/disks`（DiskInfo + PartitionInfo），
- * 未分配空间 = 磁盘容量 − Σ 分区容量，由 derive.segments() 算出来。
+ * 未分配空间 = 磁盘容量 − Σ 分区容量 − GPT 首尾保留（首 1 MB 对齐 + 尾 1 MB 备份 GPT，
+ * 不到 3 MB 不计），由 derive.segments() 算出来。
  */
 
 import { $, $$, esc, on } from './dom.js';
