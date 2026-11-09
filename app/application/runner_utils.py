@@ -67,6 +67,32 @@ def option_flag(
     return default
 
 
+def option_int(
+    options: Mapping[str, Any] | None,
+    key: str,
+    *,
+    default: int = 0,
+    low: int | None = None,
+    high: int | None = None,
+) -> int:
+    """读一个整数型 runner option；缺省/非法用 ``default``，并按需夹到区间内。
+
+    为什么不用 ``int(options.get(...))``：``options`` 来自界面设置与历史任务载荷，
+    里面可能是 ``None`` / ``"1000"`` / ``1200.0``，甚至负数。这里统一收敛，
+    坏值退化成默认值而不是抛异常把任务打挂。
+    """
+    if not isinstance(options, Mapping) or key not in options:
+        number = int(default)
+    else:
+        parsed = to_int(options.get(key))
+        number = int(default) if parsed is None else parsed
+    if low is not None:
+        number = max(int(low), number)
+    if high is not None:
+        number = min(int(high), number)
+    return number
+
+
 def existing_dir(value: Any) -> str | None:
     """返回可用的临时目录（不存在则尝试创建）；不可用则返回 ``None``。"""
     text = to_text(value)
@@ -112,6 +138,7 @@ __all__ = [
     "decode_output",
     "existing_dir",
     "option_flag",
+    "option_int",
     "runtime_env",
     "tail",
     "to_int",

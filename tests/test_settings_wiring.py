@@ -117,6 +117,8 @@ def test_workflow_maps_settings_to_runner_options() -> None:
         "release_efi_letter": False,
         # 附加文件目录：没设置就是空串，拷贝阶段据此记一条 skipped
         "copy_source": "",
+        # 没配过 partitionSettleMs 时下发兜底默认值 1000ms（不是 0）
+        "partition_settle_ms": 1000,
     }
 
 
@@ -157,7 +159,11 @@ def test_workflow_survives_broken_settings_provider() -> None:
     )
     assert wf._settings() == {}
     # 设置读不到时开关回落默认值 True
-    assert wf._runner_options() == {"release_efi_letter": True, "copy_source": ""}
+    assert wf._runner_options() == {
+        "release_efi_letter": True,
+        "copy_source": "",
+        "partition_settle_ms": 1000,
+    }
 
 
 # ------------------------------------------------------------------ 执行器
@@ -326,8 +332,12 @@ def test_workflow_ignores_blank_setting_values(bad: str) -> None:
         preflight_runner=lambda : {"results": []},
         settings_provider=lambda: {"sysImageA": bad, "extGhost": bad},
     )
-    # 执行器选项只剩布尔开关与拷贝目录：坏掉的镜像路径不该混进来
-    assert wf._runner_options() == {"release_efi_letter": True, "copy_source": ""}
+    # 执行器选项只有布尔开关、拷贝目录与 diskpart 间隔：坏掉的镜像路径不该混进来
+    assert wf._runner_options() == {
+        "release_efi_letter": True,
+        "copy_source": "",
+        "partition_settle_ms": 1000,
+    }
 
 
 def _noop(*_args: Any, **_kwargs: Any) -> WorkerResult:

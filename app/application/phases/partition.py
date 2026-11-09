@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from app.application import activity
 from app.application.partitions import (
     PlannedPartition,
     create_partition_lines,
@@ -23,7 +24,7 @@ from app.application.partitions import (
     wipe_lines,
 )
 from app.application.phases.base import PhaseContext, PhaseOutcome, PhaseResult
-from app.application.runner_utils import option_flag, tail
+from app.application.runner_utils import option_flag, option_int, tail
 from app.application.shell import (
     DiskpartShell,
     describe_diskpart_exit,
@@ -40,6 +41,11 @@ GROUP = "partition"
 # 重试前先 rescan，让 diskpart 的枚举跟上真实状态。
 WIPE_ATTEMPTS = 3
 WIPE_RETRY_DELAY = 2.0
+
+# 「两次 diskpart 之间等多久」的默认值（毫秒）。设置项 partitionSettleMs 覆盖它。
+# 为什么要有：一条 diskpart 刚改完分区表，下一条立刻回读同一片扇区，桥接板/慢盘
+# 还没落盘就会报 0x80070017（数据错误）。给 1 秒缓冲能显著降低这类抖动。
+DEFAULT_SETTLE_MS = 1000
 
 # 验收判据可替换（默认就是 ``partitions.partition_verdict``）。
 Acceptance = Callable[
@@ -92,12 +98,26 @@ class PartitionPhase:
         self.wipe_attempts = max(1, int(wipe_attempts))
         self.retry_delay = max(0.0, float(retry_delay))
         self._sleep = sleep
+        self._settle_ms = DEFAULT_SETTLE_MS
 
     # ------------------------------------------------------------------ 入口
     def run(self, ctx: PhaseContext) -> PhaseOutcome:
         log = ctx.log
+        self._settle_ms = option_int(
+            ctx.options, "partition_settle_ms", default=DEFAULT_SETTLE_MS, low=0, high=5000
+        )
         if ctx.cancelled():
             return PhaseOutcome(ok=False, cancelled=True, message="任务已取消（未开始写盘）")
+
+        # 诊断：分区是全局串行的，但此时别的盘可能正在写镜像——真实现场里
+        # 0x80070017 就发生在那种重叠时刻，先把当时的情况记下来。
+        others = activity.describe(exclude=ctx.disk_number)
+        log.write(
+            f"[诊断] 开始分区（diskpart 间隔 {self._settle_ms} ms；"
+            f"其它盘活动：{others or '无'}）"
+        )
+        if self._settle_ms:
+            log.write(f"每次 diskpart 之间等待 {self._settle_ms} ms（设置 partitionSettleMs）")
 
         # ===== ① 清盘 + 转 GPT（幂等，允许重试）=====
         ctx.notify("efi", "running", "清盘并重建分区表")
@@ -110,7 +130,12 @@ class PartitionPhase:
                 self._wipe_failure_message(code, attempts),
                 code=code,
                 output=output,
-                extra={"diskpart_attempts": attempts},
+                extra={
+                    "diskpart_attempts": attempts,
+                    "settle_ms": self._settle_ms,
+                    # 失败那一刻别的盘在干什么（用于判断是不是 I/O 抢占）
+                    "parallel_activity": activity.describe(exclude=ctx.disk_number, style="plain"),
+                },
             )
 
         # 盘已经空了：从这里开始取消也"不是什么都没发生"，消息要说清楚状态。
@@ -133,6 +158,7 @@ class PartitionPhase:
 
         # ===== ③ 单独删 MSR + 立刻复查 =====
         if msr is not None:
+            self._settle(ctx, log, "删除 MSR 前")
             try:
                 code, output = self.shell.run_diskpart(
                     msr_delete_lines(ctx.disk_number, msr), title="diskpart 脚本（删除 MSR）"
@@ -161,6 +187,7 @@ class PartitionPhase:
             log.write("MSR 分区已删除，复查确认不存在")
 
         # ===== ④ 建分区（最后一项不带 size=）=====
+        self._settle(ctx, log, "建分区前")
         try:
             code, output = self.shell.run_diskpart(
                 create_partition_lines(ctx.disk_number, ctx.parts),
@@ -228,6 +255,22 @@ class PartitionPhase:
                 self._sleep(wait)
             self.shell.rescan()
         return code, output, total
+
+    def _settle(self, ctx: PhaseContext, log: Any, reason: str) -> None:
+        """两次 diskpart 之间的等待（``partitionSettleMs``，0 = 不等待）。
+
+        顺便记一条诊断：如果此时有别的盘在写镜像，说明这条命令是在 I/O 争用下跑的，
+        真出问题时有据可查。
+        """
+        others = activity.describe(exclude=ctx.disk_number)
+        if self._settle_ms <= 0:
+            if others:
+                log.write(f"[诊断] {reason}：其它盘正在 {others}（未启用间隔等待）")
+            return
+        seconds = self._settle_ms / 1000.0
+        suffix = f"；其它盘正在 {others}" if others else ""
+        log.write(f"{reason}：等待 {self._settle_ms} ms 让磁盘链路落盘{suffix}")
+        self._sleep(seconds)
 
     def _wipe_failure_message(self, code: int, attempts: int) -> str:
         message = f"diskpart 失败（退出码 {describe_diskpart_exit(code)}）"

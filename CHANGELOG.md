@@ -7,6 +7,77 @@ tag 上的提交树就是那一版的完整代码与文档快照。
 定版（`v1.1.0`）之后只做优化与修复：功能以 tag 为准，`main` 继续向前走，
 需要回到某一版时 `git checkout v1.1.0` 或 `git archive v1.1.0`。
 
+## 1.2.4 — 修掉「分区没有真正串行」+ diskpart 可调等待与诊断
+
+承接 1.2.3 的现场问题（4 盘批量装机，2 块在分区阶段报 `0x80070017` CRC）。
+1.2.3 解决了「失败后能不能救回来」，这一版查到了**为什么会失败**。
+
+### 根因（重要）：`PartitionSequencer` 在生产路径上从来没接进执行器
+
+`WorkflowController._build_service()` 调 `build_real_runner(...)` 时**没有传**
+`sequencer` / `ghost_gate`，所以：
+
+- 「分区全局串行」只在**单测里成立**（单测都是自己 new 一个 runner 再注入 sequencer）；
+- 生产环境里四块盘的分区脚本是**交错执行**的：只有一个 diskpart 进程在跑（模块级锁），
+  但「清盘 → 删 MSR → 建分区」三段会在盘与盘之间穿插——A 盘刚 `clean` 完，B 盘立刻
+  `clean`，A 盘再 `convert gpt`……磁盘链路被这样来回抽打，链路差的盘就报 CRC；
+- 顺带 `GhostStartGate` 也没生效（两个 Ghost 可能同瞬间启动撞 8027 的错误路径一直在）。
+
+结构性原因：`self._sequencer = PartitionSequencer()` 原本写在 `_build_service()` **之后**，
+装配 service 时这个对象还不存在，所以当时只能省掉这两个参数。
+
+VM 实测（4 块 120 GB VHD，exe 1.2.4 前后对比，日志按时间排序）：
+
+```
+修前：11:49:43 d2 → 11:49:44 d3/d4/d5 → 11:49:45 d2 → 11:49:46 d3/d4/d5 …（交错）
+修后：11:55:31 d2 ×4 → 11:55:39 d3 ×3 → 11:55:46 d4 ×3 → 11:55:54 d5 ×3（串行）
+```
+
+修后的诊断行能看清流水线仍在工作：`磁盘 3` 开始分区时
+`其它盘活动：磁盘 2=写镜像（Ghost）`——**分区串行、镜像交错**才是设计意图。
+代价：4 盘的分区段从 15 s 变 33 s（每盘多两次 1 s 等待 + 串行），
+而单盘 Ghost 就要 165 s，整体吞吐几乎不受影响。
+
+### 为什么会怀疑「命令发太快」
+
+- 分区本身是全局串行的（`PartitionSequencer` + `_DISKPART_LOCK`），不存在多线程同时发
+  diskpart；真正存在的重叠是**A 盘在写镜像（约 74 MB/s 持续 I/O）时 B 盘在分区**；
+- `clean` 只改写盘首分区表扇区、命令返回即认为写完；紧接着 `convert gpt` **立刻回读**
+  同一片扇区。桥接板/慢盘还没落盘时回读就可能拿到坏数据 → `0x80070017`。
+- 约束：**diskpart 脚本里没有 sleep 命令**，所以"命令之间等待"只能在两次 diskpart
+  **调用之间**做（不能写进同一条脚本）。本版按这个方式实现。
+
+### 改动
+
+- **`partitionSettleMs`（设置 · 安全与提醒，默认 1000ms，范围 0–5000）**：
+  两次 diskpart 之间的等待。默认每盘多等 ~2 秒（通常 2 次切换），4 盘约 +8 秒，
+  相对单盘 Ghost 的 165 秒可忽略；`0` = 不等待。下发路径：设置 →
+  `runner_options["partition_settle_ms"]` → 分区阶段（越界自动夹紧）。
+- **诊断（A5）**：新增 `app/application/activity.py`（盘号 → 当前阶段），
+  分区组 / 写镜像 / 收尾都会登记。分区阶段在日志里写
+  `[诊断] 开始分区（diskpart 间隔 1000 ms；其它盘活动：磁盘 3=写镜像（Ghost））`，
+  等待时也带上这句；**失败详情**里额外写 `settle_ms` 与 `parallel_activity`，
+  下次复现能直接看出「是不是别的盘正在写镜像时炸的」。
+  登记表任何异常都不影响执行（最坏退化成"没有信息"）。
+- 版本号 1.2.4，`packaging/version_info.txt` 同步。
+
+### 测试
+
+- 新增 `tests/test_partition_settle.py`（20 条）：设置项默认值/范围/夹紧、
+  `option_int` 防御性、等待真的落在两次 diskpart 之间（MSR 有/无两态）、
+  `0` 可关闭、值来自 `runner_options`、荒唐值被夹到 5s、活动登记表描述与容错、
+  日志里出现「其它盘活动」、失败详情带 `parallel_activity`、
+  编排层登记/清理（含分区失败路径）。
+- `tests/test_concurrency.py` 新增 2 条**钉住生产装配**：`_build_service()` 必须把
+  `sequencer` / `ghost_gate` 交给 `build_real_runner`（同一个对象），注入执行器时
+  不得再偷偷造一个。这两条正是这次事故的直接回归防线。
+- `tests/test_settings_wiring.py` 的 `_runner_options()` 断言补上新键。
+- VM（Windows 10 19045 + Python 3.15.2）：`ruff` 全绿、`compileall` 通过、
+  `tools/ui_check.py` 通过、`pytest tests/ -q` → **593 passed**。
+- VM 4 盘真实写盘（exe 1.2.4，4×120 GB 动态 VHD）：四块盘 `efi/windows/data/layout`
+  全部 ok、Ghost 全部 ok（合成镜像使 `boot` 按设计失败、`copy` skipped），
+  日志时间线证明分区已串行、镜像仍交错；每盘的等待与诊断行均已落盘。
+
 ## 1.2.3 — 清盘失败不再只丢一个退出码：翻译 + 幂等重试
 
 **现场**：4 块盘批量装机，2 块在「硬盘分区」就失败，另外 2 块正常。日志里只有

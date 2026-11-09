@@ -60,6 +60,10 @@ DEFAULTS: dict[str, Any] = {
     # 任务结束后是否释放 EFI 分区的临时盘符（关掉时盘符会一直留着）
     "releaseEfiLetter": True,
     "logRetentionDays": 30,
+    # 两次 diskpart 之间的等待（毫秒）。老机器/劣质桥接板上磁盘链路慢，
+    # 一条命令刚改完分区表、下一条立刻回读容易报 0x80070017（CRC）。
+    # 0 = 不等待（保持最快）。
+    "partitionSettleMs": 1000,
     # 日志
     "logDir": "",
     "logLevel": "info",
@@ -105,6 +109,8 @@ _INT_RANGES: dict[str, tuple[int, int]] = {
     "sysDefaultGb": (60, 2000),
     "efiDefaultMb": (64, 1024),
     "logRetentionDays": (1, 3650),
+    # 0 = 不等待；上限 5 秒（再多就是浪费，真坏了该换线）
+    "partitionSettleMs": (0, 5000),
 }
 
 # 列表型设置已经没有了：唯一用过的 excludedDiskNames 连功能一起移除，

@@ -56,6 +56,8 @@ const FIELDS = [
   { section: 'safety', key: 'protectSystemDisk', kind: 'bool', effect: '立即生效', hint: '系统盘/引导盘一律拒绝写。' },
   { section: 'safety', key: 'releaseEfiLetter', kind: 'bool', effect: '下次任务生效', hint: '任务结束后摘掉 EFI 分区的临时盘符；关掉会让它一直占着一个盘符。' },
   { section: 'safety', key: 'logRetentionDays', kind: 'int', effect: '下次清理生效', hint: '超过天数的任务日志会被删。' },
+  { section: 'safety', key: 'partitionSettleMs', kind: 'int', effect: '下次任务生效', hint: '两次 diskpart 之间的等待（毫秒，0~5000）。盘慢或走 USB 桥接时，一条命令刚改完分区表、'
+    + '下一条立刻回读容易报「数据错误（循环冗余检查）」0x80070017；调大（默认 1000）能减少这类抖动。0 = 不等待。' },
 
   { section: 'logging', key: 'logDir', kind: 'path', pick: 'dir', effect: '重启后生效', hint: '空 = 用户目录下的 Sisp 日志目录。' },
   { section: 'logging', key: 'logLevel', kind: 'enum', effect: '重启后生效' },
@@ -82,6 +84,7 @@ const LABELS = {
   protectSystemDisk: '保护系统盘',
   releaseEfiLetter: '任务结束后释放 EFI 盘符',
   logRetentionDays: '日志保留天数',
+  partitionSettleMs: 'diskpart 命令间隔（毫秒）',
   logDir: '日志目录',
   logLevel: '日志级别',
 };

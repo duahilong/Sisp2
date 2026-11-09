@@ -229,3 +229,53 @@ def test_archive_ghosterr_copies_reason_to_log_dir(tmp_path: Path) -> None:
     archived = list(tmp_path.glob("ghosterr-disk3-*.txt"))
     assert len(archived) == 1
     assert "8027" in archived[0].read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------- 生产装配
+def test_built_runner_receives_the_shared_coordinators(monkeypatch) -> None:
+    """生产路径必须把 sequencer / ghost_gate 交给执行器。
+
+    这是一条**只在生产装配里才会犯的错**：单测都是自己 new 一个 runner 再注入
+    sequencer，所以即使 ``_build_service()`` 忘了传也照样全绿——而线上四块盘的分区
+    脚本会交错执行（每个 diskpart 进程互斥，但「清盘 → 删 MSR → 建分区」三段会在盘
+    之间穿插），Ghost 也可能同时起两个实例撞 8027。现场 0x80070017 就出在这种交错下。
+    """
+    import app.application.workflow as workflow_mod
+
+    captured: dict[str, object] = {}
+
+    def fake_build(**kwargs):
+        captured.update(kwargs)
+        return "FAKE-RUNNER"
+
+    monkeypatch.setattr(workflow_mod, "build_real_runner", fake_build)
+
+    controller = workflow_mod.WorkflowController(
+        preflight_runner=lambda: {"results": []},
+        settings_provider=dict,
+    )
+
+    assert controller._service._real_runner == "FAKE-RUNNER"
+    # 必须是同一个对象：set_order() / wait() 都作用在这两个实例上
+    assert captured["sequencer"] is controller._sequencer
+    assert captured["ghost_gate"] is controller._ghost_gate
+    # 两个协调器要在装配 service 之前就存在（否则 build 时拿不到，会退化成 None）
+    assert controller._sequencer is not None
+    assert controller._ghost_gate is not None
+
+
+def test_injected_runner_is_left_alone(monkeypatch) -> None:
+    """显式注入执行器时不该再偷偷造一个（测试/自定义装配走这条）。"""
+    import app.application.workflow as workflow_mod
+
+    def boom(**kwargs):  # pragma: no cover - 不该被调用
+        raise AssertionError("注入执行器时不该调用 build_real_runner")
+
+    monkeypatch.setattr(workflow_mod, "build_real_runner", boom)
+    sentinel = object()
+    controller = workflow_mod.WorkflowController(
+        real_runner=sentinel,
+        preflight_runner=lambda: {"results": []},
+        settings_provider=dict,
+    )
+    assert controller._service._real_runner is sentinel

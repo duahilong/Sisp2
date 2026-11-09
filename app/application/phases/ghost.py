@@ -14,6 +14,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from app.application import activity
 from app.application.partitions import ghost_target
 from app.application.phases.base import PhaseContext, PhaseOutcome, PhaseResult
 from app.application.runner_utils import tail
@@ -70,6 +71,15 @@ class GhostImagePhase:
 
     # ------------------------------------------------------------------ 执行
     def run(self, ctx: PhaseContext) -> PhaseOutcome:
+        # 诊断用：写镜像期间登记成 image，让别的盘分区时能在日志里看到
+        # 「磁盘 N 正在写镜像」，而不是笼统的 system。
+        activity.begin(ctx.disk_number, "image")
+        try:
+            return self._run_phase(ctx)
+        finally:
+            activity.begin(ctx.disk_number, "system")
+
+    def _run_phase(self, ctx: PhaseContext) -> PhaseOutcome:
         if ctx.cancelled():
             return PhaseOutcome(
                 ok=False,

@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app.application import activity
 from app.application.coordination import PartitionSequencer
 from app.application.partitions import (
     PartitionLayoutError,
@@ -154,12 +155,16 @@ class JobPipeline:
             # 正常路径在分区组结束时已经释放过，``done()`` 幂等。
             if self.sequencer is not None:
                 self.sequencer.done(ctx.disk_number)
+            activity.end(ctx.disk_number)
 
 
     def _run_groups(self, ctx: PhaseContext) -> PipelineResult:
         result = PipelineResult()
 
         # ===== 组 1：硬盘分区（含分区验收）=====
+        # 登记「这块盘在干什么」：分区阶段把它写进诊断日志，用来判断某次失败是不是
+        # 发生在“别的盘正在写镜像”的 I/O 争用时刻。
+        activity.begin(ctx.disk_number, "partition")
         part = self.partition.run(ctx)
         result.partition = part
         for item in part.results:
@@ -185,6 +190,7 @@ class JobPipeline:
             return result
 
         # ===== 组 2：写入系统（镜像 + 引导并校验）=====
+        activity.begin(ctx.disk_number, "system")
         system = self.system.run(ctx)
         for item in system.results:
             result.add(item, ctx)
@@ -201,6 +207,7 @@ class JobPipeline:
             return result
 
         # ===== 组 3：收尾（附加文件拷贝）=====
+        activity.begin(ctx.disk_number, "extras")
         if self.extras is None:
             return result
         extra = self.extras.run(ctx)

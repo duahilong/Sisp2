@@ -371,6 +371,15 @@ class WorkflowController:
         # 上一次 prepare() 因“无显式白名单”而隐式加入的盘号；下次 prepare/start 时撤销。
         self._implicit_allowlist: set[int] = set()
         # 服务必须跟着控制器走——白名单与执行器由控制器统一装配，不各自取默认值。
+        # 多盘流水线的两个闸门：分区轮次（按盘号串行）与 Ghost 启动间隔。
+        # 单盘时 sequencer 只包含一张盘，效果与串行实现完全一致。
+        #
+        # **必须在装配 service 之前创建**：执行器（WindowsDiskRunner）要拿到同一对
+        # 对象。以前这两行写在 ``_build_service()`` 之后，于是 ``build_real_runner``
+        # 里根本没有它们——结果「分区全局串行」只在单测里成立，生产环境四块盘的
+        # 分区脚本是交错执行的（现场 0x80070017 就出在这种交错下）。
+        self._sequencer = PartitionSequencer()
+        self._ghost_gate = GhostStartGate()
         self._service_injected = service is not None
         self._service = service if service is not None else self._build_service()
         # 默认执行器直接调本会话的 service。
@@ -378,10 +387,6 @@ class WorkflowController:
             executor=self._execute_spec,
         )
         self._preflight_runner = preflight_runner or run_preflight_checks
-        # 多盘流水线的两个闸门：分区轮次（按盘号串行）与 Ghost 启动间隔。
-        # 单盘时 sequencer 只包含一张盘，效果与串行实现完全一致。
-        self._sequencer = PartitionSequencer()
-        self._ghost_gate = GhostStartGate()
         self._session: SessionState | None = None
         self._prepared: dict[int, PreparedJob] = {}
         self._jobs: dict[str, PreparedJob] = {}
@@ -391,10 +396,16 @@ class WorkflowController:
         """按当前开关构造应用服务；真实模式的执行器默认是 ``WindowsDiskRunner``。"""
         runner = self._real_runner
         if runner is None:
+            # 多盘并发靠这两个协调器：少了它们，四块盘的分区脚本会交错执行
+            # （每个 diskpart 进程虽然互斥，但「清盘 → 删 MSR → 建分区」三段的
+            # 顺序会在盘之间穿插），Ghost 也可能同时启动两个实例撞上 8027。
+            # 这里必须和 set_order()/ghost_gate 用的是同一个对象。
             runner = build_real_runner(
                 log_dir=self._log_dir,
                 ghost=self._tool_paths.get("ghost"),
                 bcdboot=self._tool_paths.get("bcdboot"),
+                sequencer=self._sequencer,
+                ghost_gate=self._ghost_gate,
             )
         return SispService(
             allowed_disk_numbers=self._allowed_disk_numbers or (),
@@ -515,9 +526,15 @@ class WorkflowController:
         由拷贝阶段记一条 ``skipped``。
         """
         settings = self._settings()
+        try:
+            settle = int(settings.get("partitionSettleMs", 1000))
+        except (TypeError, ValueError):
+            settle = 1000
         return {
             "release_efi_letter": bool(settings.get("releaseEfiLetter", True)),
             "copy_source": str(settings.get("copySource") or "").strip(),
+            # 两次 diskpart 之间的等待（毫秒）。0 = 不等待。
+            "partition_settle_ms": max(0, settle),
         }
 
     def authorize_disks(self, disk_numbers: Iterable[int]) -> list[int]:
