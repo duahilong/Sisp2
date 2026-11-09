@@ -71,6 +71,7 @@ class FakeDiskpartShell:
         self.titles: list[str] = []
         self.queries: list[int] = []
         self.released: list[tuple[int, int, str]] = []
+        self.rescans = 0
         self._diskpart = diskpart_handler
         self._query = query_handler
         self._msr = msr
@@ -84,6 +85,10 @@ class FakeDiskpartShell:
         if self._diskpart is not None:
             return self._diskpart(list(lines), title, timeout)
         return 0, "diskpart ok"
+
+    def rescan(self, *, timeout: float = 120.0) -> bool:
+        self.rescans += 1
+        return True
 
     def release_letter(self, disk_number: int, partition: int, letter: str) -> bool:
         self.released.append((int(disk_number), int(partition), str(letter)))

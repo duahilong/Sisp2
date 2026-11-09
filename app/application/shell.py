@@ -50,6 +50,106 @@ COPY_TIMEOUT = 4 * 3600.0
 # 这里再上一把模块级锁：执行期释放盘符、boot 修复等旁路调用也不会和分区撞车。
 _DISKPART_LOCK = threading.Lock()
 
+# diskpart 的退出码就是 HRESULT：0x8007xxxx 里的 xxxx 是 Win32 错误码。
+# 值：(Win32 名字, 中文说明, 给用户/维护者的下一步建议)
+DISKPART_EXITS: dict[int, tuple[str, str, str]] = {
+    0x80070017: (
+        "ERROR_CRC",
+        "数据错误（循环冗余检查）",
+        "磁盘链路上读到了坏数据：先换数据线/换接口（USB 盘尽量直连主板、别串同一个 hub），"
+        "再查硬盘健康（CrystalDiskInfo 看 SMART 的 C7/05）",
+    ),
+    0x80070015: (
+        "ERROR_NOT_READY",
+        "设备未就绪",
+        "盘刚上电或桥接板还在初始化：等几秒重试；反复出现说明供电/桥接板不稳",
+    ),
+    0x8007001F: (
+        "ERROR_GEN_FAILURE",
+        "设备故障（一般性错误）",
+        "设备拒绝了这次写操作：换接口/换线；同一块盘反复出现要怀疑盘本身",
+    ),
+    0x8007045D: (
+        "ERROR_IO_DEVICE",
+        "I/O 设备错误",
+        "读写过程中设备掉了：检查电源、USB 供电、SATA/桥接板是否松动",
+    ),
+    0x80070020: (
+        "ERROR_SHARING_VIOLATION",
+        "卷被占用",
+        "盘上还有卷/文件被别的程序打开：关掉资源管理器窗口、杀软扫描或其它分区工具后重试",
+    ),
+    0x80070021: (
+        "ERROR_LOCK_VIOLATION",
+        "文件被锁定",
+        "同上：先把占用该盘的进程（杀软/备份/索引）停掉再重试",
+    ),
+    0x80070005: (
+        "ERROR_ACCESS_DENIED",
+        "拒绝访问",
+        "权限不够或盘被保护：确认以管理员运行；只读/受保护（如 Intel RST、BitLocker、"
+        "写保护开关）的盘要先解除保护",
+    ),
+    0x80070013: (
+        "ERROR_WRITE_PROTECT",
+        "磁盘被写保护",
+        "整盘写保护：检查盘上的写保护开关、机箱热插拔策略、以及是否被策略设为只读",
+    ),
+    0x80070057: (
+        "ERROR_INVALID_PARAMETER",
+        "参数错误",
+        "脚本里的分区参数不被接受（例如 size 超出磁盘可用空间）：核对向导里的分区大小",
+    ),
+    0x8007000E: (
+        "ERROR_OUTOFMEMORY",
+        "资源不足",
+        "diskpart 的虚拟磁盘服务分配失败：关掉其它分区/镜像工具后重试",
+    ),
+}
+
+# 可以放心重试的错误：命令是幂等的（清盘 + 转 GPT），且失败原因多半是瞬时的。
+# 权限/参数类错误重试也不会变好，直接报出来。
+DISKPART_TRANSIENT_EXITS: frozenset[int] = frozenset(
+    {0x80070017, 0x80070015, 0x8007001F, 0x8007045D, 0x80070020, 0x80070021, 0x8007000E}
+)
+
+
+def normalize_exit_code(code: int | None) -> int | None:
+    """把退出码统一成 32 位无符号 HRESULT 形式（负数也认）。"""
+    if code is None:
+        return None
+    return int(code) & 0xFFFFFFFF
+
+
+def describe_diskpart_exit(code: int | None) -> str:
+    """``2147942423`` → ``"2147942423 = 0x80070017 数据错误（循环冗余检查）"``。
+
+    认不出来的码原样给出数值和十六进制，不做猜测。
+    """
+    if code is None:
+        return "未知"
+    value = normalize_exit_code(code)
+    known = DISKPART_EXITS.get(value)
+    if value is None:  # pragma: no cover - normalize 不会返回 None
+        return str(code)
+    hexed = f"0x{value:08X}"
+    if known is None:
+        return f"{value} = {hexed}"
+    _name, text, _hint = known
+    return f"{value} = {hexed} {text}"
+
+
+def diskpart_exit_hint(code: int | None) -> str:
+    """给用户的下一步建议；认不出来的码返回空串（不编造原因）。"""
+    value = normalize_exit_code(code)
+    known = DISKPART_EXITS.get(value) if value is not None else None
+    return known[2] if known else ""
+
+
+def is_transient_diskpart_exit(code: int | None) -> bool:
+    """这个退出码值不值得重试（幂等命令的前提下）。"""
+    return normalize_exit_code(code) in DISKPART_TRANSIENT_EXITS
+
 _LOGGER = logging.getLogger(__name__)
 
 # 只读：查分区表 + 卷信息（盘符/卷标/文件系统）+ 盘容量。
@@ -312,6 +412,24 @@ class DiskpartShell:
             except OSError:
                 pass
 
+    def rescan(self, *, timeout: float = RELEASE_TIMEOUT) -> bool:
+        """让 diskpart 重新扫描总线（重试前调用，让枚举跟上真实状态）。
+
+        失败只记日志：扫描不了不代表重试一定失败，不该因此改变任务结论。
+        """
+        if not self.diskpart:
+            return False
+        try:
+            code, _output = self.run_diskpart(["rescan", "exit"], title="diskpart 重新扫描磁盘", timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 - 重扫失败不影响重试
+            self.log.write(f"重新扫描磁盘失败（已忽略）：{exc}")
+            return False
+        if code == 0:
+            self.log.write("已重新扫描磁盘总线")
+            return True
+        self.log.write(f"重新扫描磁盘失败（退出码 {describe_diskpart_exit(code)}），继续重试")
+        return False
+
     def release_letter(self, disk_number: int, partition: int, letter: str) -> bool:
         """按"磁盘号 + 分区号"摘掉盘符（不按字母选卷，见 ``EfiLetterReleaser``）。"""
         wanted = str(letter).strip().upper()
@@ -414,7 +532,9 @@ class DiskpartShell:
 __all__ = [
     "BCDBOOT_TIMEOUT",
     "COPY_TIMEOUT",
+    "DISKPART_EXITS",
     "DISKPART_TIMEOUT",
+    "DISKPART_TRANSIENT_EXITS",
     "GHOST_TIMEOUT",
     "PARTITIONS_SCRIPT",
     "QUERY_ATTEMPTS",
@@ -424,6 +544,10 @@ __all__ = [
     "VERIFY_TIMEOUT",
     "DiskpartShell",
     "ProcessShell",
+    "describe_diskpart_exit",
+    "diskpart_exit_hint",
     "find_program",
+    "is_transient_diskpart_exit",
+    "normalize_exit_code",
     "run_process",
 ]

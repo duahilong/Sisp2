@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -23,10 +24,22 @@ from app.application.partitions import (
 )
 from app.application.phases.base import PhaseContext, PhaseOutcome, PhaseResult
 from app.application.runner_utils import option_flag, tail
-from app.application.shell import DiskpartShell
+from app.application.shell import (
+    DiskpartShell,
+    describe_diskpart_exit,
+    diskpart_exit_hint,
+    is_transient_diskpart_exit,
+)
 from app.application.steps import steps_after
 
 GROUP = "partition"
+
+# 「清盘 + 转 GPT」是幂等的：同一块盘重跑一遍没有副作用。真实批量装机里遇到过
+# 磁盘链路抖动导致的 0x80070017（ERROR_CRC）/0x80070015（设备未就绪）：clean 已经
+# 成功、convert gpt 那一步读盘失败，一块盘整单作废。所以这一段允许重试，
+# 重试前先 rescan，让 diskpart 的枚举跟上真实状态。
+WIPE_ATTEMPTS = 3
+WIPE_RETRY_DELAY = 2.0
 
 # 验收判据可替换（默认就是 ``partitions.partition_verdict``）。
 Acceptance = Callable[
@@ -70,9 +83,15 @@ class PartitionPhase:
         acceptance: PartitionAcceptance | None = None,
         *,
         verdict: Acceptance = partition_verdict,
+        wipe_attempts: int = WIPE_ATTEMPTS,
+        retry_delay: float = WIPE_RETRY_DELAY,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.shell = shell
         self.acceptance = acceptance or PartitionAcceptance(shell, verdict)
+        self.wipe_attempts = max(1, int(wipe_attempts))
+        self.retry_delay = max(0.0, float(retry_delay))
+        self._sleep = sleep
 
     # ------------------------------------------------------------------ 入口
     def run(self, ctx: PhaseContext) -> PhaseOutcome:
@@ -80,17 +99,18 @@ class PartitionPhase:
         if ctx.cancelled():
             return PhaseOutcome(ok=False, cancelled=True, message="任务已取消（未开始写盘）")
 
-        # ===== ① 清盘 + 转 GPT =====
+        # ===== ① 清盘 + 转 GPT（幂等，允许重试）=====
         ctx.notify("efi", "running", "清盘并重建分区表")
         try:
-            code, output = self.shell.run_diskpart(
-                wipe_lines(ctx.disk_number), title="diskpart 脚本（清盘 + 转 GPT）"
-            )
+            code, output, attempts = self._run_wipe(ctx, log)
         except Exception as exc:  # noqa: BLE001 - 统一翻成步骤失败
             return self._fail(f"无法执行 diskpart：{exc}")
         if code != 0:
             return self._fail(
-                f"diskpart 失败（退出码 {code}）", code=code, output=output
+                self._wipe_failure_message(code, attempts),
+                code=code,
+                output=output,
+                extra={"diskpart_attempts": attempts},
             )
 
         # 盘已经空了：从这里开始取消也"不是什么都没发生"，消息要说清楚状态。
@@ -123,7 +143,8 @@ class PartitionPhase:
                 )
             if code != 0:
                 return self._fail(
-                    f"删除 MSR 分区失败（退出码 {code}）：{tail(output, 500)}",
+                    f"删除 MSR 分区失败（退出码 {describe_diskpart_exit(code)}）："
+                    f"{tail(output, 500)}",
                     code=code,
                     output=output,
                     disk_touched=True,
@@ -149,7 +170,10 @@ class PartitionPhase:
             return self._fail(f"无法执行 diskpart：{exc}", disk_touched=True)
         if code != 0:
             return self._fail(
-                f"diskpart 失败（退出码 {code}）", code=code, output=output, disk_touched=True
+                f"建分区失败（退出码 {describe_diskpart_exit(code)}）",
+                code=code,
+                output=output,
+                disk_touched=True,
             )
 
         # ===== ⑤ 分区验收（独立的 layout 步骤）=====
@@ -175,6 +199,44 @@ class PartitionPhase:
             efi_partition=details.get("efi_partition"),
             details={"verification": details},
         )
+
+    # ------------------------------------------------------------------ 清盘重试
+    def _run_wipe(self, ctx: PhaseContext, log: Any) -> tuple[int, str, int]:
+        """跑「清盘 + 转 GPT」，返回 ``(退出码, 输出, 实际尝试次数)``。
+
+        只在**瞬时类**失败（0x80070017 数据错误 / 0x80070015 设备未就绪 / I/O 类）
+        上重试，且重试前 rescan + 退避等待：权限不足、参数不对这类错误重试也没用，
+        早点把真实原因报给用户。
+        """
+        total = self.wipe_attempts
+        code = -1
+        output = ""
+        for attempt in range(1, total + 1):
+            code, output = self.shell.run_diskpart(
+                wipe_lines(ctx.disk_number), title="diskpart 脚本（清盘 + 转 GPT）"
+            )
+            if code == 0:
+                return 0, output, attempt
+            if attempt >= total or not is_transient_diskpart_exit(code):
+                return code, output, attempt
+            wait = self.retry_delay * attempt
+            log.write(
+                f"清盘第 {attempt}/{total} 次失败（退出码 {describe_diskpart_exit(code)}），"
+                f"{wait:.0f}s 后重新扫描并重试"
+            )
+            if wait > 0:
+                self._sleep(wait)
+            self.shell.rescan()
+        return code, output, total
+
+    def _wipe_failure_message(self, code: int, attempts: int) -> str:
+        message = f"diskpart 失败（退出码 {describe_diskpart_exit(code)}）"
+        if attempts > 1:
+            message += f"；已自动重试 {attempts - 1} 次仍失败"
+        hint = diskpart_exit_hint(code)
+        if hint:
+            message += f"。{hint}"
+        return message
 
     # ------------------------------------------------------------------ 组装
     def _created_results(self, ctx: PhaseContext, *, verified: bool) -> list[PhaseResult]:
@@ -225,6 +287,7 @@ class PartitionPhase:
         code: int | None = None,
         output: str | None = None,
         disk_touched: bool = False,
+        extra: Mapping[str, Any] | None = None,
     ) -> PhaseOutcome:
         """分区失败：``efi`` 记为失败，同组其余步骤补 ``skipped``。
 
@@ -237,6 +300,8 @@ class PartitionPhase:
             details["diskpart_exit"] = code
         if output is not None:
             details["diskpart_tail"] = tail(output)
+        if extra:
+            details.update(extra)
         results = [PhaseResult.failed("efi", message, **details)]
         for key in steps_after("partition", "efi"):
             results.append(PhaseResult.skipped(key, "分区未完成，后续步骤未执行"))
