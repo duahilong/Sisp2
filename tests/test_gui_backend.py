@@ -150,6 +150,8 @@ def test_desktop_window_process_does_not_build_workflow(monkeypatch, tmp_path) -
     monkeypatch.setattr(gui, "spawn_privileged_backend", lambda args, port: True)
     monkeypatch.setattr(gui, "_wait_url", lambda url, timeout=25.0: url.endswith("/health"))
     monkeypatch.setattr(gui, "read_settings", lambda path: {})
+    # 窗口进程的日志落在真实 %APPDATA% 下会污染用户目录，这里一律不落盘
+    monkeypatch.setattr(gui, "configure_window_logging", lambda path, settings: None)
     monkeypatch.setattr(
         gui, "build_api", lambda *a, **k: pytest.fail("窗口进程不该建业务会话")
     )
@@ -168,6 +170,8 @@ def test_desktop_falls_back_to_local_backend_when_uac_rejected(monkeypatch, tmp_
     monkeypatch.setattr(gui, "_check_port_free", lambda host, port: None)
     monkeypatch.setattr(gui, "spawn_privileged_backend", lambda args, port: False)
     monkeypatch.setattr(gui, "read_settings", lambda path: {})
+    # 窗口进程的日志落在真实 %APPDATA% 下会污染用户目录，这里一律不落盘
+    monkeypatch.setattr(gui, "configure_window_logging", lambda path, settings: None)
 
     closed: list[bool] = []
     monkeypatch.setattr(

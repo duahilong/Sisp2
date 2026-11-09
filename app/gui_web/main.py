@@ -38,9 +38,14 @@ import urllib.request
 from pathlib import Path
 
 from app.gui.elevation import is_admin
+from app.gui.webengine import inspect_engine
 from app.resources import ui_path
 
 MODULE = "app.gui_web"
+# 冻结成 exe 之后入口脚本的 __name__ 是 "__main__"，用它取 logger 会落到 root
+# （root 没有 handler），窗口侧的日志就一条都写不进 app.log。这里写死名字，
+# 和 configure_logging() 挂在 "app" 上的文件 handler 对齐。
+LOG = logging.getLogger("app.gui_web.main")
 UI_FILE = ui_path()
 SW_SHOWNORMAL = 1
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -247,6 +252,37 @@ def watch_parent(parent_pid: int, on_exit, interval: float = 0.5) -> threading.T
     return thread
 
 
+def configure_window_logging(settings_path: str | None, settings: dict | None) -> Path | None:
+    """窗口进程也把日志写进 ``app.log``。
+
+    以前只有 ``build_api()`` 里配日志，而桌面模式下业务都在提权后端里跑，
+    窗口进程一句日志都没有：内核回退、UAC 被拒、服务起不来，全都只走 stderr，
+    而打包产物 ``console=False``，stderr 直接进空设备——用户拿到的只有
+    “窗口打开了但连不上”，日志目录里什么都没有。这里让窗口侧也落一份盘。
+
+    两个进程写同一个文件是刻意的：用户点的“打开日志目录”只有一个 ``app.log``。
+    窗口侧每次启动只写几行，滚动切分的概率可以忽略。
+    """
+    data = settings or {}
+    log_dir = str(data.get("logDir") or "").strip()
+    if not log_dir:
+        try:
+            from app.application.command_log import default_log_dir
+
+            log_dir = str(default_log_dir())
+        except Exception:  # noqa: BLE001 - 拿不到默认目录就不写文件，不阻塞开窗
+            return None
+    return configure_logging(log_dir, data.get("logLevel", "info"))
+
+
+def alert_blocking(message: str, title: str = "硬盘工具箱") -> None:
+    """模态消息框：窗口打不开时必须让用户看见原因，而不是静默退出。"""
+    try:
+        ctypes.windll.user32.MessageBoxW(None, message, title, 0x10 | 0x00040000)
+    except Exception:  # noqa: BLE001, S110 - 弹不出框也不能让进程崩在入口
+        pass
+
+
 def read_settings(settings_path: str | None) -> dict:
     """窗口进程只读设置里跟自己有关的几项（窗口几何、rememberWindow）。
 
@@ -421,15 +457,36 @@ def _run_serve(args) -> int:
 
 
 def _run_desktop(args) -> int:
-    """桌面模式：窗口进程不提权，写盘能力在 UAC 拉起的后端子进程里。"""
+    """桌面模式：窗口进程不提权，写盘能力在 UAC 拉起的后端子进程里。
+
+    退出码：3 = 缺 pywebview；4 = 端口被占；5 = 渲染内核不满足（WebView2/.NET）。
+    """
     try:
         import webview  # type: ignore
     except ImportError:
         print("缺少依赖：pip install -r requirements-web.txt", file=sys.stderr)
         return 3
 
+    settings = read_settings(args.settings)
+    log_file = configure_window_logging(args.settings, settings)
+    log = LOG
+    if log_file is not None:
+        log.info("界面进程启动，日志文件：%s", log_file)
+
+    # 内核必须是 Chromium：退回 IE（MSHTML）时界面脚本一行都执行不了，
+    # 用户看到的是“窗口开了但连不上”，没有任何提示。宁可明确拒绝开窗。
+    engine = inspect_engine()
+    if engine.chromium:
+        log.info("渲染内核检查通过：%s", engine.summary())
+    else:
+        log.error("渲染内核不满足，拒绝打开窗口：%s", "; ".join(engine.problems))
+        print(engine.message(), file=sys.stderr)
+        alert_blocking(engine.message())
+        return 5
+
     port_error = _check_port_free("127.0.0.1", args.port)
     if port_error:
+        log.error("端口不可用：%s", port_error)
         print(port_error, file=sys.stderr)
         return 4
 
@@ -440,12 +497,15 @@ def _run_desktop(args) -> int:
     try:
         # “界面”和“能写盘的进程”分开：WebView2 只在普通权限进程里跑。
         if not args.backend and spawn_privileged_backend(args, args.port):
+            log.info("已拉起提权后端，等待 /health 就绪…")
             print("已拉起提权后端，等待就绪…", flush=True)
             if not _wait_url(health):
+                log.error("提权后端启动超时（%s 没等到 /health）", health)
                 print("提权后端启动超时（没等到 /health）。", file=sys.stderr)
                 return 1
         else:
             # 提权被取消：退回进程内服务，界面照常打开；写盘会被预检拦住。
+            log.warning("提权被取消或不可用：退回普通权限的进程内服务，真实写盘会被预检拒绝")
             print("提权被取消：以普通权限运行，真实写盘会被预检拒绝。", file=sys.stderr)
             api, wf = build_api(args.settings)
             from app.gui_web.server import create_app
@@ -453,10 +513,12 @@ def _run_desktop(args) -> int:
             app = create_app(api, wf, host_check=True)
             server, _thread = _serve_in_thread(app, "127.0.0.1", args.port)
             if not _wait_until_ready(health):
+                log.error("本机 HTTP 服务启动超时（%s），无法打开窗口", health)
                 print("本机 HTTP 服务启动超时，无法打开窗口。", file=sys.stderr)
                 return 1
 
-        geometry = load_window_geometry(args.settings, read_settings(args.settings)) or {}
+        log.info("打开窗口：%s", url)
+        geometry = load_window_geometry(args.settings, settings) or {}
         window = webview.create_window(
             "硬盘工具箱",
             url,
@@ -493,6 +555,7 @@ def _run_desktop(args) -> int:
         try:
             webview.start(debug=args.debug, storage_path=webview_storage_path())
         finally:
+            log.info("界面进程退出")
             _remember_geometry()
     finally:
         # 后端是提权进程，界面这边结束不了它（拿不到 PROCESS_TERMINATE），

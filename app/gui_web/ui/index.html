@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="/static/css/app.css">
 </head>
 <body>
+<noscript><div class="engine-warn">本界面需要启用 JavaScript：当前浏览器禁用了脚本（或被安全软件拦截），无法连接本地服务。</div></noscript>
 <div class="app" id="app">
 
   <div class="titlebar">
@@ -144,6 +145,9 @@
 <div class="toasts" id="toasts"></div>
 <div class="fatal" id="fatal" hidden></div>
 
+<!-- 必须排在 main.js 之前：模块在 IE / 旧内核里一行都不执行，
+     “跑不起来”这件事只能由一份 ES5 普通脚本先报出来。 -->
+<script src="/static/js/engine-guard.js"></script>
 <script type="module" src="/static/js/main.js"></script>
 </body>
 </html>

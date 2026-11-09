@@ -52,6 +52,43 @@ def test_index_is_thin_shell() -> None:
         assert f'id="{node_id}"' in text, node_id
 
 
+def test_engine_guard_loads_before_the_module() -> None:
+    """兜底脚本必须排在模块前面，而且必须是普通脚本。
+
+    整个界面只有一个 ES 模块入口，而 IE/旧内核对模块连解析都不解析——那种
+    情况下唯一能跑的是 ES5 普通脚本。顺序错了（或者改成 type=module）
+    就等于兜底也一起失效，用户还是只能看到一个点不动的窗口。
+    """
+    text = (UI / "index.html").read_text(encoding="utf-8")
+    guard = '<script src="/static/js/engine-guard.js"></script>'
+    assert guard in text
+    assert text.index(guard) < text.index('/static/js/main.js')
+    assert (JS / "engine-guard.js").is_file()
+
+
+def test_engine_guard_is_plain_script() -> None:
+    """es5 only：目标读者是跑不了 ES 模块的老内核，用 ES6 语法就白写了。"""
+    text = (JS / "engine-guard.js").read_text(encoding="utf-8")
+    code = re.sub(r"/\*.*?\*/", "", text, flags=re.S)  # 去掉块注释再判断
+    assert not re.search(r"=>", code), "engine-guard.js 不能使用箭头函数"
+    assert not re.search(r"\b(const|let)\b", code), "engine-guard.js 不能用 const/let"
+    assert "`" not in code, "engine-guard.js 不能用模板字符串"
+    # 它得会触发兜底：既认 IE 的 documentMode，也盯主模块有没有置位
+    assert "documentMode" in text
+    assert "__sispBooted" in text
+
+
+def test_main_module_flags_boot_for_the_guard() -> None:
+    text = (JS / "main.js").read_text(encoding="utf-8")
+    assert "window.__sispBooted = true" in text
+
+
+def test_index_has_noscript_hint() -> None:
+    text = (UI / "index.html").read_text(encoding="utf-8")
+    assert "<noscript>" in text
+    assert "engine-warn" in text
+
+
 def test_local_imports_resolve() -> None:
     pattern = re.compile(r"""from\s+['"]\./([\w.-]+\.js)['"]""")
     for path in _js_files():

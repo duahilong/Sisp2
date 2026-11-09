@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import pytest
@@ -44,6 +45,27 @@ def block_real_disk_operations(monkeypatch):
 
 
 # ---------------------------------------------------------------- 夹具
+@pytest.fixture(autouse=True)
+def app_logger_isolated():
+    r"""用例结束后把 ``app`` logger 的 handler / 级别还原。
+
+    ``configure_logging()`` 会把 RotatingFileHandler 挂到 ``app`` logger 上，
+    在同一进程里一直有效。不还原的话，后面用例的日志会写进前面用例的临时
+    目录；更糟的是会写进真实的 ``%APPDATA%\Sisp\logs\app.log``（污染用户目录，
+    而且日志内容互相串台，排查时看不见真正的那条）。
+    """
+    logger = logging.getLogger("app")
+    before_handlers = list(logger.handlers)
+    before_level = logger.level
+    yield
+    for handler in list(logger.handlers):
+        if handler not in before_handlers:
+            logger.removeHandler(handler)
+            handler.close()
+    logger.setLevel(before_level)
+
+
+
 @pytest.fixture(autouse=True)
 def ghost_tool_present(monkeypatch):
     """单测里把 Ghost 当成"已安装"。

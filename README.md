@@ -6,6 +6,8 @@ Sisp2 是面向 Windows 的硬盘装机工具，可规划并执行清盘、GPT E
 
 要求 Windows 与 Python 3.10+。磁盘逻辑只用标准库和系统工具；界面另需 FastAPI、uvicorn、pywebview（仅桌面窗口需要 pywebview）。
 
+桌面窗口还需要 **Microsoft Edge WebView2 运行时（主版本 ≥ 86）** 与 **.NET Framework 4.6.2+**：界面是 ES 模块，缺这两样时 pywebview 会退回 IE 内核，界面一行脚本都跑不起来。缺的时候程序现在会直接弹框说明原因并退出（不再给一个点不动的窗口）；老 Win10 请先装 WebView2，或用 `--serve` 配 Edge/Chrome。详见 `Docs/打包与分发.md`。
+
 ```powershell
 python -m pip install -r requirements.txt
 # 可选：GUI 服务及桌面窗口

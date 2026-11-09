@@ -28,6 +28,10 @@ import {
 let installSig = '';
 let settingsPainted = false;
 let eventStream = null;
+
+// 模块跑到这里，就说明内核确实能执行 ES 模块：engine-guard.js 的 10 秒兜底
+// 计时器据此判断“界面是不是压根没启动”。必须放在模块最外层、尽早置位。
+window.__sispBooted = true;
 let pollTimer = null;
 
 /* ------------------------------------------------------------------ 渲染 */

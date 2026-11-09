@@ -985,3 +985,10 @@ input.confirm.bad{border-color:var(--danger);box-shadow:0 0 0 2px var(--danger-b
 .scriptbox .scriptnote{font-size:11px;color:var(--faint);margin:4px 0}
 .scriptpre{max-height:220px;overflow:auto;padding:8px;border:1px solid var(--line);
   border-radius:6px;background:var(--panel2);font-size:11px;white-space:pre;margin-top:4px}
+
+/* 内核兜底提示条（engine-guard.js 在模块跑不起来时插到页面顶部）
+   这里只是让它跟随主题；js 里还写了一份内联样式兜底，因为样式表本身
+   也可能因为同一个原因没加载上。 */
+.engine-warn{position:fixed;left:0;right:0;top:0;z-index:99999;padding:12px 16px;
+  background:var(--danger);color:#fff;font-size:13px;line-height:1.7;white-space:pre-wrap;
+  box-shadow:0 2px 8px rgba(0,0,0,.3)}

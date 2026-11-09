@@ -7,6 +7,70 @@ tag 上的提交树就是那一版的完整代码与文档快照。
 定版（`v1.1.0`）之后只做优化与修复：功能以 tag 为准，`main` 继续向前走，
 需要回到某一版时 `git checkout v1.1.0` 或 `git archive v1.1.0`。
 
+## 1.2.2 — 老 Win10 上「窗口开了但连不上」给出明确提示
+
+**症状**：在一台较旧的 Windows 10 上双击 exe，窗口能打开、标题栏和导航都在，
+但磁盘列表空着、状态一直停在“连接中”，点任何按钮都没反应，看起来像“后端没起来”。
+后端其实是好的——页面本身就是后端发的，问题在**渲染内核**。
+
+### 根因
+
+pywebview 6.x 的 winforms 后端在 import 时选内核：只有「.NET Framework ≥ 4.6.2」
+且「WebView2 运行时主版本 ≥ 86」同时成立才用 Chromium，否则**静默**退回
+MSHTML（IE11）。而界面只有一个入口 `<script type="module">`，IE11 连解析都不解析，
+也不支持 `fetch`——整块脚本不执行，只剩静态骨架。pywebview 的告警只走 stderr，
+打包产物是 `console=False`，stderr 进空设备；窗口进程此前根本没配日志，所以
+用户和日志目录里都看不到任何线索。
+
+### 改动
+
+- 新增 `app/gui/webengine.py`：建窗口前按 pywebview 同一套判据（同样的注册表位置、
+  同样“只比主版本”的规则）探测内核，输出 WebView2 / .NET 版本与问题清单。
+- `app/gui_web/main.py`：内核不是 Chromium 时**弹消息框说明原因并退出**（退出码 5），
+  正文给出 WebView2 下载地址与 `--serve` 的替代方案；不再给一个点不动的窗口。
+- 窗口进程也落盘 `app.log`（`configure_window_logging()`）：内核探测结果、提权后端
+  拉起、UAC 被拒、端口占用、服务超时、正常退出都留痕，以前这些都只走 stderr。
+- 前端兜底：`ui/js/engine-guard.js`（**ES5 普通脚本，排在模块之前**）在两种情况下
+  在页面顶部压一条红色提示——内核明显跑不了模块（`document.documentMode` / 无
+  `fetch`），或 10 秒内主模块没有置位 `window.__sispBooted`；另加 `<noscript>` 提示。
+  样式同时写在 `app.css` 与内联兜底里，避免“样式表也没加载上”时看不见。
+- 版本号 1.2.2，`packaging/version_info.txt` 同步。
+
+### 测试
+
+- 新增 `tests/test_webengine.py`（19 条）：版本解析（含 `120.0.1-beta` 这类后缀）、
+  四个 WebView2 GUID、.NET 门槛、主版本判定与 pywebview 一致、坏值/缺键不抛异常、
+  提示文案含下载地址与 `--serve`、`_run_desktop` 在内核不满足时返回 5 且弹框、
+  正常时继续下发，以及“窗口 logger 不能用 `__name__`（冻结后是 `__main__`，
+  会落到 root 导致一条日志都写不进 app.log）”。
+- `tests/test_ui_assets.py` 新增 4 条：兜底脚本必须排在模块之前、必须是 ES5、
+  主模块必须置位 `__sispBooted`、`index.html` 必须有 `<noscript>` 提示。
+- `tests/conftest.py` 新增 `app_logger_isolated`：用例结束后还原 `app` logger 的
+  handler，避免日志句柄串到后面的用例、甚至写进真实 `%APPDATA%\Sisp\logs`。
+
+### 验证（VM：Windows 10 19045 + Python 3.15.2）
+
+- `ruff check .` 全绿、`compileall` 通过、`tools/ui_check.py` 11 个模块通过；
+  `pytest tests/ -q` → **550 passed**（原基线 527 + 本次新增 23）。
+- **桌面窗口模式（真实 exe）**：用 explorer 启动（等价用户双击），app.log 完整落盘
+  —— `界面进程启动，日志文件：…` / `渲染内核检查通过：内核=chromium
+  WebView2=157.0.4341.42 .NET Release=533325` / `已拉起提权后端，等待 /health 就绪…`
+  / `打开窗口：http://127.0.0.1:8765/`；UI Automation 从 WebView2 里读到真实渲染结果
+  （`v1.2.2`、`2 块磁盘`、`7 个分区`、两块盘的完整分区树），且**没有**出现兜底红条。
+- **缺少 WebView2 的失败路径（真机模拟）**：临时摘掉
+  `HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-…}` 后启动 exe →
+  源码侧探测得到 `mshtml`；exe 弹出我方的说明框（UIA 读到的正文与 `message()`
+  完全一致，含下载地址与 `--serve` 方案）、**没有拉起提权后端**、`app.log` 记
+  `ERROR 渲染内核不满足，拒绝打开窗口：…`、点掉对话框后**退出码 5**；随后恢复注册表，
+  `pv=157.0.4341.42`、探测回到 `chromium`。
+- **前端兜底**：把 `main.js` 从静态目录删掉（模块 404），headless Edge + CDP 等 13 秒后
+  `#engineWarn.engine-warn` 出现且文案正确；把 `main.js` 放回去后同一探测得到
+  `booted=true / banner=false`（不误报）。
+- **真实写盘回归（exe 1.2.2）**：2.5 TB 动态 VHDX（声明容量，实际占用随写入增长）上
+  `tools/ui_smoke.mjs --start --allow-write` → `ok=true`、`problems=[]`、18 张截图；
+  七步与基线一致（`efi/windows/data/layout/image` ok，合成镜像使 `boot` 失败、
+  `copy` skipped），EFI 盘符释放、系统盘与数据盘分区结构未变。
+
 ## 1.2.1 — 清理非业务代码（无行为变化）
 
 这一版不新增功能，只删除“为测试 / 为兼容 / 为已下线功能”而留在生产路径上的
