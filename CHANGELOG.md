@@ -77,6 +77,22 @@ VM 实测（4 块 120 GB VHD，exe 1.2.4 前后对比，日志按时间排序）
 - VM 4 盘真实写盘（exe 1.2.4，4×120 GB 动态 VHD）：四块盘 `efi/windows/data/layout`
   全部 ok、Ghost 全部 ok（合成镜像使 `boot` 按设计失败、`copy` skipped），
   日志时间线证明分区已串行、镜像仍交错；每盘的等待与诊断行均已落盘。
+- **VM 6 盘真实写盘**（exe 1.2.4，6×120 GB 动态 VHD，平台上限形态）：
+  六块盘 `efi/windows/data/layout` 全部 ok、`image` 全部 ok、`copy` 按设计 skipped，
+  18 个盘符（每盘 EFI/Windows/Data 各一）一次分配到底（`G,H,K / L,M,N / O,P,Q /
+  R,S,T / U,V,W / X,Y,Z`，正好用尽），任务结束后 6 个 EFI 临时盘符
+  （G/L/O/R/U/X）全部释放，六块盘均为 GPT、3 分区、`largestFree=0`。
+  时间线（严格串行分区 + 镜像交错）：
+
+  ```
+  12:06:00 d2 分区 → 12:06:08 d2 Ghost / d3 分区
+  12:06:15 d3 Ghost / d4 分区   12:06:23 d4 Ghost / d5 分区
+  12:06:31 d5 Ghost / d6 分区   12:06:39 d6 Ghost / d7 分区
+  12:06:46 d7 Ghost             12:06:48 最后一个任务结束
+  ```
+
+  6 盘总墙钟 **49 s**（首盘 10 s、每盘约 8 s 分区），分区段严格不重叠；
+  诊断行示例：`磁盘 5` 开始分区时 `其它盘活动：磁盘 4=写镜像（Ghost）`。
 
 ## 1.2.3 — 清盘失败不再只丢一个退出码：翻译 + 幂等重试
 
