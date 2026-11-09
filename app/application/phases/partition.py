@@ -19,6 +19,7 @@ from app.application import activity
 from app.application.partitions import (
     PlannedPartition,
     create_partition_lines,
+    create_repair_lines,
     msr_delete_lines,
     partition_verdict,
     wipe_lines,
@@ -46,6 +47,11 @@ WIPE_RETRY_DELAY = 2.0
 # 为什么要有：一条 diskpart 刚改完分区表，下一条立刻回读同一片扇区，桥接板/慢盘
 # 还没落盘就会报 0x80070017（数据错误）。给 1 秒缓冲能显著降低这类抖动。
 DEFAULT_SETTLE_MS = 1000
+
+# 「建分区」中途失败（典型：某个 format 报 0x80042413 卷被占用）后，
+# 按真实分区表续跑的次数。format 失败通常是别的进程刚抓了一下新卷，
+# 重扫 + 等一下就能过；续跑是按现场状态补齐，不会重复 create。
+CREATE_REPAIR_ATTEMPTS = 2
 
 # 验收判据可替换（默认就是 ``partitions.partition_verdict``）。
 Acceptance = Callable[
@@ -92,6 +98,7 @@ class PartitionPhase:
         wipe_attempts: int = WIPE_ATTEMPTS,
         retry_delay: float = WIPE_RETRY_DELAY,
         sleep: Callable[[float], None] = time.sleep,
+        create_repair_attempts: int = CREATE_REPAIR_ATTEMPTS,
     ) -> None:
         self.shell = shell
         self.acceptance = acceptance or PartitionAcceptance(shell, verdict)
@@ -99,6 +106,7 @@ class PartitionPhase:
         self.retry_delay = max(0.0, float(retry_delay))
         self._sleep = sleep
         self._settle_ms = DEFAULT_SETTLE_MS
+        self.create_repair_attempts = max(0, int(create_repair_attempts))
 
     # ------------------------------------------------------------------ 入口
     def run(self, ctx: PhaseContext) -> PhaseOutcome:
@@ -195,13 +203,28 @@ class PartitionPhase:
             )
         except Exception as exc:  # noqa: BLE001
             return self._fail(f"无法执行 diskpart：{exc}", disk_touched=True)
+        repairs = 0
         if code != 0:
-            return self._fail(
-                f"建分区失败（退出码 {describe_diskpart_exit(code)}）",
-                code=code,
-                output=output,
-                disk_touched=True,
+            # 典型现场：某个 format 报 VDS 0x80042413「设备使用中」。此时前面的
+            # 分区已经建好，重跑原脚本会撞「分区已存在」，所以按真实分区表续跑。
+            repaired, code, output, repairs = self._repair_create(
+                ctx, log, first_code=code, first_output=output
             )
+            if not repaired:
+                return self._fail(
+                    self._create_failure_message(code, repairs),
+                    code=code,
+                    output=output,
+                    disk_touched=True,
+                    extra={
+                        "diskpart_repairs": repairs,
+                        "settle_ms": self._settle_ms,
+                        "parallel_activity": activity.describe(
+                            exclude=ctx.disk_number, style="plain"
+                        ),
+                    },
+                )
+            log.write("建分区续跑完成，继续分区验收")
 
         # ===== ⑤ 分区验收（独立的 layout 步骤）=====
         try:
@@ -255,6 +278,59 @@ class PartitionPhase:
                 self._sleep(wait)
             self.shell.rescan()
         return code, output, total
+
+    def _repair_create(
+        self,
+        ctx: PhaseContext,
+        log: Any,
+        *,
+        first_code: int,
+        first_output: str,
+    ) -> tuple[bool, int, str, int]:
+        """建分区脚本中途失败后，按真实分区表把没做完的部分补上。
+
+        返回 ``(是否修好, 最后一次退出码, 最后一次输出, 实际续跑次数)``。
+        续跑本身也失败时把最后一次的码/输出交回调用方，报错里同时给出原始失败。
+        """
+        code, output = first_code, first_output
+        repairs = 0
+        log.write(f"建分区未完成（{describe_diskpart_exit(code)}），按真实分区表续跑")
+        for round_no in range(1, self.create_repair_attempts + 1):
+            self._settle(ctx, log, f"续跑建分区前（第 {round_no} 次）")
+            try:
+                self.shell.rescan()
+            except Exception as exc:  # noqa: BLE001 - 重扫失败仍然可以试一次
+                log.write(f"续跑前重新扫描磁盘失败（已忽略）：{exc}")
+            try:
+                actual = self.shell.query(ctx.disk_number)
+            except Exception as exc:  # noqa: BLE001 - 查不到就不猜
+                log.write(f"续跑前无法查询真实分区表，放弃续跑：{exc}")
+                return False, code, output, repairs
+            lines = create_repair_lines(ctx.disk_number, ctx.parts, actual)
+            if not lines:
+                log.write("续跑检查：盘上的分区已经与计划一致，无需补做")
+                return True, 0, output, repairs
+            repairs += 1
+            log.write(f"续跑第 {round_no} 次：补 {len(lines) - 2} 条命令（create/format/assign）")
+            try:
+                code, output = self.shell.run_diskpart(
+                    lines, title=f"diskpart 脚本（建分区 · 续跑 {round_no}）"
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.write(f"续跑无法执行 diskpart：{exc}")
+                return False, code, output, repairs
+            if code == 0:
+                return True, 0, output, repairs
+        return False, code, output, repairs
+
+    def _create_failure_message(self, code: int, repairs: int) -> str:
+        message = f"建分区失败（退出码 {describe_diskpart_exit(code)}）"
+        if repairs:
+            message += f"；已按真实分区表续跑 {repairs} 次仍未完成"
+        hint = diskpart_exit_hint(code)
+        if hint:
+            message += f"。{hint}"
+        return message
 
     def _settle(self, ctx: PhaseContext, log: Any, reason: str) -> None:
         """两次 diskpart 之间的等待（``partitionSettleMs``，0 = 不等待）。

@@ -54,7 +54,7 @@ def _parts():
     return plan_partitions(PAYLOAD, letters=LETTERS)
 
 
-def _ctx(tmp_path) -> PhaseContext:
+def _ctx(tmp_path, options=None) -> PhaseContext:
     image = tmp_path / "tiny.GHO"
     if not image.exists():
         image.write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
@@ -65,7 +65,7 @@ def _ctx(tmp_path) -> PhaseContext:
         image_path=str(image),
         cancel=threading.Event(),
         log=CommandLog(None),
-        options={},
+        options=dict(options or {}),
     )
 
 
@@ -205,3 +205,211 @@ def test_all_transient_codes_trigger_a_retry(tmp_path, code: int) -> None:
     outcome = _phase(shell).run(_ctx(tmp_path))
     assert outcome.ok is True
     assert shell.rescans == 1
+
+
+# ---------------------------------------------------------------- VDS 错误码
+VDS_IN_USE = 0x80042413
+
+
+def test_vds_volume_in_use_code_is_explained() -> None:
+    """现场第二次报错：0x80042413（VDS：设备使用中/所选卷或分区正在使用）。"""
+    text = describe_diskpart_exit(VDS_IN_USE)
+    assert "0x80042413" in text
+    assert "正在使用" in text
+    assert "2147755027" in text  # 十进制也要留着，方便对照日志
+    assert is_transient_diskpart_exit(VDS_IN_USE) is True
+    assert diskpart_exit_hint(VDS_IN_USE)  # 要有下一步建议
+
+
+def test_vds_codes_are_not_confused_with_win32_codes() -> None:
+    """0x800424xx 是 VDS 自己的码，别按 Win32 的 0x8007xxxx 去解释。"""
+    assert describe_diskpart_exit(0x8004240C).count("0x8004240C") == 1
+    assert "0x8007" not in describe_diskpart_exit(0x8004240C)
+
+
+# ---------------------------------------------------------------- 续跑生成
+def _actual(*rows):
+    """构造 shell.query 返回的真实分区表（rows: (number, fs, letter)）。"""
+    partitions = []
+    for number, fs, letter in rows:
+        partitions.append(
+            {
+                "number": number,
+                "file_system": fs,
+                "label": None,
+                "drive_letter": letter,
+                "mounted_letter": None,
+            }
+        )
+    return {"partition_style": "GPT", "partitions": partitions, "largest_free": 0}
+
+
+def test_repair_lines_create_what_is_missing() -> None:
+    """一个分区都没建出来时，续跑应该把整份计划重新建一遍。"""
+    from app.application.partitions import create_repair_lines
+
+    lines = create_repair_lines(5, _parts(), _actual())
+    assert lines[0] == "select disk 5"
+    assert lines[-1] == "exit"
+    assert lines.count("format quick fs=fat32 label=EFI") == 1
+    assert any(line == "create partition primary size=3072" for line in lines)
+
+
+def test_repair_lines_only_format_the_unformatted_partition() -> None:
+    """EFI 建好且已格式化 → 只补没格式化的 C 与没分配盘符的数据分区。"""
+    from app.application.partitions import create_repair_lines
+
+    parts = _parts()
+    actual = _actual((1, "FAT32", "E"), (2, None, None), (3, "NTFS", None))
+    lines = create_repair_lines(1, parts, actual)
+
+    assert "select partition 2" in lines
+    assert "format quick fs=ntfs label=Windows" in lines
+    assert 'assign letter=F' in lines
+    # 数据分区已经有 NTFS，只差盘符
+    assert "select partition 3" in lines
+    assert 'assign letter=G' in lines
+    # 已经好的 EFI 不再 format
+    assert "format quick fs=fat32 label=EFI" not in lines
+
+
+def test_repair_lines_empty_when_everything_is_done() -> None:
+    from app.application.partitions import create_repair_lines
+
+    actual = _actual((1, "FAT32", "E"), (2, "NTFS", "F"), (3, "NTFS", "G"))
+    assert create_repair_lines(1, _parts(), actual) == []
+
+
+def test_repair_lines_never_duplicate_an_existing_partition() -> None:
+    """关键不变式：已经存在的分区绝不再 ``create``（否则 diskpart 必报已存在）。"""
+    from app.application.partitions import create_repair_lines
+
+    planned = len(_parts())
+    cases = (
+        (_actual(), 0, planned),
+        (_actual((1, "FAT32", "E")), 1, planned - 1),
+        (_actual((1, "FAT32", "E"), (2, "NTFS", "F")), 2, planned - 2),
+        (_actual((1, "FAT32", "E"), (2, None, None)), 2, planned - 2),
+    )
+    for actual, existing, expected_creates in cases:
+        lines = create_repair_lines(1, _parts(), actual)
+        creates = [line for line in lines if line.startswith("create partition")]
+        assert len(creates) == expected_creates, (existing, actual, lines)
+
+
+# ---------------------------------------------------------------- 失败恢复
+#
+# 现场第二次报错（2026-XX，2 块盘里 1 块失败）：日志里成串的「百分比已完成 0」
+# 只可能来自 ``format``，退出码 2147755027 = 0x80042413（VDS：设备使用中 /
+# 所选卷或分区正在使用）。也就是说：**分区其实建出来了，只是某个 format 被占用**，
+# 而整条建分区脚本是“跑到底”的，一条命令失败就整盘放弃。
+#
+# 现在的行为：重扫 + 按**真实分区表**续跑（缺的建、没格式化的格式化、没分配盘符
+# 的分配），最多 ``create_repair_attempts`` 次；仍然不行才带着 VDS 码报错。
+def _partial_snapshot(parts, keep: int):
+    """只保留前 ``keep`` 个分区的“建了一半”的真实分区表。"""
+    full = build_snapshot(parts)
+    partial = dict(full)
+    partial["partitions"] = list(full["partitions"])[:keep]
+    return partial
+
+
+def _scripted_shell(parts, *, create_fail_times, query_keep, repair_ok=True, partial_queries=1):
+    """第 1 次含 create 的脚本报 VDS 占用；后续由 ``repair_ok`` 决定成败。"""
+    state = {"creates": 0, "queries": 0}
+
+    def diskpart(lines, _title, _timeout):
+        if "create partition" not in " ".join(lines):
+            return 0, "format ok"
+        state["creates"] += 1
+        if state["creates"] <= create_fail_times:
+            return VDS_IN_USE, "虚拟磁盘服务错误: 设备使用中。"
+        return (0, "repair ok") if repair_ok else (VDS_IN_USE, "还是被占用")
+
+    def query(_disk):
+        state["queries"] += 1
+        if state["queries"] <= partial_queries:
+            return _partial_snapshot(parts, query_keep)
+        return build_snapshot(parts)
+
+    return FakeDiskpartShell(
+        msr=None, diskpart_handler=diskpart, query_handler=query
+    ), state
+
+
+def test_create_failure_resumes_from_the_real_partition_table(tmp_path) -> None:
+    """EFI 建好了、C/D 还没建：续跑脚本只补 C/D，不再动 EFI。"""
+    parts = _parts()
+    shell, _ = _scripted_shell(parts, create_fail_times=1, query_keep=1, partial_queries=1)
+    outcome = PartitionPhase(
+        shell, sleep=lambda _s: None, create_repair_attempts=2
+    ).run(_ctx(tmp_path, options={"partition_settle_ms": 0}))
+
+    assert outcome.ok is True, outcome.message
+    assert shell.rescans >= 1, "续跑前必须重扫磁盘"
+    repair = shell.scripts[-1] if len(shell.scripts) > 1 else []
+    # 最后一次脚本里不该再有 EFI 的 format（它已经好了）
+    assert "format quick fs=fat32 label=EFI" not in " ".join(repair)
+    assert shell.queries, "续跑前要先查真实分区表"
+
+
+def test_create_failure_message_carries_vds_code_and_repair_count(tmp_path) -> None:
+    """续跑也救不回来时，报错要带 VDS 码 + 续跑次数 + 下一步建议。"""
+    parts = _parts()
+    shell, _ = _scripted_shell(
+        parts, create_fail_times=99, query_keep=1, repair_ok=False, partial_queries=99
+    )
+    outcome = PartitionPhase(
+        shell,
+        sleep=lambda _s: None,
+        create_repair_attempts=2,
+        retry_delay=0,
+    ).run(_ctx(tmp_path, options={"partition_settle_ms": 0}))
+
+    assert outcome.ok is False
+    message = outcome.message or ""
+    assert "0x80042413" in message
+    assert "续跑 2 次仍未完成" in message
+    assert "正在使用" in message  # 翻译成人话了
+    details = outcome.results[0].details
+    assert details["diskpart_repairs"] == 2
+    assert outcome.disk_touched is True
+
+
+def test_create_repair_can_be_disabled(tmp_path) -> None:
+    parts = _parts()
+    shell, state = _scripted_shell(parts, create_fail_times=99, query_keep=1, partial_queries=0)
+    outcome = PartitionPhase(
+        shell, sleep=lambda _s: None, create_repair_attempts=0
+    ).run(_ctx(tmp_path, options={"partition_settle_ms": 0}))
+
+    assert outcome.ok is False
+    assert state["creates"] == 1, "关掉续跑就只能跑一次原脚本"
+    assert shell.rescans == 0
+    assert "已按真实分区表续跑" not in (outcome.message or "")
+
+
+def test_repair_is_skipped_when_the_disk_already_matches_the_plan(tmp_path) -> None:
+    """其实只是退出码假失败（脚本跑完了但返回非 0）时，不要白跑一遍 format。"""
+    parts = _parts()
+    state = {"creates": 0, "queries": 0}
+
+    def diskpart(lines, _title, _timeout):
+        if "create partition" in " ".join(lines):
+            state["creates"] += 1
+            return VDS_IN_USE, "设备使用中"
+        return 0, "format ok"
+
+    def query(_disk):
+        state["queries"] += 1
+        return build_snapshot(parts)  # 现场其实已经建好了
+
+    shell = FakeDiskpartShell(msr=None, diskpart_handler=diskpart, query_handler=query)
+    outcome = PartitionPhase(
+        shell, sleep=lambda _s: None, create_repair_attempts=2
+    ).run(_ctx(tmp_path, options={"partition_settle_ms": 0}))
+
+    assert outcome.ok is True
+    assert state["creates"] == 1, "分区已经对上了，不该再发建分区的命令"
+    # scripts[0]=清盘、scripts[1]=建分区；再往后一条都不该有
+    assert len(shell.scripts) == 2, shell.scripts[2:]

@@ -736,3 +736,74 @@ def ghost_target(disk_number: Any, parts: Sequence[PlannedPartition]) -> tuple[i
     if "windows" not in roles:
         raise PartitionLayoutError("分区计划里没有 Windows 分区，无法写入镜像")
     return int(disk_number) + 1, roles.index("windows") + 1
+
+
+def _planned_create_line(part: PlannedPartition) -> str:
+    """按角色/尺寸生成一条 ``create`` 行（与 ``diskpart_lines`` 同一套规则）。"""
+    if part.role == "efi":
+        return f"create partition efi size={int(part.size_mb or EFI_DEFAULT_MB)}"
+    if part.size_mb is None:
+        return "create partition primary"
+    return f"create partition primary size={int(part.size_mb)}"
+
+
+def _normalise_fs(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    return "" if text in ("", "RAW", "UNKNOWN", "NONE") else text
+
+
+def _partition_at(actual: Any, position: int) -> Mapping[str, Any] | None:
+    """真实分区表里编号为 ``position`` 的分区；找不到返回 ``None``。"""
+    partitions = actual.get("partitions") if isinstance(actual, Mapping) else None
+    for part in partitions or ():
+        if isinstance(part, Mapping) and to_int(part.get("number")) == int(position):
+            return part
+    return None
+
+
+def create_repair_lines(
+    disk_number: int,
+    parts: Sequence[PlannedPartition],
+    actual: Mapping[str, Any] | Any,
+) -> list[str]:
+    """按**真实分区表**续跑「建分区」：只补没做完的部分。
+
+    为什么需要：建分区是一条脚本跑到底（逐分区 ``create → format → assign``）。
+    中途某个 ``format`` 因“卷被占用”（VDS ``0x80042413``：设备使用中）失败时，
+    已经建好的分区**不会回滚**，但整条脚本就此中止。把原脚本再跑一遍会在
+    ``create partition`` 上撞“分区已存在”，所以只能按现场状态续跑：
+
+    - 缺的分区 → ``create``（规则与 ``diskpart_lines`` 完全一致）；
+    - 有分区但文件系统不对（还没格式化/RAW）→ ``select partition N`` + ``format``；
+    - 有计划盘符但卷上还没有 → ``assign letter``。
+
+    返回 ``select disk N ... exit`` 形式的脚本行；已经无需补做时返回 ``[]``
+    （调用方据此判定“其实已经完成”，避免拿空脚本去跑 diskpart）。
+    """
+    lines: list[str] = []
+    for index, part in enumerate(parts, start=1):
+        existing = _partition_at(actual, index)
+        if existing is None:
+            # 分区还没建出来：create 之后 diskpart 会自动选中新分区
+            lines.append(_planned_create_line(part))
+            lines.append(f"format quick fs={part.file_system.lower()} label={part.label}")
+            if part.letter:
+                lines.append(f"assign letter={part.letter}")
+            continue
+
+        # 分区在了：看文件系统和盘符
+        needs_select = True
+        if _normalise_fs(existing.get("file_system")) != _normalise_fs(part.file_system):
+            if needs_select:
+                lines.append(f"select partition {int(index)}")
+                needs_select = False
+            lines.append(f"format quick fs={part.file_system.lower()} label={part.label}")
+        if part.letter and not (existing.get("drive_letter") or existing.get("mounted_letter")):
+            if needs_select:
+                lines.append(f"select partition {int(index)}")
+                needs_select = False
+            lines.append(f"assign letter={part.letter}")
+
+    if not lines:
+        return []
+    return [f"select disk {int(disk_number)}", *lines, "exit"]
