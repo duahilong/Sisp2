@@ -42,7 +42,7 @@ python -m app.gui_web.main --serve --port 8765
 | `GET /api/jobs/{job_id}/log?tail=200` | 任务日志尾部；只允许日志目录（`logDir`，留空时是 `%APPDATA%\Sisp\logs`）下的 `.log` 文件，越界返回 `E_PATH`。任务运行中 `details["log_path"]` 还不存在，此时按文件名里的盘号（`disk-runner-d<N>-*.log`）找「不早于任务启动时刻」的最新一份；都没有则返回 `message` 说明原因 |
 | `POST /api/logs/export` | `{job_ids?, path?}`；把这一轮任务打成排查包 zip：`README.txt` + `summary.txt`（人读：型号/每步结果/失败原文/诊断）+ `summary.json` + `settings.json` + `logs/*.log` + `artifacts/*`。不传 `path` 时弹原生保存框（取消返回 `{cancelled: true}`）；传了则静默写盘（自动化用）。没有任务时返回 `E_NO_JOBS`，写盘失败返回 `E_EXPORT`。任务运行中也能导：没有 `details.log_path` 的按盘号兜底找最新日志 |
 | `POST /api/reveal` | `{path}`；在资源管理器里定位导出的 zip（只允许家目录或日志目录内的路径，越界返回 `E_PATH`） |
-| `POST /api/partition/preview` | `{disk_number?}`；返回**真实会执行的三段 diskpart 脚本**（只读，需先 `/api/prepare`；与执行器同源生成） |
+| `POST /api/partition/preview` | `{disk_number?}`；返回**真实会执行的四段 diskpart 脚本**（清盘 / 删 MSR / 建分区几何 / 逐分区格式化 + 分配盘符；只读，需先 `/api/prepare`；与执行器同源生成） |
 | `POST /api/images` | 不带 `path` 时返回设置里的两个系统槽位 `{versions: [{id, label, path, ok, exists, reason, size_display}], default}`（每个都读文件头 `FE EF`）；带 `path` 时只校验那一个 GHO（返回 `magic_ok`）。请求体只需要 `path`；不传就是设置槽位列表。全部是纯文件读取，不 spawn 任何进程 |
 | `GET /api/boot/report` | 扫描各盘的 Windows 目录与 ESP，返回可修复性报告 |
 | `POST /api/boot/repair` | `{disk_number}`；临时盘符挂 ESP → `bcdboot … /f UEFI` → 重新扫描，结束必定释放盘符；真实模式受写盘闸门约束 |

@@ -19,14 +19,15 @@ from app.application import activity
 from app.application.disk_label import disk_label
 from app.application.partitions import (
     PlannedPartition,
-    create_partition_lines,
-    create_repair_lines,
+    create_geometry_lines,
+    format_lines,
+    missing_partition_lines,
     msr_delete_lines,
     partition_verdict,
     wipe_lines,
 )
 from app.application.phases.base import PhaseContext, PhaseOutcome, PhaseResult
-from app.application.runner_utils import option_flag, option_int, tail
+from app.application.runner_utils import option_flag, option_int, tail, to_int
 from app.application.shell import (
     DiskpartShell,
     describe_diskpart_exit,
@@ -35,6 +36,7 @@ from app.application.shell import (
 )
 from app.application.steps import steps_after
 from app.orchestrator import build_worker_disk_identity, identity_matches
+from app.units import BYTES_PER_MB
 
 GROUP = "partition"
 
@@ -59,6 +61,20 @@ CREATE_REPAIR_ATTEMPTS = 2
 # 查询失败只记日志、不改变结论（写盘闸门在任务开始前已经复核过一次）；
 # 但**查得到且不一致**（盘号漂移/换盘/脱机/只读/不健康）必须立刻中止。
 DISK_GUARD_ATTEMPTS = 2
+
+# 「建分区」只建几何：瞬时错误按真实分区表补齐缺失项的次数。
+CREATE_REPAIR_ATTEMPTS = 2
+
+# 单个分区的格式化尝试次数与等待（秒）。现场证据：卷被占用时同一秒内重试必失败，
+# 而 6~12 秒后仍失败——所以要退避，并且必须换工具（见 FORMAT_PLAN）。
+FORMAT_ATTEMPTS = 4
+FORMAT_BACKOFF: tuple[float, ...] = (1.0, 5.0, 10.0)
+# 每次尝试用哪个格式化途径（第 2 / 4 次用 format.com /X 强制卸载）。
+FORMAT_PLAN: tuple[str, ...] = ("diskpart", "format.com", "diskpart", "format.com")
+
+# 建完分区后等「分区表/卷」就绪的上限与轮询间隔（秒）。
+VOLUME_READY_TIMEOUT = 12.0
+VOLUME_READY_INTERVAL = 0.4
 
 # 验收判据可替换（默认就是 ``partitions.partition_verdict``）。
 Acceptance = Callable[
@@ -106,6 +122,11 @@ class PartitionPhase:
         retry_delay: float = WIPE_RETRY_DELAY,
         sleep: Callable[[float], None] = time.sleep,
         create_repair_attempts: int = CREATE_REPAIR_ATTEMPTS,
+        format_attempts: int = FORMAT_ATTEMPTS,
+        format_backoff: Sequence[float] = FORMAT_BACKOFF,
+        format_plan: Sequence[str] = FORMAT_PLAN,
+        ready_timeout: float = VOLUME_READY_TIMEOUT,
+        ready_interval: float = VOLUME_READY_INTERVAL,
     ) -> None:
         self.shell = shell
         self.acceptance = acceptance or PartitionAcceptance(shell, verdict)
@@ -114,6 +135,11 @@ class PartitionPhase:
         self._sleep = sleep
         self._settle_ms = DEFAULT_SETTLE_MS
         self.create_repair_attempts = max(0, int(create_repair_attempts))
+        self.format_attempts = max(1, int(format_attempts))
+        self.format_backoff = tuple(max(0.0, float(item)) for item in format_backoff)
+        self.format_plan = tuple(str(item) for item in format_plan) or ("diskpart",)
+        self.ready_timeout = max(0.0, float(ready_timeout))
+        self.ready_interval = max(0.05, float(ready_interval))
 
     # ------------------------------------------------------------------ 入口
     def run(self, ctx: PhaseContext) -> PhaseOutcome:
@@ -182,43 +208,41 @@ class PartitionPhase:
             if failure is not None:
                 return failure
 
-        # ===== ④ 建分区（最后一项不带 size=）=====
+        # ===== ④ 建分区（**只建几何**：不格式化、不分配盘符）=====
         # 清盘已经动过盘，这里再看一眼：盘要是中途掉线/换了，立刻停手。
         guard = self._guard(ctx, log, where="建分区", disk_touched=True)
         if guard is not None:
             return guard
         self._settle(ctx, log, "建分区前")
         try:
-            code, output = self.shell.run_diskpart(
-                create_partition_lines(ctx.disk_number, ctx.parts),
-                title="diskpart 脚本（建分区）",
-            )
+            code, output, repairs = self._run_create(ctx, log)
         except Exception as exc:  # noqa: BLE001
             return self._fail(f"无法执行 diskpart：{exc}", disk_touched=True)
-        repairs = 0
         if code != 0:
-            # 典型现场：某个 format 报 VDS 0x80042413「设备使用中」。此时前面的
-            # 分区已经建好，重跑原脚本会撞「分区已存在」，所以按真实分区表续跑。
-            repaired, code, output, repairs = self._repair_create(
-                ctx, log, first_code=code, first_output=output
+            return self._fail(
+                self._create_failure_message(code, repairs),
+                code=code,
+                output=output,
+                disk_touched=True,
+                extra={
+                    "diskpart_repairs": repairs,
+                    "settle_ms": self._settle_ms,
+                    "parallel_activity": activity.describe(
+                        exclude=ctx.disk_number, style="plain"
+                    ),
+                },
             )
-            if not repaired:
-                return self._fail(
-                    self._create_failure_message(code, repairs),
-                    code=code,
-                    output=output,
-                    disk_touched=True,
-                    extra={
-                        "diskpart_repairs": repairs,
-                        "settle_ms": self._settle_ms,
-                        "parallel_activity": activity.describe(
-                            exclude=ctx.disk_number, style="plain"
-                        ),
-                    },
-                )
-            log.write("建分区续跑完成，继续分区验收")
 
-        # ===== ⑤ 分区验收（独立的 layout 步骤）=====
+        # ===== ⑤ 等卷就绪 + 逐分区格式化（带退避重试与 format.com /X 兜底）=====
+        # 现场根因就在这一段：建完分区立刻 format，新卷还在被系统异步挂载，
+        # 独占锁拿不到 → 0x80042413「设备使用中」。
+        self._wait_volumes(ctx, log)
+        for position, part in enumerate(ctx.parts, start=1):
+            failure = self._format_one(ctx, log, position, part)
+            if failure is not None:
+                return failure
+
+        # ===== ⑥ 分区验收（独立的 layout 步骤）=====
         try:
             ok, message, details = self.acceptance.run(ctx.disk_number, ctx.parts, log)
         except Exception as exc:  # noqa: BLE001
@@ -397,10 +421,11 @@ class PartitionPhase:
 
     # ------------------------------------------------------------------ 验收补救
     def _repair_after_acceptance(self, ctx: PhaseContext, log: Any) -> bool:
-        """验收不通过时，按真实分区表补一次（format/assign）再验。
+        """验收不通过时，把「没格式化 / 没挂盘符」的分区按原路径再补一次。
 
-        能救回来的典型情况：某个分区没格式化（RAW）、盘符没挂上。补不动的
-        （大小/类型不符）不硬来——直接交给验收报错，人工判断比乱改安全。
+        补做复用逐分区那条路径（含 format.com /X 兜底），比单发一条 diskpart
+        脚本更可能真的修好；大小/类型不符这类"补不动"的问题不硬来——直接交给
+        验收报错，人工判断比乱改安全。
         """
         if self.create_repair_attempts <= 0:
             return False
@@ -409,25 +434,255 @@ class PartitionPhase:
         except Exception as exc:  # noqa: BLE001
             log.write(f"验收不通过后无法查询真实分区表，放弃补做：{exc}")
             return False
-        lines = create_repair_lines(ctx.disk_number, ctx.parts, actual)
-        if not lines:
+        pending = [
+            (pos, part)
+            for pos, part in enumerate(ctx.parts, start=1)
+            if _needs_format_or_letter(actual, pos, part)
+        ]
+        if not pending:
             log.write("验收不通过，但盘上没有可补做的项（大小/类型不符只能人工处理）")
             return False
-        log.write(f"验收不通过：按真实分区表补做 {len(lines) - 2} 条命令后再验一次")
-        self._settle(ctx, log, "验收补做前")
+        log.write(
+            "验收不通过：按真实分区表补做 "
+            + "、".join(f"#{pos}（{part.label}）" for pos, part in pending)
+        )
+        return all(self._format_one(ctx, log, pos, part) is None for pos, part in pending)
+
+    # ------------------------------------------------------------------ 建分区（几何）
+    def _run_create(self, ctx: PhaseContext, log: Any) -> tuple[int, str, int]:
+        """只建分区几何，返回 ``(退出码, 输出, 续跑次数)``。
+
+        瞬时错误（CRC/设备未就绪/卷占用）按**真实分区表补齐缺失项**：重跑原脚本会
+        撞「分区已存在」，所以只能按现场状态生成 create 行。这一段不格式化，
+        失败也不会留下半格式化的卷。
+        """
+        code, output = self.shell.run_diskpart(
+            create_geometry_lines(ctx.disk_number, ctx.parts),
+            title="diskpart 脚本（建分区）",
+        )
+        if code == 0:
+            return 0, output, 0
+        if not is_transient_diskpart_exit(code):
+            return code, output, 0
+
+        repairs = 0
+        log.write(f"建分区未完成（{describe_diskpart_exit(code)}），按真实分区表补齐缺失分区")
+        for round_no in range(1, self.create_repair_attempts + 1):
+            self._settle(ctx, log, f"补齐分区前（第 {round_no} 次）")
+            try:
+                self.shell.rescan()
+            except Exception as exc:  # noqa: BLE001
+                log.write(f"补齐分区前重新扫描失败（已忽略）：{exc}")
+            try:
+                actual = self.shell.query(ctx.disk_number)
+            except Exception as exc:  # noqa: BLE001
+                log.write(f"补齐分区前无法查询真实分区表，放弃补齐：{exc}")
+                return code, output, repairs
+            lines = missing_partition_lines(ctx.disk_number, ctx.parts, actual)
+            if not lines:
+                log.write("补齐检查：盘上的分区已经与计划一致，无需补做")
+                return 0, output, repairs
+            repairs += 1
+            log.write(f"补齐第 {round_no} 次：只补缺失的 create 命令（合计 {len(lines) - 2} 条）")
+            try:
+                code, output = self.shell.run_diskpart(
+                    lines, title=f"diskpart 脚本（补齐分区 {round_no}）"
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.write(f"补齐分区无法执行 diskpart：{exc}")
+                return code, output, repairs
+            if code == 0:
+                return 0, output, repairs
+        return code, output, repairs
+
+    # ------------------------------------------------------------------ 卷就绪
+    def _wait_volumes(self, ctx: PhaseContext, log: Any) -> None:
+        """等「分区表 + 卷」都跟上真实状态，再开始格式化。
+
+        刚从 ``create`` 出来的分区，Windows 的挂载管理器还在异步挂载/枚举；
+        此时立刻 ``format`` 会因为拿不到独占锁而报 ``0x80042413``。这里轮询到
+        分区数达标（最多 ``ready_timeout`` 秒），再补一次 settle。
+        """
+        expected = len(ctx.parts)
+        deadline = time.monotonic() + self.ready_timeout
+        found = 0
+        while True:
+            try:
+                actual = self.shell.query(ctx.disk_number)
+            except Exception as exc:  # noqa: BLE001 - 查不到就按"已就绪"往下走
+                log.write(f"等待卷就绪时查询失败（继续格式化）：{exc}")
+                break
+            found = len(actual.get("partitions") or ())
+            if found >= expected:
+                log.write(f"卷就绪：盘上已有 {found} 个分区（计划 {expected}）")
+                break
+            if time.monotonic() >= deadline:
+                log.write(
+                    f"等待卷就绪超时：只看到 {found} 个分区（计划 {expected}），"
+                    "继续尝试格式化（失败会自动重试）"
+                )
+                break
+            self._sleep(self.ready_interval)
+        self._settle(ctx, log, "格式化前")
+
+    # ------------------------------------------------------------------ 逐分区格式化
+    def _format_one(
+        self,
+        ctx: PhaseContext,
+        log: Any,
+        position: int,
+        part: PlannedPartition,
+    ) -> PhaseOutcome | None:
+        """格式化并分配盘符**一个**分区；返回非 ``None`` = 失败（已完成归因）。
+
+        现场证据（两个不同型号的盘都是同一处失败）：
+          1. ``diskpart format`` 卡 0% 十几秒 → ``0x80042413 设备使用中``；
+          2. 紧接着重试（1 秒后）同样失败；
+          3. 6~12 秒后再试仍然失败 —— 卷处于"被占用"的稳定状态。
+        所以策略是：先 diskpart（正常路径），再退避后用 ``format.com /X``
+        **强制卸载卷**（官方手段），交替重试；每次之间 rescan。
+        """
+        code = 0
+        output = ""
+        total = self.format_attempts
+        for attempt in range(1, total + 1):
+            tool = self.format_plan[(attempt - 1) % len(self.format_plan)]
+            if attempt > 1:
+                wait = self._backoff(attempt - 2)
+                log.write(
+                    f"第 {attempt} 次尝试（{tool}）前等待 {wait:.0f}s 并重新扫描磁盘"
+                    f"（上一次：{describe_diskpart_exit(code)}）"
+                )
+                if wait > 0:
+                    self._sleep(wait)
+                try:
+                    self.shell.rescan()
+                except Exception as exc:  # noqa: BLE001
+                    log.write(f"重试前重新扫描失败（已忽略）：{exc}")
+            self._settle(ctx, log, f"格式化分区 #{position}（{part.label}，第 {attempt} 次）前")
+
+            if tool == "format.com":
+                code, output = self._format_with_tool(ctx, log, position, part)
+            else:
+                try:
+                    code, output = self.shell.run_diskpart(
+                        format_lines(ctx.disk_number, position, part),
+                        title=f"diskpart 脚本（格式化 #{position} {part.label}）",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    code, output = -1, str(exc)
+            if code == 0:
+                log.write(
+                    f"分区 #{position}（{part.label}）已格式化"
+                    + (f"并分配盘符 {part.letter}" if part.letter else "（无盘符）")
+                )
+                return None
+
+            log.write(
+                f"分区 #{position}（{part.label}）格式化失败"
+                f"（{describe_diskpart_exit(code)}，途径 {tool}）"
+            )
+            if not is_transient_diskpart_exit(code):
+                break
+        return self._partition_failure(ctx, position, part, code, output)
+
+    def _format_with_tool(
+        self,
+        ctx: PhaseContext,
+        log: Any,
+        position: int,
+        part: PlannedPartition,
+    ) -> tuple[int, str]:
+        """用 ``format.com /X`` 强制卸载后格式化（兜底途径）。
+
+        **安全闸**：格式化前必须确认"这个盘符挂在我要格式化的那个分区上、
+        容量也对得上"，否则宁可失败也绝不格式化别人的卷。
+        """
+        letter = self._ensure_letter(ctx, log, position, part)
+        if not letter:
+            return -1, "拿不到盘符，无法使用 format.com 兜底"
+        if not self._letter_belongs_to(ctx, letter, position, part):
+            return -1, (
+                f"盘符 {letter}: 与分区 #{position}（{part.label}）对不上，"
+                "放弃 format.com 兜底（防止误格式化其它卷）"
+            )
+        log.write(f"改用 format.com {letter}: /FS:{part.file_system} /Q /V:{part.label} /Y /X（强制卸载）")
         try:
-            code, output = self.shell.run_diskpart(
-                lines, title="diskpart 脚本（验收后补做）"
+            return self.shell.format_letter(
+                letter, file_system=part.file_system, label=part.label
             )
         except Exception as exc:  # noqa: BLE001
-            log.write(f"验收补做无法执行 diskpart：{exc}")
-            return False
+            return -1, str(exc)
+
+    def _ensure_letter(
+        self,
+        ctx: PhaseContext,
+        log: Any,
+        position: int,
+        part: PlannedPartition,
+    ) -> str:
+        """确保这个分区有盘符（format.com 需要盘符）；返回实际可用的字母。"""
+        actual = None
+        try:
+            actual = self.shell.query(ctx.disk_number)
+        except Exception as exc:  # noqa: BLE001
+            log.write(f"兜底格式化前查询分区失败：{exc}")
+        got = _actual_partition(actual, position)
+        current = str((got or {}).get("drive_letter") or "").strip().upper()[:1]
+        if current:
+            return current
+        wanted = str(part.letter or "").strip().upper()[:1]
+        if not wanted:
+            return ""
+        try:
+            code, output = self.shell.run_diskpart(
+                [
+                    f"select disk {int(ctx.disk_number)}",
+                    f"select partition {int(position)}",
+                    f"assign letter={wanted}",
+                    "exit",
+                ],
+                title=f"diskpart 脚本（分配盘符 #{position}）",
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.write(f"兜底格式化前分配盘符失败：{exc}")
+            return ""
         if code != 0:
             log.write(
-                f"验收补做失败（{describe_diskpart_exit(code)}）：{tail(output, 300)}"
+                f"分配盘符 {wanted}: 失败（{describe_diskpart_exit(code)}）："
+                f"{tail(output, 200)}"
             )
+            return ""
+        return wanted
+
+    def _letter_belongs_to(
+        self,
+        ctx: PhaseContext,
+        letter: str,
+        position: int,
+        part: PlannedPartition,
+    ) -> bool:
+        """盘符是否真的挂在分区 #position 上（并且容量与计划相符）。"""
+        try:
+            actual = self.shell.query(ctx.disk_number)
+        except Exception:  # noqa: BLE001
             return False
+        got = _actual_partition(actual, position)
+        if not got:
+            return False
+        current = str(got.get("drive_letter") or "").strip().upper()[:1]
+        if current != str(letter).strip().upper()[:1]:
+            return False
+        if part.size_mb is not None:
+            actual_mb = (to_int(got.get("size_bytes")) or 0) / BYTES_PER_MB
+            if abs(actual_mb - float(part.size_mb)) > 2:
+                return False
         return True
+
+    def _backoff(self, index: int) -> float:
+        if not self.format_backoff:
+            return 0.0
+        return self.format_backoff[min(max(0, index), len(self.format_backoff) - 1)]
 
     # ------------------------------------------------------------------ 清盘重试
     def _run_wipe(self, ctx: PhaseContext, log: Any) -> tuple[int, str, int]:
@@ -457,50 +712,6 @@ class PartitionPhase:
                 self._sleep(wait)
             self.shell.rescan()
         return code, output, total
-
-    def _repair_create(
-        self,
-        ctx: PhaseContext,
-        log: Any,
-        *,
-        first_code: int,
-        first_output: str,
-    ) -> tuple[bool, int, str, int]:
-        """建分区脚本中途失败后，按真实分区表把没做完的部分补上。
-
-        返回 ``(是否修好, 最后一次退出码, 最后一次输出, 实际续跑次数)``。
-        续跑本身也失败时把最后一次的码/输出交回调用方，报错里同时给出原始失败。
-        """
-        code, output = first_code, first_output
-        repairs = 0
-        log.write(f"建分区未完成（{describe_diskpart_exit(code)}），按真实分区表续跑")
-        for round_no in range(1, self.create_repair_attempts + 1):
-            self._settle(ctx, log, f"续跑建分区前（第 {round_no} 次）")
-            try:
-                self.shell.rescan()
-            except Exception as exc:  # noqa: BLE001 - 重扫失败仍然可以试一次
-                log.write(f"续跑前重新扫描磁盘失败（已忽略）：{exc}")
-            try:
-                actual = self.shell.query(ctx.disk_number)
-            except Exception as exc:  # noqa: BLE001 - 查不到就不猜
-                log.write(f"续跑前无法查询真实分区表，放弃续跑：{exc}")
-                return False, code, output, repairs
-            lines = create_repair_lines(ctx.disk_number, ctx.parts, actual)
-            if not lines:
-                log.write("续跑检查：盘上的分区已经与计划一致，无需补做")
-                return True, 0, output, repairs
-            repairs += 1
-            log.write(f"续跑第 {round_no} 次：补 {len(lines) - 2} 条命令（create/format/assign）")
-            try:
-                code, output = self.shell.run_diskpart(
-                    lines, title=f"diskpart 脚本（建分区 · 续跑 {round_no}）"
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.write(f"续跑无法执行 diskpart：{exc}")
-                return False, code, output, repairs
-            if code == 0:
-                return True, 0, output, repairs
-        return False, code, output, repairs
 
     def _create_failure_message(self, code: int, repairs: int) -> str:
         message = f"建分区失败（退出码 {describe_diskpart_exit(code)}）"
@@ -577,6 +788,86 @@ class PartitionPhase:
             )
         )
         return results
+
+    def _partition_failure(
+        self,
+        ctx: PhaseContext,
+        position: int,
+        part: PlannedPartition,
+        code: int,
+        output: str,
+    ) -> PhaseOutcome:
+        """格式化失败：**归因到真正失败的那个分区**，而不是一律记在 EFI 上。
+
+        以前不管是第几个分区挂的，界面都标在「创建 EFI 分区」✗ 上——现场看到
+        EFI 明明成功却报它失败，误导排查方向（2026-11-10 现场就是第 2 个分区挂的）。
+        """
+        if code in (-1, 0xFFFFFFFF):
+            # 我们自己的哨兵（工具没跑起来/被拒绝启动）：没有"退出码"可言，
+            # 直接把原因写出来，别让用户看到一个 0xFFFFFFFF。
+            reason = tail(output, 240) or "格式化工具未能启动"
+            message = f"分区 #{position}（{part.label}）格式化失败：{reason}"
+        else:
+            message = (
+                f"分区 #{position}（{part.label}）格式化失败"
+                f"（退出码 {describe_diskpart_exit(code)}）"
+            )
+            hint = diskpart_exit_hint(code)
+            if hint:
+                message += f"。{hint}"
+            else:
+                # 没有现成提示的码：把原始输出第一段带上，否则界面只剩一个数字。
+                detail = tail(output, 240)
+                if detail:
+                    message += f"：{detail}"
+        if position > 1:
+            message += f"（前面 {position - 1} 个分区已完成）"
+
+        results: list[PhaseResult] = []
+        for key in ("efi", "windows", "data"):
+            positions = [
+                (pos, item)
+                for pos, item in enumerate(ctx.parts, start=1)
+                if _step_of_position(pos) == key
+            ]
+            if not positions:
+                continue
+            states = [
+                "ok" if pos < position else ("failed" if pos == position else "skipped")
+                for pos, _item in positions
+            ]
+            if "failed" in states:
+                results.append(
+                    PhaseResult.failed(
+                        key,
+                        message,
+                        diskpart_exit=code,
+                        diskpart_tail=tail(output),
+                        partition_number=position,
+                    )
+                )
+            elif all(state == "ok" for state in states):
+                summary = " + ".join(
+                    f"{item.label} {item.letter or ''}".strip() for _pos, item in positions
+                )
+                results.append(
+                    PhaseResult.ok(key, f"已创建、格式化并分配盘符（{summary}）")
+                )
+            else:
+                results.append(PhaseResult.skipped(key, "该分区未执行（前面的分区失败）"))
+        results.append(PhaseResult.skipped("layout", "分区未完成，未执行分区验收"))
+
+        details: dict[str, Any] = {
+            "diskpart_exit": code,
+            "diskpart_tail": tail(output),
+            "failed_partition": position,
+            "settle_ms": self._settle_ms,
+            "format_attempts": self.format_attempts,
+            "parallel_activity": activity.describe(exclude=ctx.disk_number, style="plain"),
+        }
+        return PhaseOutcome.failed(
+            *results, message=message, disk_touched=True, details=details
+        )
 
     def _fail(
         self,
@@ -662,6 +953,44 @@ class EfiLetterReleaser:
             )
             return
         self.shell.release_letter(disk_number, int(number), wanted)
+
+
+# ---------------------------------------------------------------- 模块内小工具
+
+
+def _step_of_position(position: int) -> str:
+    """第几个分区 → 界面上的步骤键（EFI / Windows / 数据分区）。"""
+    if position <= 1:
+        return "efi"
+    if position == 2:
+        return "windows"
+    return "data"
+
+
+def _actual_partition(payload: Mapping[str, Any] | Any, number: int) -> Mapping[str, Any]:
+    """真实分区表里编号为 ``number`` 的分区（找不到返回空字典）。"""
+    partitions = payload.get("partitions") if isinstance(payload, Mapping) else None
+    for part in partitions or ():
+        if isinstance(part, Mapping) and to_int(part.get("number")) == int(number):
+            return part
+    return {}
+
+
+def _needs_format_or_letter(
+    payload: Mapping[str, Any] | Any,
+    position: int,
+    part: PlannedPartition,
+) -> bool:
+    """这个分区是否还缺「文件系统」或「计划盘符」。"""
+    got = _actual_partition(payload, position)
+    if not got:
+        return True
+    file_system = str(got.get("file_system") or "").strip().upper()
+    if file_system in ("", "RAW", "UNKNOWN"):
+        return True
+    if file_system != str(part.file_system or "").strip().upper():
+        return True
+    return bool(part.letter and not (got.get("drive_letter") or got.get("mounted_letter")))
 
 
 __all__ = ["EfiLetterReleaser", "PartitionAcceptance", "PartitionPhase"]

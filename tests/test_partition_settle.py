@@ -106,18 +106,26 @@ def test_option_int_is_defensive() -> None:
 
 # ---------------------------------------------------------------- 等待时机
 def test_settle_happens_between_diskpart_calls(tmp_path) -> None:
-    """MSR 存在时磁盘上会跑 3 次 diskpart：清盘 → 删 MSR → 建分区。
+    """每次 diskpart 之间都要等：清盘 → 删 MSR → 建分区 → 逐分区格式化。
 
-    等待必须落在这三次之间（2 次），而且不能把清盘本身也拖慢。
+    1.4.0 起「建分区」与「格式化」拆成两段，所以等待次数比以前多
+    （多出来的正是现场缺的那个空档）。这里守两件事：**清盘本身不加等待**、
+    每次等待都用设置里的值（默认 1000 ms）。
     """
     delays: list[float] = []
     shell = _shell(msr=1)
     phase = PartitionPhase(shell, sleep=delays.append)
-    outcome = phase.run(_ctx(tmp_path))
+    ctx = _ctx(tmp_path)
+    outcome = phase.run(ctx)
 
     assert outcome.ok is True
     assert len([s for s in shell.scripts if "convert gpt" in s]) == 1
-    assert delays == [1.0, 1.0]  # 默认 1000ms，两次
+    # 清盘脚本之前没有等待（第一条 diskpart 不该被拖慢）
+    log_text = ctx.log.summary()
+    assert "删除 MSR 前：等待 1000 ms" in log_text
+    assert "建分区前：等待 1000 ms" in log_text
+    assert "格式化前：等待 1000 ms" in log_text
+    assert delays and set(delays) == {1.0}
 
 
 def test_settle_can_be_disabled(tmp_path) -> None:
@@ -135,23 +143,23 @@ def test_settle_comes_from_runner_options(tmp_path) -> None:
     shell = _shell(msr=1)
     phase = PartitionPhase(shell, sleep=delays.append)
     phase.run(_ctx(tmp_path, options={"partition_settle_ms": 250}))
-    assert delays == [0.25, 0.25]
+    assert delays and set(delays) == {0.25}
 
 
 def test_settle_is_clamped_for_absurd_values(tmp_path) -> None:
     delays: list[float] = []
     phase = PartitionPhase(_shell(msr=1), sleep=delays.append)
     phase.run(_ctx(tmp_path, options={"partition_settle_ms": 10 * 60 * 1000}))
-    assert delays == [5.0, 5.0]  # 上限 5 秒
+    assert delays and set(delays) == {5.0}  # 上限 5 秒
 
 
 def test_no_settle_needed_when_there_is_no_msr(tmp_path) -> None:
-    """没有 MSR 时只有清盘 + 建分区两次 diskpart → 恰好等 1 次。"""
+    """没有 MSR 时少一次 diskpart，但「建分区前 / 格式化前」的等待仍然要有。"""
     delays: list[float] = []
     phase = PartitionPhase(_shell(msr=None), sleep=delays.append)
     outcome = phase.run(_ctx(tmp_path))
     assert outcome.ok is True
-    assert delays == [1.0]
+    assert delays and set(delays) == {1.0}
 
 
 # ---------------------------------------------------------------- A5 诊断

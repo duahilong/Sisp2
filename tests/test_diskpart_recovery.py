@@ -411,5 +411,6 @@ def test_repair_is_skipped_when_the_disk_already_matches_the_plan(tmp_path) -> N
 
     assert outcome.ok is True
     assert state["creates"] == 1, "分区已经对上了，不该再发建分区的命令"
-    # scripts[0]=清盘、scripts[1]=建分区；再往后一条都不该有
-    assert len(shell.scripts) == 2, shell.scripts[2:]
+    # scripts[0]=清盘、scripts[1]=建分区；之后是逐分区格式化（每个分区一次）
+    assert len(shell.scripts) == 2 + len(_parts()), shell.scripts[2:]
+    assert any("格式化 #2" in title for title in shell.titles)

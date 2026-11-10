@@ -505,8 +505,75 @@ def msr_delete_lines(disk_number: int, msr_partition: int | None) -> list[str]:
 
 
 def create_partition_lines(disk_number: int, parts: Sequence[PlannedPartition]) -> list[str]:
-    """第 3 段：建 EFI / C / D(+E)；最后一项不带 ``size=``（吃满剩余空间）。"""
+    """建 EFI / C / D(+E) 的**完整**行（create + format + assign 混在一起）。
+
+    历史实现把三件事塞进一条脚本，现场（多盘并发、另一块盘正在 Ghost）里
+    出现过「建完分区立刻 format 撞 ``0x80042413`` 设备使用中」的连锁失败：
+    新分区还在被系统异步挂载/枚举时，format 拿不到独占锁。
+    执行器现在改用下面两段（``create_geometry_lines`` + ``format_lines``），
+    这个函数保留给预览/兼容/单测继续使用。
+    """
     return [f"select disk {int(disk_number)}", *diskpart_lines(parts), "exit"]
+
+
+def create_geometry_lines(
+    disk_number: int,
+    parts: Sequence[PlannedPartition],
+    *,
+    skip: int = 0,
+) -> list[str]:
+    """第 3 段（几何）：**只建分区**，不格式化、不分配盘符。
+
+    ``skip`` = 已经建好的分区个数（按真实分区表续跑时用）。
+    最后一项依旧不带 ``size=``，由 diskpart 吃掉剩余空间。
+    """
+    lines = [f"select disk {int(disk_number)}"]
+    for part in list(parts)[max(0, int(skip)) :]:
+        lines.append(_planned_create_line(part))
+    lines.append("exit")
+    return lines
+
+
+def format_lines(
+    disk_number: int,
+    position: int,
+    part: PlannedPartition,
+) -> list[str]:
+    """第 4 段（格式化）：**只处理一个分区**——格式化 + 分配盘符。
+
+    一次 diskpart 只干一个分区，好处有三：失败能精确归因到"第几个分区"、
+    重试只重跑这一块（不会连带把后面几个 create 一起作废）、每次之间都能插入
+    等待与重扫（现场正是缺这个空档）。
+    """
+    lines = [
+        f"select disk {int(disk_number)}",
+        f"select partition {int(position)}",
+        f"format quick fs={part.file_system.lower()} label={part.label}",
+    ]
+    if part.letter:
+        lines.append(f"assign letter={part.letter}")
+    lines.append("exit")
+    return lines
+
+
+def missing_partition_lines(
+    disk_number: int,
+    parts: Sequence[PlannedPartition],
+    actual: Mapping[str, Any] | Any,
+) -> list[str]:
+    """按真实分区表补齐**缺失**的分区（只 create，不格式化）。
+
+    与 :func:`create_repair_lines` 的区别：那条会把 format/assign 一起补上，
+    用于"验收不通过"的补救；这里只补几何，格式化交给逐分区那一段。
+    """
+    lines = [f"select disk {int(disk_number)}"]
+    for index, part in enumerate(parts, start=1):
+        if _partition_at(actual, index) is None:
+            lines.append(_planned_create_line(part))
+    if len(lines) == 1:
+        return []
+    lines.append("exit")
+    return lines
 
 
 def preview_segments(
@@ -541,16 +608,32 @@ def preview_segments(
         },
         {
             "key": "create",
-            "title": "建分区（最后一项不带 size=，由 diskpart 吃掉剩余空间）",
-            "lines": create_partition_lines(disk_number, parts),
+            "title": "建分区（只建几何；最后一项不带 size=，由 diskpart 吃掉剩余空间）",
+            "lines": create_geometry_lines(disk_number, parts),
             "dynamic": False,
-            "note": "",
+            "note": "只建分区、不格式化：格式化单独一段，避免新分区还没挂载完就被要求独占",
+        },
+        {
+            "key": "format",
+            "title": "格式化 + 分配盘符（逐个分区执行，失败会自动重试）",
+            "lines": [
+                line
+                for position, part in enumerate(parts, start=1)
+                for line in format_lines(disk_number, position, part)
+                if line != "exit"
+            ]
+            + ["exit"],
+            "dynamic": True,
+            "note": (
+                "实际执行时每个分区单独一次 diskpart；卷被占用（0x80042413）时"
+                "退避重试，仍不行则改用 format.com /X（强制卸载卷）"
+            ),
         },
     ]
 
 
 def preview_text(disk_number: int, parts: Sequence[PlannedPartition]) -> str:
-    """把三段预览拼成一段可直接展示的文本（确认页用）。"""
+    """把分段预览拼成一段可直接展示的文本（确认页用）。"""
     segments = preview_segments(disk_number, parts)
     lines = ["REM === 分区脚本预览：确认页展示的就是真实会执行的命令 ==="]
     for index, segment in enumerate(segments, start=1):

@@ -17,7 +17,8 @@ import pytest
 
 from app.application.command_log import CommandLog
 from app.application.partitions import (
-    create_partition_lines,
+    create_geometry_lines,
+    format_lines,
     msr_delete_lines,
     plan_partitions,
     preview_segments,
@@ -282,19 +283,31 @@ def test_pipeline_cancel_after_partition_skips_system(tmp_path):
 
 # ---------------------------------------------------------------- 预览同源
 def test_preview_segments_share_the_real_line_generators():
-    """预览的行**就是**真实脚本的行（不是另抄一份）。"""
+    """预览的行**就是**真实脚本的行（不是另抄一份）。
+
+    1.4.0 起建分区与格式化拆成两段：预览必须分别等于
+    ``create_geometry_lines``（只 create）与逐分区 ``format_lines`` 的拼接。
+    """
     parts = _parts()
     segments = preview_segments(1, parts)
     assert segments[0]["lines"] == wipe_lines(1)
     assert segments[1]["lines"][0] == "select disk 1"
-    assert segments[2]["lines"] == create_partition_lines(1, parts)
+    assert segments[2]["lines"] == create_geometry_lines(1, parts)
+    assert segments[3]["key"] == "format"
+    for position, part in enumerate(parts, start=1):
+        for line in format_lines(1, position, part):
+            if line != "exit":
+                assert line in segments[3]["lines"]
     assert msr_delete_lines(1, None) == ["select disk 1", "exit"]
 
 
 def test_preview_text_contains_every_real_line():
     parts = _parts()
     text = preview_text(2, parts)
-    for line in [*wipe_lines(2), *create_partition_lines(2, parts)]:
+    expected = [*wipe_lines(2), *create_geometry_lines(2, parts)]
+    for position, part in enumerate(parts, start=1):
+        expected.extend(line for line in format_lines(2, position, part) if line != "exit")
+    for line in expected:
         assert line in text.splitlines()
 
 
@@ -304,9 +317,13 @@ def test_api_preview_uses_same_generator():
 
     parts = _parts()
     segments = preview_segments(1, parts)
-    assert [segment["key"] for segment in segments] == ["wipe", "msr", "create"]
-    for line in create_partition_lines(1, parts):
+    assert [segment["key"] for segment in segments] == ["wipe", "msr", "create", "format"]
+    for line in create_geometry_lines(1, parts):
         assert line in segments[2]["lines"]
+    for position, part in enumerate(parts, start=1):
+        for line in format_lines(1, position, part):
+            if line != "exit":
+                assert line in segments[3]["lines"]
 
 
 # ---------------------------------------------------------------- 系统组仍可独立用
@@ -376,7 +393,12 @@ def test_partition_preview_returns_three_segments(tmp_path):
     body = client.post("/api/partition/preview", json={"disk_number": 1}).json()
     assert body["ok"] is True
     item = body["data"][0]
-    assert [segment["key"] for segment in item["segments"]] == ["wipe", "msr", "create"]
+    assert [segment["key"] for segment in item["segments"]] == [
+        "wipe",
+        "msr",
+        "create",
+        "format",
+    ]
     assert item["script"].startswith("select disk 1")
     assert "create partition efi" in item["script"]
 

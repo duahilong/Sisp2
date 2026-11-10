@@ -37,6 +37,9 @@ DISKPART_TIMEOUT = 600.0
 QUERY_TIMEOUT = 60.0
 QUERY_ATTEMPTS = 3
 QUERY_INTERVAL = 0.3
+#: ``format.com`` 兜底格式化的超时：快速格式化通常几秒，慢盘/USB 桥接留足余量。
+FORMAT_TIMEOUT = 900.0
+
 RELEASE_TIMEOUT = 120.0
 VERIFY_TIMEOUT = 120.0
 # Ghost 还原 14 GB 的 GHO 在 SATA 上也够用；NVMe 通常 5–15 分钟。
@@ -469,6 +472,7 @@ class DiskpartShell:
         log: CommandLog,
         diskpart: str | None = None,
         powershell: str | None = None,
+        format_tool: str | None = None,
         allow_real_disk: bool = False,
         temp_dir: str | None = None,
         env: Mapping[str, str] | None = None,
@@ -480,6 +484,11 @@ class DiskpartShell:
         self.diskpart = diskpart if diskpart is not None else find_program("diskpart.exe")
         self.powershell = (
             powershell if powershell is not None else find_program("powershell.exe")
+        )
+        # format.com：diskpart 的 format 拿不到卷锁时（0x80042413）的兜底工具。
+        # 它的 /X 是官方"必要时强制卸载卷"，专治"设备使用中"。
+        self.format_tool = (
+            format_tool if format_tool is not None else find_program("format.com")
         )
         self.temp_dir = temp_dir
         self.attempts = max(1, int(attempts))
@@ -548,6 +557,41 @@ class DiskpartShell:
             return True
         self.log.write(f"重新扫描磁盘失败（退出码 {describe_diskpart_exit(code)}），继续重试")
         return False
+
+    def format_letter(
+        self,
+        letter: str,
+        *,
+        file_system: str = "NTFS",
+        label: str = "",
+        timeout: float = FORMAT_TIMEOUT,
+    ) -> tuple[int, str]:
+        """用 Win32 的 ``format.com`` 格式化一个**已挂盘符**的卷。
+
+        为什么需要第二个格式化工具：``diskpart`` 的 ``format`` 在卷被系统/杀软
+        短暂占用时只会返回 ``0x80042413 设备使用中``，没有任何"强制"手段；
+        ``format.com`` 的 ``/X`` 是官方的"必要时强制卸载卷"开关
+        （"Forces the volume to dismount first if necessary. All opened handles
+        to the volume would then be invalid."），这正是这类失败的解法。
+
+        参数：``/Q`` 快速格式化、``/FS:<fs>``、``/V:<label>``、``/Y`` 免确认、
+        ``/X`` 强制卸载。调用方**必须**先确认这个盘符真的挂在自己的目标分区上
+        （否则会格式化别人的卷）。
+        """
+        wanted = str(letter or "").strip().upper()[:1]
+        if not wanted:
+            raise RunnerError("format.com 需要盘符")
+        tool = self.format_tool
+        if not tool:
+            raise RunnerError("找不到 format.com，无法回退格式化")
+        fs = str(file_system or "NTFS").strip().upper()
+        volume = f"{wanted}:"
+        args = [tool, volume, f"/FS:{fs}", "/Q", "/Y", "/X"]
+        text = str(label or "").strip()
+        if text:
+            args.append(f"/V:{text}")
+        code, output, _elapsed = self.process.run(args, timeout)
+        return code, output
 
     def release_letter(self, disk_number: int, partition: int, letter: str) -> bool:
         """按"磁盘号 + 分区号"摘掉盘符（不按字母选卷，见 ``EfiLetterReleaser``）。"""
@@ -690,6 +734,7 @@ __all__ = [
     "DISKPART_TIMEOUT",
     "DISKPART_TRANSIENT_EXITS",
     "DISK_STATE_SCRIPT",
+    "FORMAT_TIMEOUT",
     "GHOST_TIMEOUT",
     "PARTITIONS_SCRIPT",
     "QUERY_ATTEMPTS",

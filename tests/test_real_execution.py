@@ -22,7 +22,8 @@ import pytest
 from app.application.contracts import DiskInfo
 from app.application.jobs import ExecutionPlan, Job, JobManager, JobSpec, JobStatus
 from app.application.partitions import (
-    create_partition_lines,
+    create_geometry_lines,
+    format_lines,
     msr_delete_lines,
     plan_partitions,
     wipe_lines,
@@ -268,7 +269,7 @@ def test_prune_runner_logs_removes_only_expired_runner_logs(tmp_path):
 
 
 def test_diskpart_script_layout():
-    """分区脚本分三段：清盘+转 GPT → 删 MSR → 建分区（各段独立校验）。"""
+    """分区脚本分四段：清盘+转 GPT → 删 MSR → 建分区（几何）→ 逐分区格式化。"""
     parts = plan_partitions(
         {"partition_info": {"efi_size_mb": 300, "c_size_gb": 30}},
         letters={"efi": "E", "windows": "F", "data": "G"},
@@ -280,13 +281,26 @@ def test_diskpart_script_layout():
     delete = msr_delete_lines(2, 1)
     assert delete == ["select disk 2", "select partition 1", "delete partition override", "exit"]
 
-    layout = create_partition_lines(2, parts)
+    layout = create_geometry_lines(2, parts)
     assert layout[0] == "select disk 2"
     assert "delete partition override" not in layout  # MSR 在上一段已删
     assert "create partition efi size=300" in layout
     assert "create partition primary size=30720" in layout  # 30 GB * 1024 MB
     assert "create partition primary" in layout  # 最后一项吃剩余空间
     assert layout[-1] == "exit"
+    # 建分区这一段**不格式化、不分配盘符**（1.4.0 拆分的核心）
+    assert not any(line.startswith("format") for line in layout)
+    assert not any(line.startswith("assign") for line in layout)
+
+    # 格式化单独一段，且一次只处理一个分区
+    windows = format_lines(2, 2, parts[1])
+    assert windows == [
+        "select disk 2",
+        "select partition 2",
+        "format quick fs=ntfs label=Windows",
+        "assign letter=F",
+        "exit",
+    ]
 
 
 def test_diskpart_script_lets_last_data_partition_eat_remaining_space():
@@ -309,7 +323,7 @@ def test_diskpart_script_lets_last_data_partition_eat_remaining_space():
         },
         letters={"efi": "E", "windows": "F", "data": "G", "data2": "H"},
     )
-    lines = create_partition_lines(1, parts)
+    lines = create_geometry_lines(1, parts)
 
     assert "create partition primary size=122880" in lines          # C 120 GB
     assert "create partition primary size=204800" in lines          # D 200 GB
@@ -318,7 +332,8 @@ def test_diskpart_script_lets_last_data_partition_eat_remaining_space():
     assert creates == ["create partition primary size=122880",
                        "create partition primary size=204800",
                        "create partition primary"]
-    assert "assign letter=H" in lines
+    # 盘符在格式化那一段分配（几何段不 assign）
+    assert "assign letter=H" in format_lines(1, 4, parts[3])
 
 
 def test_diskpart_script_uses_explicit_data_size():
@@ -326,7 +341,7 @@ def test_diskpart_script_uses_explicit_data_size():
         {"partition_info": {"efi_size_mb": 100, "c_size_gb": 10, "data_size_gb": 5}},
         letters={"efi": "E", "windows": "F", "data": "G"},
     )
-    lines = create_partition_lines(1, parts)
+    lines = create_geometry_lines(1, parts)
 
     assert "create partition primary size=5120" in lines
 
@@ -1017,8 +1032,8 @@ def test_run_steps_deletes_msr_then_verifies_before_creating_partitions(
     result = runner.run(_tiny_spec(image, payload=payload), threading.Event())
 
     assert result.success is True, result.error
-    # 三段 diskpart，顺序固定（标题也钉住，便于日志排错）
-    assert shell.titles == [
+    # 前三段 diskpart 顺序固定（标题也钉住，便于日志排错）
+    assert shell.titles[:3] == [
         "diskpart 脚本（清盘 + 转 GPT）",
         "diskpart 脚本（删除 MSR）",
         "diskpart 脚本（建分区）",
@@ -1030,12 +1045,16 @@ def test_run_steps_deletes_msr_then_verifies_before_creating_partitions(
         "delete partition override",
         "exit",
     ]
-    layout = shell.scripts[2]
-    assert "delete partition override" not in layout
-    assert layout.index("create partition efi size=100") == 1
-    # 一次查 MSR + 一次复查；验收只查一次
+    # 1.4.0：建分区只建几何（不 format / 不 assign），格式化逐分区单独一次
+    assert shell.scripts[2] == create_geometry_lines(2, parts)
+    assert "delete partition override" not in shell.scripts[2]
+    expected_formats = [
+        format_lines(2, position, part) for position, part in enumerate(parts, start=1)
+    ]
+    assert shell.scripts[3:] == expected_formats
+    # 一次查 MSR + 一次复查；验收前还要查一次"卷是否就绪"
     assert msr_calls == [2, 2]
-    assert len(shell.queries) == 1
+    assert len(shell.queries) >= 1
 
 
 def test_partition_verification_failure_never_reaches_image(

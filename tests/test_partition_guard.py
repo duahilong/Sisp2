@@ -276,23 +276,28 @@ def test_msr_delete_treats_already_gone_as_success(tmp_path) -> None:
 
 # ---------------------------------------------------------------- 验收后补做
 def _acceptance_repair_shell(*, repair_succeeds=True):
-    """验收第一次不通过（Windows 分区没挂盘符），补做之后通过。"""
+    """验收第一次不通过（Windows 分区没挂盘符），补做之后通过。
+
+    判定"补做"的依据是「第 2 个分区被格式化了几次」：正常流程一次，补做再一次。
+    """
     parts = _parts()
     partial = build_snapshot(parts)
     full = build_snapshot(parts)
     for part in partial["partitions"]:
         if part.get("label") == "Windows":
             part["drive_letter"] = None
-    state = {"repaired": False}
+    state = {"p2_formats": 0}
 
-    def diskpart(_lines, title, _timeout):
-        if "补做" in title:
-            state["repaired"] = repair_succeeds
-            return (0, "ok") if repair_succeeds else (1, "nope")
+    def diskpart(lines, _title, _timeout):
+        joined = " ".join(lines)
+        if "select partition 2" in joined and "format" in joined:
+            state["p2_formats"] += 1
+            if not repair_succeeds and state["p2_formats"] > 1:
+                return 1, "补做也失败"
         return 0, "ok"
 
     def query(_n):
-        return full if state["repaired"] else partial
+        return full if state["p2_formats"] >= 2 else partial
 
     return _shell(msr=None, diskpart_handler=diskpart, query_handler=query), state
 
@@ -303,12 +308,11 @@ def test_acceptance_failure_is_repaired_then_passes(tmp_path) -> None:
     outcome = _phase(shell).run(ctx)
 
     assert outcome.ok is True, outcome.message
-    assert state["repaired"] is True
+    assert state["p2_formats"] == 2, "正常格式化一次 + 验收后补做一次"
     text = ctx.log.summary()
     assert "验收不通过：按真实分区表补做" in text
     repair_scripts = [script for script in shell.scripts if "assign letter=F" in " ".join(script)]
-    assert repair_scripts, "补做脚本里应当有 assign letter=F"
-    assert any("验收后补做" in title for title in shell.titles)
+    assert len(repair_scripts) >= 2, "补做脚本里应当有 assign letter=F"
 
 
 def test_acceptance_failure_with_nothing_to_repair_still_fails(tmp_path) -> None:
@@ -332,7 +336,7 @@ def test_acceptance_repair_disabled_by_zero_attempts(tmp_path) -> None:
     outcome = _phase(shell, create_repair_attempts=0).run(_ctx(tmp_path))
 
     assert outcome.ok is False
-    assert state["repaired"] is False
+    assert state["p2_formats"] == 1, "关掉补做就只能格式化一次"
     assert "分区验收不通过" in (outcome.message or "")
 
 

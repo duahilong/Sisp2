@@ -67,6 +67,7 @@ class FakeDiskpartShell:
         diskpart_handler: Any = None,
         query_handler: Any = None,
         disk_state_handler: Any = None,
+        format_handler: Any = None,
         msr: Any = None,
         esp: Any = None,
         release_result: bool = True,
@@ -75,11 +76,14 @@ class FakeDiskpartShell:
         self.titles: list[str] = []
         self.queries: list[int] = []
         self.disk_states: list[int] = []
+        #: ``format_letter`` 调用记录：``(盘符, 文件系统, 卷标)``
+        self.formats: list[tuple[str, str, str]] = []
         self.released: list[tuple[int, int, str]] = []
         self.rescans = 0
         self._diskpart = diskpart_handler
         self._query = query_handler
         self._disk_state = disk_state_handler
+        self._format = format_handler
         self._msr = msr
         self._esp = esp
         self.release_result = release_result
@@ -111,6 +115,13 @@ class FakeDiskpartShell:
             "health_status": "Healthy",
             "operational_status": "Online",
         }
+
+    def format_letter(self, letter, *, file_system="NTFS", label="", timeout=0.0):
+        """format.com 兜底途径的替身（真实实现见 ``DiskpartShell.format_letter``）。"""
+        self.formats.append((str(letter), str(file_system), str(label)))
+        if self._format is not None:
+            return self._format(str(letter), str(file_system), str(label))
+        return 0, "format.com ok"
 
     def rescan(self, *, timeout: float = 120.0) -> bool:
         self.rescans += 1
