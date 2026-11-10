@@ -34,7 +34,7 @@ GUI 默认监听 `127.0.0.1:8765`；可用 `--host`、`--port` 改变监听参�
 ```powershell
 python -m pip install -r requirements-build.txt
 python packaging/build.py
-# → dist/Sisp2.exe（图形界面，约 22 MB）
+# → dist/Sisp2.exe（图形界面，约 19 MB）
 ```
 
 exe 的参数与源码运行一致（`--serve` / `--settings` 等）；设置保存在 `%APPDATA%\Sisp`，没有额外的配置文件要维护。细节（提权、日志位置、体积、未签名等限制）见[打包说明](Docs/打包与分发.md)。
@@ -59,6 +59,32 @@ exe 的参数与源码运行一致（`--serve` / `--settings` 等）；设置保
 
 详见[安全边界](Docs/安全边界.md)。
 
+## 出问题怎么排查（日志与导出）
+
+每次任务都会在设置里的 `logDir`（默认 `%APPDATA%\Sisp\logs`）写一份
+`disk-runner-d<N>-<型号>-<时间>-<进程>-<随机>.log`。日志是给人和机器都能读的：
+
+- **抬头**写清是哪块盘（`===== KINGSTON SNV3S1000G（磁盘 3） =====` + 型号/容量/序列号/唯一标识/盘符）；
+- 中间按 `① 硬盘分区` / `② 写入系统` / `③ 收尾` 分段，每步一行 `步骤 ✓/✗/-`；
+- 只读查询（PowerShell 脚本几十行）只记一行说明，不刷屏；
+- **结尾有结论块**（成功/失败、用时、失败步骤、下一步），失败原因用型号说话，而不是只有 `disk1`。
+
+**安装页底部有「⤓ 导出日志」**（每块盘的日志弹窗里也有）：它把这一轮任务打成一个 zip，
+弹原生保存框（默认落桌面），内容：
+
+```
+Sisp2-日志-20261110-0923.zip
+├── README.txt      这个包是什么、先看哪个、怎么回传
+├── summary.txt     人读结论表：型号/容量/每步结果/失败步骤原文/诊断/分区计划
+├── summary.json    机器读版本（贴 issue 也行）
+├── settings.json   当时的设置快照（只有本机路径）
+├── logs/           原始执行日志
+└── artifacts/      ghosterr-*.txt 之类（有才带）
+```
+
+遇到失败直接把这个 zip 发出来即可；`summary.txt` 末尾还附了排查顺序（关掉该盘的
+资源管理器窗口与杀软实时扫描、换数据线/直连口、看 SMART C7 是否在涨）。
+
 ## 测试
 
 ```powershell
@@ -75,8 +101,10 @@ python -m pytest tests/ -q
 
 ## 版本与定版
 
-当前版本：**v1.2.1**（1.2.0 起移除演练模式，启动即真实写盘；预览改用只读的
-`prepare` + `/api/partition/preview`）。功能语义以 tag 上的代码与文档为准；
+当前版本：**v1.4.0**（1.2.0 起移除演练模式，启动即真实写盘；预览改用只读的
+`prepare` + `/api/partition/preview`）。1.3.0 加了「安装页一键导出日志」与
+「日志用型号说话」；1.4.0 把「建分区」与「格式化」拆成两段，并加了
+`format.com /X` 兜底。功能语义以 tag 上的代码与文档为准；
 变更历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 - 版本号只有一处来源：`app/version.py` 的 `__version__`，`packaging/version_info.txt`
