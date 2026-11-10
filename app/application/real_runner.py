@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from app.application.command_log import CommandLog, _CommandLog
+from app.application.disk_label import disk_label, disk_slug, model_of
 from app.application.partitions import (
     create_partition_lines,
     diskpart_lines,
@@ -243,10 +244,32 @@ class WindowsDiskRunner:
             if str(value).strip()
         }
         options = dict(getattr(spec, "runner_options", None) or {})
-        log = CommandLog(self.log_dir, disk_number=disk_number)
+        identity = dict(getattr(spec, "expected_identity", None) or {})
+        label = disk_label(
+            disk_number, model_of(identity), size_display=identity.get("size_display")
+        )
+        log = CommandLog(
+            self.log_dir,
+            disk_number=disk_number,
+            disk_label=label,
+            disk_slug=disk_slug(model_of(identity)),
+        )
         env = runtime_env()
         started = datetime.now()
-        log.write(f"任务开始：disk={disk_number} letters={letters}")
+        # 抬头：先回答“这是哪块盘、要建哪些分区、用哪些盘符”，再看细节。
+        log.banner(
+            label,
+            [
+                ("磁盘号", disk_number),
+                ("型号", model_of(identity) or "(未上报型号)"),
+                ("容量", identity.get("size_display") or ""),
+                ("总线", identity.get("bus_type") or ""),
+                ("序列号", identity.get("serial_number") or ""),
+                ("唯一标识", identity.get("unique_id") or ""),
+                ("盘符", " ".join(f"{role}={letter}" for role, letter in letters.items())),
+            ],
+        )
+        log.write(f"任务开始：{label} letters={letters}")
         log.write(f"配置：{json.dumps(payload, ensure_ascii=False)[:2000]}")
 
         parts, layout_error = JobPipeline.build_parts(payload, letters)
@@ -262,6 +285,8 @@ class WindowsDiskRunner:
             env=env,
             on_step=on_step,
             work_dir=work_dir,
+            label=label,
+            identity=identity,
         )
 
         missing_tools = [
@@ -298,6 +323,7 @@ class WindowsDiskRunner:
 
         return self._finish(
             disk_number=disk_number,
+            label=label,
             log=log,
             started=started,
             pipeline_result=pipeline_result,
@@ -325,6 +351,7 @@ class WindowsDiskRunner:
         self,
         *,
         disk_number: int,
+        label: str,
         log: CommandLog,
         started: datetime,
         pipeline_result: PipelineResult,
@@ -337,6 +364,16 @@ class WindowsDiskRunner:
             f"任务结束：success={success} 用时 {duration:.1f}s"
             + (f" 失败原因={pipeline_result.failure}" if pipeline_result.failure else "")
         )
+        failed_steps = [step for step in steps if step.status == STEP_FAILED]
+        conclusion: list[tuple[str, object]] = [("用时", f"{duration:.1f}s")]
+        if success:
+            conclusion.append(("结果", "全部步骤完成"))
+        else:
+            conclusion.append(("原因", pipeline_result.failure or "有步骤失败"))
+        for step in failed_steps:
+            conclusion.append(("失败步骤", f"{step.title}：{step.message}"))
+        conclusion.append(("日志", str(log.path) if log.path is not None else "(未写文件)"))
+        log.conclusion(success, conclusion)
         details: dict[str, Any] = {}
         if log.path is not None:
             details = {"log_path": str(log.path), "log_tail": tail(log.summary())}
@@ -347,9 +384,9 @@ class WindowsDiskRunner:
             disk_number=disk_number,
             success=success,
             message=(
-                f"硬盘 {disk_number} 真实执行完成"
+                f"{label} 真实执行完成"
                 if success
-                else f"硬盘 {disk_number} 执行失败：{pipeline_result.failure or '有步骤失败'}"
+                else f"{label} 执行失败：{pipeline_result.failure or '有步骤失败'}"
             ),
             steps=steps,
             error=None if success else (pipeline_result.failure or "有步骤失败"),

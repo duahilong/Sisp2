@@ -987,7 +987,7 @@ function progressCardHtml(jobId, open) {
 
   return `<div class="jcard" data-job="${esc(jobId)}">
     <div class="jc-h">
-      <span class="jc-name">磁盘 ${esc(diskNumber)}</span>
+      <span class="jc-name" title="${esc(diskLabelOf(job, diskNumber))}">${esc(diskCardName(job, diskNumber))}</span>
       ${badge}
       <span class="jc-pct">${percent}%</span>
     </div>
@@ -1020,6 +1020,7 @@ function renderProgressHtml() {
       ${phase === 'failed' ? '<button class="tbtn" id="retryBtn">重新开始</button>' : ''}
       <span class="wz-startnote" id="progNote">${phase === 'running' ? '已开始的写盘步骤会尽量收尾，未开始的跳过' : ''}</span>
       <span class="spacer"></span>
+      <button class="tbtn" id="exportLogsBtn" title="把每块盘的结论与原始日志打包成一个 zip，出问题时发给我们">⤓ 导出日志</button>
       <button class="tbtn" id="openLogBtn">查看任务日志</button>
     </div>
   </div>`;
@@ -1068,6 +1069,67 @@ function bindProgress() {
   }
   const openLog = $('#openLogBtn');
   if (openLog) openLog.addEventListener('click', () => { void showJobLogs(); });
+  const exportLogs = $('#exportLogsBtn');
+  if (exportLogs) exportLogs.addEventListener('click', () => { void exportRunLogs(); });
+}
+
+/** 这块盘怎么称呼：型号（磁盘 N）。没有型号时退回「磁盘 N」。 */
+function diskLabelOf(job, diskNumber) {
+  const plan = (job && job.plan) || {};
+  if (plan.label) return plan.label;
+  const model = String(plan.model || '').trim();
+  return model ? `${model}（磁盘 ${diskNumber}）` : `磁盘 ${diskNumber}`;
+}
+
+/** 卡片标题（紧凑形态：磁盘 2 · 型号）。 */
+function diskCardName(job, diskNumber) {
+  const plan = (job && job.plan) || {};
+  const model = String(plan.model || '').trim();
+  return model ? `磁盘 ${diskNumber} · ${model}` : `磁盘 ${diskNumber}`;
+}
+
+/**
+ * 导出这一轮的日志：后端把 summary.txt / summary.json / logs/*.log 打成一个 zip。
+ * 出问题时用户只要把那个文件发过来，型号、每步结果、失败原文、重试与续跑记录都在里面。
+ */
+async function exportRunLogs() {
+  const jobIds = state.wizard.jobIds || [];
+  if (!jobIds.length) {
+    toast('还没有任务可以导出');
+    return;
+  }
+  try {
+    toast('正在打包日志…');
+    const data = await api.exportLogs(jobIds);
+    if (!data || data.cancelled) {
+      pushLog('已取消导出日志', '', 'export');
+      return;
+    }
+    const kb = data.size ? `${(Number(data.size) / 1024).toFixed(1)} KB` : '';
+    pushLog(`日志已导出：${data.path}（${data.jobs} 块盘 / ${data.logs} 份日志 / ${kb}）`, '', 'export');
+    const modal = openModal({
+      title: '日志已导出',
+      width: 620,
+      body: `<p class="wz-p">压缩包里有每块盘的结论（summary.txt）、机器可读版本（summary.json）
+        和原始执行日志（logs/）。出问题时把这个文件发过来即可。</p>
+        <div class="codebox" style="max-height:120px">${esc(data.path)}</div>
+        <p class="hint" style="margin-top:8px">${esc(data.hint || '')}</p>`,
+      footer: '<button class="tbtn primary" id="revealExportBtn">打开所在文件夹</button>',
+    });
+    const reveal = modal.root.querySelector('#revealExportBtn');
+    if (reveal) {
+      reveal.addEventListener('click', async () => {
+        try {
+          await api.reveal(data.path);
+        } catch (exc) {
+          toast(`打开文件夹失败：${exc.message || exc}`, 'err');
+        }
+      });
+    }
+  } catch (exc) {
+    toast(`导出日志失败：${exc.message || exc}`, 'err');
+    pushLog(`导出日志失败：${exc.message || exc}`, 'err', 'export');
+  }
 }
 
 async function showJobLogs() {
@@ -1078,9 +1140,18 @@ async function showJobLogs() {
     const lines = data.lines || [];
     // 没配 logDir 时后端不会有执行器日志，这里给一句人话，别弹一个空黑框。
     const text = lines.length ? lines.join('\n') : (data.message || '这个任务没有输出日志');
+    const job = jobOf(jobId);
+    const diskNumber = job && job.spec ? job.spec.disk_number : '?';
     const body = `<div class="codebox dark-code" style="max-height:340px">${esc(text)}</div>
       <div class="hint" style="margin-top:6px">${esc(data.path || '')}</div>`;
-    openModal({ title: `任务日志 · ${jobId.slice(0, 8)}`, body, width: 720 });
+    const modal = openModal({
+      title: `任务日志 · ${diskLabelOf(job, diskNumber)}`,
+      body,
+      width: 720,
+      footer: '<button class="tbtn" id="exportOneBtn">导出这一轮的日志（zip）</button>',
+    });
+    const one = modal.root.querySelector('#exportOneBtn');
+    if (one) one.addEventListener('click', () => { void exportRunLogs(); });
   } catch (exc) {
     toast(`读日志失败：${exc.message || exc}`, 'err');
   }

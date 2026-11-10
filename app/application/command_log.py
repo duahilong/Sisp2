@@ -11,8 +11,9 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import unicodedata
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -40,8 +41,13 @@ class CommandLog:
         log_dir: str | os.PathLike[str] | None,
         *,
         disk_number: int | None = None,
+        disk_label: str = "",
+        disk_slug: str = "",
     ) -> None:
         self.path: Path | None = None
+        # 这块盘的显示名（``Msft Virtual Disk（磁盘 2）``）：日志头、结论、导出统计
+        # 都用它，不再只有一个会变的盘号。
+        self.disk_label = str(disk_label or "").strip()
         self._lines: list[str] = []
         # 多线程：子进程读取线程与任务线程可能同时写日志。
         self._lock = threading.Lock()
@@ -58,7 +64,10 @@ class CommandLog:
                 # 盘号进文件名：任务还在跑（结果里没有 log_path）时，界面靠它
                 # 找到正在写的这份日志（``WebApi`` 的兜底查找按 d<N>- 匹配）。
                 disk = f"d{int(disk_number)}-" if disk_number is not None else ""
-                self.path = directory / f"disk-runner-{disk}{stamp}-{suffix}.log"
+                # 型号 slug 排在 ``d2-`` 之后：既保留“按盘号找日志”的老约定，
+                # 又让人在文件夹里一眼看出这是哪块盘。
+                slug = f"{str(disk_slug or '').strip()}-" if disk_slug else ""
+                self.path = directory / f"disk-runner-{disk}{slug}{stamp}-{suffix}.log"
             except OSError:
                 _LOGGER.warning("无法创建日志目录: %s", log_dir, exc_info=True)
 
@@ -108,6 +117,25 @@ class CommandLog:
                 except OSError:
                     pass
 
+    def banner(self, title: str, rows: Iterable[tuple[str, object]] = ()) -> None:
+        """写一段“抬头/结论”块：``===== 标题 =====`` + 对齐的 ``键：值``。
+
+        行首统一对齐（中文按显示宽度算），目的是让日志**能被扫读**：出问题的人
+        先看抬头知道是哪块盘、哪些盘符，再跳到结论，而不是从几百行命令里翻。
+        """
+        self.write(f"===== {title} =====")
+        items = [(str(key), str(value)) for key, value in rows if str(value or "").strip()]
+        if not items:
+            return
+        width = max(_display_width(key) for key, _value in items)
+        for key, value in items:
+            pad = " " * max(0, width - _display_width(key))
+            self.write(f"  {key}{pad}  {value}")
+
+    def conclusion(self, ok: bool, rows: Iterable[tuple[str, object]] = ()) -> None:
+        """写结论块：成功/失败 + 关键事实（失败步骤、原因、下一步）。"""
+        self.banner(f"结论：{'成功' if ok else '失败'}", rows)
+
     def block(self, title: str, body: str) -> None:
         self.write(f"--- {title} ---")
         for line in (body or "").splitlines():
@@ -115,6 +143,14 @@ class CommandLog:
 
     def summary(self) -> str:
         return "\n".join(self._lines[-40:])
+
+
+def _display_width(text: str) -> int:
+    """显示宽度：中日韩全角字符算 2（日志抬头对齐用）。"""
+    width = 0
+    for char in str(text or ""):
+        width += 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+    return width
 
 
 # 历史名字：老代码与测试都在用 ``_CommandLog``，保留别名不破坏调用方。

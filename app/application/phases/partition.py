@@ -16,6 +16,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from app.application import activity
+from app.application.disk_label import disk_label
 from app.application.partitions import (
     PlannedPartition,
     create_partition_lines,
@@ -33,6 +34,7 @@ from app.application.shell import (
     is_transient_diskpart_exit,
 )
 from app.application.steps import steps_after
+from app.orchestrator import build_worker_disk_identity, identity_matches
 
 GROUP = "partition"
 
@@ -52,6 +54,11 @@ DEFAULT_SETTLE_MS = 1000
 # 按真实分区表续跑的次数。format 失败通常是别的进程刚抓了一下新卷，
 # 重扫 + 等一下就能过；续跑是按现场状态补齐，不会重复 create。
 CREATE_REPAIR_ATTEMPTS = 2
+
+# 每段 diskpart 之前复核「要动的还是不是确认时那块盘」的查询次数。
+# 查询失败只记日志、不改变结论（写盘闸门在任务开始前已经复核过一次）；
+# 但**查得到且不一致**（盘号漂移/换盘/脱机/只读/不健康）必须立刻中止。
+DISK_GUARD_ATTEMPTS = 2
 
 # 验收判据可替换（默认就是 ``partitions.partition_verdict``）。
 Acceptance = Callable[
@@ -127,6 +134,11 @@ class PartitionPhase:
         if self._settle_ms:
             log.write(f"每次 diskpart 之间等待 {self._settle_ms} ms（设置 partitionSettleMs）")
 
+        # ===== 0：动盘之前复核身份（热插拔会让盘号漂移）=====
+        guard = self._guard(ctx, log, where="清盘", disk_touched=False)
+        if guard is not None:
+            return guard
+
         # ===== ① 清盘 + 转 GPT（幂等，允许重试）=====
         ctx.notify("efi", "running", "清盘并重建分区表")
         try:
@@ -164,37 +176,17 @@ class PartitionPhase:
                 f"无法确认 MSR 分区，已中止（避免误删）：{exc}", disk_touched=True
             )
 
-        # ===== ③ 单独删 MSR + 立刻复查 =====
+        # ===== ③ 单独删 MSR（瞬时错误可重试）+ 立刻复查 =====
         if msr is not None:
-            self._settle(ctx, log, "删除 MSR 前")
-            try:
-                code, output = self.shell.run_diskpart(
-                    msr_delete_lines(ctx.disk_number, msr), title="diskpart 脚本（删除 MSR）"
-                )
-            except Exception as exc:  # noqa: BLE001
-                return self._fail(
-                    f"删除 MSR 分区时无法执行 diskpart：{exc}", disk_touched=True
-                )
-            if code != 0:
-                return self._fail(
-                    f"删除 MSR 分区失败（退出码 {describe_diskpart_exit(code)}）："
-                    f"{tail(output, 500)}",
-                    code=code,
-                    output=output,
-                    disk_touched=True,
-                )
-            try:
-                leftover = self.shell.find_msr(ctx.disk_number, label="复查 MSR")
-            except Exception as exc:  # noqa: BLE001
-                return self._fail(f"删除 MSR 后无法复查：{exc}", disk_touched=True)
-            if leftover is not None:
-                return self._fail(
-                    f"MSR 分区删除失败：删除后仍然存在（分区 #{leftover}），已中止，未建任何分区",
-                    disk_touched=True,
-                )
-            log.write("MSR 分区已删除，复查确认不存在")
+            failure = self._delete_msr(ctx, log, int(msr))
+            if failure is not None:
+                return failure
 
         # ===== ④ 建分区（最后一项不带 size=）=====
+        # 清盘已经动过盘，这里再看一眼：盘要是中途掉线/换了，立刻停手。
+        guard = self._guard(ctx, log, where="建分区", disk_touched=True)
+        if guard is not None:
+            return guard
         self._settle(ctx, log, "建分区前")
         try:
             code, output = self.shell.run_diskpart(
@@ -231,6 +223,12 @@ class PartitionPhase:
             ok, message, details = self.acceptance.run(ctx.disk_number, ctx.parts, log)
         except Exception as exc:  # noqa: BLE001
             return self._fail(f"无法验证分区结果：{exc}", disk_touched=True)
+        if not ok and self._repair_after_acceptance(ctx, log):
+            # 补做成功（典型：某个分区没格式化 / 盘符没挂上），再验一次
+            try:
+                ok, message, details = self.acceptance.run(ctx.disk_number, ctx.parts, log)
+            except Exception as exc:  # noqa: BLE001
+                return self._fail(f"无法验证分区结果：{exc}", disk_touched=True)
         if not ok:
             return PhaseOutcome.failed(
                 *self._created_results(ctx, verified=False),
@@ -249,6 +247,187 @@ class PartitionPhase:
             efi_partition=details.get("efi_partition"),
             details={"verification": details},
         )
+
+    # ------------------------------------------------------------------ 动盘前复核
+    def _guard(
+        self,
+        ctx: PhaseContext,
+        log: Any,
+        *,
+        where: str,
+        disk_touched: bool,
+    ) -> PhaseOutcome | None:
+        """每段 diskpart 之前复核磁盘身份与健康状态；返回非 ``None`` 表示中止。
+
+        为什么值得多两次 PowerShell（各约 0.4 s）：**盘号会变**。批量装机时用户
+        拔插、托盘掉线、USB 重连都可能让「磁盘 4」变成另一块盘，而 ``clean``
+        是不可逆的。任务开始前的写盘闸门只保证"那一刻"是对的，分区阶段可能已经
+        在几分钟之后（排队 + 其它盘在跑）。
+        """
+        expected = dict(ctx.identity or {})
+        if not expected:
+            log.write(f"[复核] {where}前跳过身份复核（任务没有带确认时的身份信息）")
+            return None
+
+        state: dict[str, Any] | None = None
+        last_error: Exception | None = None
+        for attempt in range(1, DISK_GUARD_ATTEMPTS + 1):
+            try:
+                state = self.shell.disk_state(ctx.disk_number)
+                break
+            except Exception as exc:  # noqa: BLE001 - 查不到不改变结论，只记日志
+                last_error = exc
+                if attempt < DISK_GUARD_ATTEMPTS:
+                    self._sleep(0.3)
+        if state is None:
+            log.write(
+                f"[复核] {where}前查不到磁盘状态，继续执行"
+                f"（身份闸门在任务开始前已经复核过）：{last_error}"
+            )
+            return None
+
+        reasons: list[str] = []
+        if state.get("is_offline"):
+            reasons.append("磁盘处于脱机状态")
+        if state.get("is_read_only"):
+            reasons.append("磁盘是只读的")
+        health = str(state.get("health_status") or "").strip().lower()
+        if health == "unhealthy":
+            reasons.append("磁盘健康状态为 Unhealthy")
+        actual = build_worker_disk_identity(state)
+        if not identity_matches(expected, actual, require_strong=False):
+            reasons.append(
+                "身份与确认时不一致：这块盘已经不是你确认的那块"
+                "（型号/序列号/容量对不上，可能是盘号漂移或换盘）"
+            )
+        if health and health not in ("healthy", "unknown"):
+            log.write(f"[复核] 注意：磁盘健康状态为 {state.get('health_status')}，继续执行")
+
+        if reasons:
+            return self._fail(
+                f"{where}前复核未通过：{'；'.join(reasons)}。"
+                f"已中止，没有继续写这块盘（{ctx.title()}）",
+                disk_touched=disk_touched,
+                extra={
+                    "guard_stage": where,
+                    "guard_reasons": list(reasons),
+                    "guard_state": {
+                        key: state.get(key)
+                        for key in (
+                            "model",
+                            "serial_number",
+                            "unique_id",
+                            "size_bytes",
+                            "is_offline",
+                            "is_read_only",
+                            "health_status",
+                        )
+                    },
+                },
+            )
+        log.write(f"[复核] {where}前磁盘正常（{ctx.title()}）")
+        return None
+
+    # ------------------------------------------------------------------ MSR
+    def _delete_msr(self, ctx: PhaseContext, log: Any, msr: int) -> PhaseOutcome | None:
+        """删除 ``convert gpt`` 自动建的 MSR；瞬时错误重试，返回非 ``None`` = 失败。
+
+        这一段以前是"跑一次，失败就整盘作废"。``delete partition override`` 在
+        慢盘/USB 桥接上偶发 ``0x80070017``/``0x8007045D``，重扫一次通常就过；
+        而且它**可以安全重试**——重试前先复查 MSR 还在不在：上一条可能其实删掉了
+        只是报了个错（那种情况下再删会撞"分区不存在"，所以必须先查）。
+        """
+        total = self.wipe_attempts
+        number = int(msr)
+        code = 0
+        output = ""
+        for attempt in range(1, total + 1):
+            reason = "删除 MSR 前" if attempt == 1 else f"删除 MSR 前（第 {attempt} 次）"
+            self._settle(ctx, log, reason)
+            try:
+                code, output = self.shell.run_diskpart(
+                    msr_delete_lines(ctx.disk_number, number),
+                    title="diskpart 脚本（删除 MSR）",
+                )
+            except Exception as exc:  # noqa: BLE001
+                return self._fail(
+                    f"删除 MSR 分区时无法执行 diskpart：{exc}", disk_touched=True
+                )
+            if code == 0:
+                break
+            if not is_transient_diskpart_exit(code) or attempt >= total:
+                return self._fail(
+                    f"删除 MSR 分区失败（退出码 {describe_diskpart_exit(code)}）："
+                    f"{tail(output, 500)}",
+                    code=code,
+                    output=output,
+                    disk_touched=True,
+                )
+            # 重试前复查：上一条可能"删掉了但报错"，再删会撞"分区不存在"
+            try:
+                still = self.shell.find_msr(ctx.disk_number, label="复查 MSR")
+            except Exception as exc:  # noqa: BLE001 - 查不到就只能按原分区号重试
+                log.write(f"复查 MSR 失败（按原分区号重试）：{exc}")
+                still = number
+            if still is None:
+                log.write("复查 MSR：已经不存在（上一条其实是成功的），继续下一步")
+                code = 0
+                break
+            number = int(still)
+            wait = self.retry_delay * attempt
+            log.write(
+                f"删除 MSR 第 {attempt}/{total} 次失败（{describe_diskpart_exit(code)}），"
+                f"{wait:.0f}s 后重新扫描并重试"
+            )
+            if wait > 0:
+                self._sleep(wait)
+            self.shell.rescan()
+
+        try:
+            leftover = self.shell.find_msr(ctx.disk_number, label="复查 MSR")
+        except Exception as exc:  # noqa: BLE001
+            return self._fail(f"删除 MSR 后无法复查：{exc}", disk_touched=True)
+        if leftover is not None:
+            return self._fail(
+                f"MSR 分区删除失败：删除后仍然存在（分区 #{leftover}），已中止，未建任何分区",
+                disk_touched=True,
+            )
+        log.write("MSR 分区已删除，复查确认不存在")
+        return None
+
+    # ------------------------------------------------------------------ 验收补救
+    def _repair_after_acceptance(self, ctx: PhaseContext, log: Any) -> bool:
+        """验收不通过时，按真实分区表补一次（format/assign）再验。
+
+        能救回来的典型情况：某个分区没格式化（RAW）、盘符没挂上。补不动的
+        （大小/类型不符）不硬来——直接交给验收报错，人工判断比乱改安全。
+        """
+        if self.create_repair_attempts <= 0:
+            return False
+        try:
+            actual = self.shell.query(ctx.disk_number)
+        except Exception as exc:  # noqa: BLE001
+            log.write(f"验收不通过后无法查询真实分区表，放弃补做：{exc}")
+            return False
+        lines = create_repair_lines(ctx.disk_number, ctx.parts, actual)
+        if not lines:
+            log.write("验收不通过，但盘上没有可补做的项（大小/类型不符只能人工处理）")
+            return False
+        log.write(f"验收不通过：按真实分区表补做 {len(lines) - 2} 条命令后再验一次")
+        self._settle(ctx, log, "验收补做前")
+        try:
+            code, output = self.shell.run_diskpart(
+                lines, title="diskpart 脚本（验收后补做）"
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.write(f"验收补做无法执行 diskpart：{exc}")
+            return False
+        if code != 0:
+            log.write(
+                f"验收补做失败（{describe_diskpart_exit(code)}）：{tail(output, 300)}"
+            )
+            return False
+        return True
 
     # ------------------------------------------------------------------ 清盘重试
     def _run_wipe(self, ctx: PhaseContext, log: Any) -> tuple[int, str, int]:
@@ -455,6 +634,7 @@ class EfiLetterReleaser:
         outcome: PhaseOutcome | None,
         options: Mapping[str, Any] | None,
         log: Any,
+        label: str = "",
     ) -> None:
         if outcome is None or not outcome.disk_touched:
             return
@@ -475,8 +655,9 @@ class EfiLetterReleaser:
                 log.write(f"释放 EFI 盘符 {wanted} 前无法定位 ESP 分区，已跳过：{exc}")
                 return
         if number is None:
+            title = str(label or "").strip() or disk_label(disk_number)
             log.write(
-                f"磁盘 {disk_number} 上找不到 ESP 分区，跳过释放盘符 {wanted}"
+                f"{title} 上找不到 ESP 分区，跳过释放盘符 {wanted}"
                 "（盘可能还没分区，或分区表已被改动）"
             )
             return

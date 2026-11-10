@@ -148,7 +148,7 @@ class _SlowProcess:
         self.spans: list[tuple[float, float]] = []
         self.commands: list[list[str]] = []
 
-    def run(self, command, timeout, *, env=None, cwd=None):
+    def run(self, command, timeout, *, env=None, cwd=None, quiet=""):
         self.commands.append(list(command))
         start = time.monotonic()
         time.sleep(0.06)

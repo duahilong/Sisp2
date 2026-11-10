@@ -55,6 +55,10 @@ class PipelineResult:
         """
         self.results.append(item)
         if ctx is not None:
+            # 日志里也记一行步骤结论：出问题时先看这几行，就知道卡在哪一步。
+            mark = {"ok": "✓", "failed": "✗", "skipped": "-"}.get(item.status, "?")
+            detail = f"：{item.message}" if item.message else ""
+            ctx.log.write(f"步骤 {mark} {item.title}{detail}")
             ctx.notify(item.key, item.status, item.message)
 
     @property
@@ -164,7 +168,8 @@ class JobPipeline:
         # ===== 组 1：硬盘分区（含分区验收）=====
         # 登记「这块盘在干什么」：分区阶段把它写进诊断日志，用来判断某次失败是不是
         # 发生在“别的盘正在写镜像”的 I/O 争用时刻。
-        activity.begin(ctx.disk_number, "partition")
+        ctx.log.write("===== ① 硬盘分区（清盘 → 删 MSR → 建分区 → 验收）=====")
+        activity.begin(ctx.disk_number, "partition", ctx.label)
         part = self.partition.run(ctx)
         result.partition = part
         for item in part.results:
@@ -190,7 +195,8 @@ class JobPipeline:
             return result
 
         # ===== 组 2：写入系统（镜像 + 引导并校验）=====
-        activity.begin(ctx.disk_number, "system")
+        ctx.log.write("===== ② 写入系统（镜像 → 引导并校验）=====")
+        activity.begin(ctx.disk_number, "system", ctx.label)
         system = self.system.run(ctx)
         for item in system.results:
             result.add(item, ctx)
@@ -207,7 +213,8 @@ class JobPipeline:
             return result
 
         # ===== 组 3：收尾（附加文件拷贝）=====
-        activity.begin(ctx.disk_number, "extras")
+        ctx.log.write("===== ③ 收尾（拷贝附加文件）=====")
+        activity.begin(ctx.disk_number, "extras", ctx.label)
         if self.extras is None:
             return result
         extra = self.extras.run(ctx)
@@ -236,6 +243,7 @@ class JobPipeline:
             outcome=partition,
             options=ctx.options,
             log=ctx.log,
+            label=ctx.label,
         )
 
     # ------------------------------------------------------------------ 内部

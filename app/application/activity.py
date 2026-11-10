@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import threading
 
-__all__ = ["begin", "describe", "end", "reset", "snapshot"]
+__all__ = ["begin", "describe", "end", "label_of", "reset", "snapshot"]
 
 _PHASE_TEXT: dict[str, str] = {
     "partition": "分区（diskpart）",
@@ -34,22 +34,40 @@ _PHASE_TEXT: dict[str, str] = {
 
 _LOCK = threading.Lock()
 _STATE: dict[int, str] = {}
+# 盘号 → 显示名（``Msft Virtual Disk（磁盘 2）``）。诊断日志里用型号说话，
+# 号会变、型号不会；同一型号两块盘时括号里的号负责消歧。
+_LABELS: dict[int, str] = {}
 
 
-def begin(disk_number: int, phase: str) -> None:
-    """登记某块盘进入某阶段（后写的覆盖先写的）。"""
+def begin(disk_number: int, phase: str, label: str = "") -> None:
+    """登记某块盘进入某阶段（后写的覆盖先写的；``label`` 非空时一并刷新）。"""
     try:
+        number = int(disk_number)
         with _LOCK:
-            _STATE[int(disk_number)] = str(phase)
+            _STATE[number] = str(phase)
+            text = str(label or "").strip()
+            if text:
+                _LABELS[number] = text
     except Exception:  # noqa: BLE001, S110 - 诊断信息丢了也不能影响执行
         pass
+
+
+def label_of(disk_number: int) -> str:
+    """某块盘的显示名（没登记过返回空串）。"""
+    try:
+        with _LOCK:
+            return _LABELS.get(int(disk_number), "")
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def end(disk_number: int) -> None:
     """某块盘结束了（任务收尾/异常退出都要调）。"""
     try:
+        number = int(disk_number)
         with _LOCK:
-            _STATE.pop(int(disk_number), None)
+            _STATE.pop(number, None)
+            _LABELS.pop(number, None)
     except Exception:  # noqa: BLE001, S110
         pass
 
@@ -68,6 +86,7 @@ def reset() -> None:
     try:
         with _LOCK:
             _STATE.clear()
+            _LABELS.clear()
     except Exception:  # noqa: BLE001, S110
         pass
 
@@ -75,12 +94,17 @@ def reset() -> None:
 def describe(exclude: int | None = None, *, style: str = "short") -> str:
     """把「除 ``exclude`` 之外的盘在干什么」写成一句话。
 
-    ``style="short"`` 用于日志行（``磁盘 3=写镜像（Ghost）``）；
-    ``style="plain"`` 用于把同样的信息塞进步骤详情（不带“磁盘”前缀）。
+    ``style="short"`` 用于日志行（``Msft Virtual Disk（磁盘 3）=写镜像（Ghost）``）；
+    ``style="plain"`` 用于把同样的信息塞进步骤详情（只有 ``型号（磁盘 N）=阶段``，
+    不再额外加“磁盘”前缀）。
+
+    有型号时**用完型号说话**（``GeIL P3A 2TB（磁盘 4）=写镜像（Ghost）``）：
+    盘号单独出现时，用户和客服都没法确认那是哪块盘。
     """
     try:
         with _LOCK:
             items = sorted(_STATE.items())
+            labels = dict(_LABELS)
     except Exception:  # noqa: BLE001
         return ""
     parts: list[str] = []
@@ -88,5 +112,10 @@ def describe(exclude: int | None = None, *, style: str = "short") -> str:
         if exclude is not None and int(number) == int(exclude):
             continue
         text = _PHASE_TEXT.get(phase, phase)
-        parts.append(f"{number}={text}" if style == "plain" else f"磁盘 {number}={text}")
+        name = labels.get(int(number)) or ""
+        if not name:
+            name = f"磁盘 {int(number)}"
+        elif style == "plain":
+            name = f"{name}"
+        parts.append(f"{name}={text}")
     return "；".join(parts)

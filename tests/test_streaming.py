@@ -121,7 +121,7 @@ class _StreamingShell:
             cancelled=self.cancelled,
         )
 
-    def run(self, command, timeout, *, env=None, cwd=None):  # pragma: no cover - 不应被调用
+    def run(self, command, timeout, *, env=None, cwd=None, quiet=""):  # pragma: no cover - 不应被调用
         raise AssertionError("有 run_streaming 时不应退回阻塞 run")
 
 

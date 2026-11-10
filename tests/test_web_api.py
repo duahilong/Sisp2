@@ -683,3 +683,45 @@ def test_settings_import_rejects_broken_file(tmp_path: Path) -> None:
 
     assert body["ok"] is False
     assert body["error"]["code"] == "E_SETTINGS"
+
+
+# ---------------------------------------------------------------- 日志导出
+def test_export_logs_writes_a_readable_zip(tmp_path: Path) -> None:
+    """导出接口：不给 path 时弹框（这里显式给 path），包里有结论表与原始日志。"""
+    import zipfile
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    client, _wf = _build_client(tmp_path, log_dir=log_dir)
+    _unwrap(client.post("/api/prepare", json={"selection": [1]}))
+    _unwrap(client.post("/api/submit"))
+    # 任务还没写完/已收尾都可能：造一份"按盘号兜底能找到"的日志
+    running = log_dir / "disk-runner-d1-test-disk-20261109-1200-1-abcdef.log"
+    running.write_text("[12:00:01] 任务开始\n", encoding="utf-8")
+
+    target = tmp_path / "bundle.zip"
+    data = _unwrap(client.post("/api/logs/export", json={"path": str(target)}))
+
+    assert Path(data["path"]) == target
+    assert data["jobs"] == 1
+    assert data["size"] > 0
+    with zipfile.ZipFile(target) as archive:
+        names = set(archive.namelist())
+        assert {"README.txt", "summary.txt", "summary.json"} <= names
+        summary = archive.read("summary.txt").decode("utf-8")
+        assert "test disk（磁盘 1）" in summary, summary
+        assert any(name.startswith("logs/disk-runner-d1-") for name in names)
+
+
+def test_export_logs_without_jobs_is_a_clear_error(tmp_path: Path) -> None:
+    client, _wf = _build_client(tmp_path)
+    body = client.post("/api/logs/export", json={"path": str(tmp_path / "x.zip")}).json()
+    assert body["ok"] is False
+    assert body["error"]["code"] == "E_NO_JOBS"
+
+
+def test_reveal_rejects_paths_outside_home_and_logs(tmp_path: Path) -> None:
+    client, _wf = _build_client(tmp_path)
+    body = client.post("/api/reveal", json={"path": r"C:\Windows\win.ini"}).json()
+    assert body["ok"] is False
+    assert body["error"]["code"] == "E_PATH"

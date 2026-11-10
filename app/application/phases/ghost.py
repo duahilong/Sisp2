@@ -73,11 +73,11 @@ class GhostImagePhase:
     def run(self, ctx: PhaseContext) -> PhaseOutcome:
         # 诊断用：写镜像期间登记成 image，让别的盘分区时能在日志里看到
         # 「磁盘 N 正在写镜像」，而不是笼统的 system。
-        activity.begin(ctx.disk_number, "image")
+        activity.begin(ctx.disk_number, "image", ctx.label)
         try:
             return self._run_phase(ctx)
         finally:
-            activity.begin(ctx.disk_number, "system")
+            activity.begin(ctx.disk_number, "system", ctx.label)
 
     def _run_phase(self, ctx: PhaseContext) -> PhaseOutcome:
         if ctx.cancelled():

@@ -38,6 +38,13 @@ class PhaseContext:
     cancel: threading.Event
     log: CommandLog
     options: Mapping[str, Any] = field(default_factory=dict)
+    # 这块盘的显示名（``Msft Virtual Disk（磁盘 2）``）：日志、诊断、失败文案统一
+    # 用它称呼盘；空串时各阶段自己退化成 ``磁盘 N``。
+    label: str = ""
+    # 确认时的硬盘身份（model / serial_number / unique_id / size_bytes …）。
+    # 分区阶段在每段 diskpart 之前复核「要动的还是不是这块盘」，防止热插拔导致
+    # 盘号漂移后把别的盘清掉。
+    identity: Mapping[str, Any] = field(default_factory=dict)
     env: Mapping[str, str] | None = None
     on_step: Any = None
     # 本任务独占的 Ghost 工作目录（放 ghosterr.txt / ghost32.dmp）；结束后由
@@ -70,6 +77,11 @@ class PhaseContext:
 
     def cancelled(self) -> bool:
         return self.cancel.is_set()
+
+    def title(self) -> str:
+        """``型号（磁盘 N）``；没有型号时退化成 ``磁盘 N``。"""
+        text = str(self.label or "").strip()
+        return text or f"磁盘 {self.disk_number}"
 
 
 def _accepts_fraction(callback: Any) -> bool:

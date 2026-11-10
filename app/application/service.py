@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from app.application.contracts import DiskInfo, SelectionPlan
+from app.application.disk_label import disk_label
 from app.application.runner_utils import to_int
 from app.models import WorkerResult
 
@@ -391,19 +392,20 @@ class SispService:
         summary = self._find_disk_summary(disk_number)
         if summary is None:
             raise PermissionError(f"硬盘 {disk_number} 当前不存在，拒绝写盘")
+        title = disk_label(
+            disk_number, summary.get("model"), size_display=summary.get("size_display")
+        )
         actual = build_worker_disk_identity(summary)
         # require_strong=False：没有 UniqueId/SerialNumber 的盘也能写，那就按
         # 盘号 + 容量 + 型号比对；有标识的盘仍逐个比对标识，换盘一样会被挡住。
         if not identity_matches(dict(expected), actual, require_strong=False):
             raise PermissionError(
-                f"硬盘 {disk_number} 身份与确认时不一致，拒绝写盘"
+                f"{title} 身份与确认时不一致（型号/序列号/容量对不上），拒绝写盘"
             )
 
         reasons = self._protection_reasons(DiskInfo.from_summary(summary))
         if reasons:
-            raise PermissionError(
-                f"硬盘 {disk_number} 受保护，拒绝写盘：{'、'.join(reasons)}"
-            )
+            raise PermissionError(f"{title} 受保护，拒绝写盘：{'、'.join(reasons)}")
         return summary
 
     def _find_disk_summary(self, disk_number: int) -> dict[str, Any] | None:

@@ -194,3 +194,25 @@ def test_pick_path_propagates_timeout() -> None:
 
     with pytest.raises(subprocess.TimeoutExpired):
         pick_path("dir", runner=runner, powershell="pwsh")
+
+
+# ---------------------------------------------------------------- 自定义过滤器
+def test_build_script_save_accepts_custom_filter() -> None:
+    """日志导出用 zip 过滤器：默认 JSON 过滤器会把用户误导成 .json。"""
+    from app.gui_web.native_dialog import ZIP_FILTER
+
+    script = build_script("save", save_name="Sisp2-日志-1.zip", filter=ZIP_FILTER)
+    assert ZIP_FILTER in script
+    assert "$dlg.Filter = " in script
+
+
+def test_pick_path_passes_filter_through() -> None:
+    seen: list[list[str]] = []
+
+    def runner(argv, _timeout):
+        seen.append(list(argv))
+        return 1, b"", b""
+
+    assert pick_path("save", filter="ZIP (*.zip)|*.zip", runner=runner, powershell="pwsh") is None
+    joined = "\n".join(seen[0])
+    assert "ZIP (*.zip)|*.zip" in joined

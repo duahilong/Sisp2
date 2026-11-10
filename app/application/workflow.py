@@ -35,6 +35,7 @@ from typing import Any
 
 from app.application.contracts import CheckItem, DiskInfo
 from app.application.coordination import GhostStartGate, PartitionSequencer
+from app.application.disk_label import disk_label
 from app.application.jobs import ExecutionPlan, Job, JobManager, JobSpec, JobStatus
 from app.application.partitions import (
     PartitionLayoutError,
@@ -305,17 +306,18 @@ def _check_partition_fit(disk: DiskInfo, payload: dict[str, Any]) -> list[str]:
     """
     if not isinstance(disk.size_bytes, int) or disk.size_bytes <= 0:
         return []
+    title = disk_label(disk.disk_number, disk.model, size_display=disk.size_display)
     try:
         parts = plan_partitions(payload)
     except PartitionLayoutError as exc:
-        return [f"硬盘 {disk.disk_number} 分区配置无效：{exc}"]
+        return [f"{title} 分区配置无效：{exc}"]
     allow_small = allow_small_partitions(payload)
     problems = [
-        f"硬盘 {disk.disk_number} 容量不足：{problem}"
+        f"{title} 容量不足：{problem}"
         for problem in check_layout(parts, disk.size_bytes)
     ]
     problems += [
-        f"硬盘 {disk.disk_number} 分区过小：{problem}"
+        f"{title} 分区过小：{problem}"
         for problem in check_minimums(parts, disk.size_bytes, allow_small=allow_small)
     ]
     return problems
@@ -815,6 +817,8 @@ class WorkflowController:
         image_problems = self._image_problems_for(task_payload)
         blockers.extend(image_problems)
         warnings: list[str] = []
+        # 这块盘在界面/日志/导出里的统一称呼：型号（磁盘 N）。
+        title = disk_label(disk.disk_number, disk.model, size_display=disk.size_display)
 
         checks.append(
             CheckItem(
@@ -830,7 +834,7 @@ class WorkflowController:
         )
         if not disk.is_selectable:
             reasons = "、".join(disk.protection_reasons) or "受保护"
-            blockers.append(f"硬盘 {disk.disk_number} 不可操作：{reasons}")
+            blockers.append(f"{title} 不可操作：{reasons}")
 
         allowed = sorted(int(number) for number in self._service.allowed_disk_numbers)
         checks.append(
@@ -847,7 +851,7 @@ class WorkflowController:
             )
         )
         if disk.disk_number not in allowed:
-            blockers.append(f"硬盘 {disk.disk_number} 不在写盘白名单内")
+            blockers.append(f"{title} 不在写盘白名单内")
 
         # 身份不再作为“必要条件”（设置里的 blockUnverified 已移除）：
         # 执行前的闸门会重新扫描并按盘号/容量/型号（有 UniqueId、
@@ -892,7 +896,7 @@ class WorkflowController:
             )
         )
         if not letters_complete:
-            blockers.append(f"硬盘 {disk.disk_number} 盘符分配不完整")
+            blockers.append(f"{title} 盘符分配不完整")
 
         # 分区布局：界面第 4 步直接渲染这份计划（真实大小 + 盘符 + 文件系统）。
         planned_parts: list[Any] = []
@@ -902,7 +906,7 @@ class WorkflowController:
             # 但 size_mb 仍然是 None —— diskpart 依旧不带 size= 执行。
             planned_parts = with_auto_estimates(planned_parts, disk.size_bytes)
         except PartitionLayoutError as exc:
-            blockers.append(f"硬盘 {disk.disk_number} 分区配置无效：{exc}")
+            blockers.append(f"{title} 分区配置无效：{exc}")
 
         # 镜像能不能装机（类型/存在性/索引）；不能就把它变成阻断项，界面开始按钮会置灰。
         checks.append(
@@ -919,6 +923,7 @@ class WorkflowController:
 
         plan = ExecutionPlan(
             disk_number=disk.disk_number,
+            label=title,
             model=disk.model or "",
             size_display=disk.size_display,
             identity=identity,

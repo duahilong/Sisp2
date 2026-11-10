@@ -148,6 +148,22 @@ def create_app(
         """任务日志尾部；只允许读日志目录里的 *.log（路径越界返回 E_PATH）。"""
         return api.job_log(job_id, tail)
 
+    # ------------------------------------------------------------- 日志导出
+    @app.post("/api/logs/export")
+    def export_logs(body: dict[str, Any] | None = None) -> dict[str, Any]:
+        """把这一轮任务的结论与日志打包成 zip。
+
+        不传 ``path`` 时弹原生保存框（界面按钮就走这条路）；传了就静默写盘
+        （命令行/自动化用）。
+        """
+        payload = body or {}
+        return api.export_logs(payload.get("job_ids"), payload.get("path"))
+
+    @app.post("/api/reveal")
+    def reveal(body: dict[str, Any] | None = None) -> dict[str, Any]:
+        """在资源管理器里定位一个文件（导出的 zip 用）。"""
+        return api.reveal((body or {}).get("path") or "")
+
     # ------------------------------------------------------------- 镜像探测
     @app.post("/api/images")
     def probe_images(body: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -100,6 +100,16 @@ DISKPART_EXITS: dict[int, tuple[str, str, str]] = {
         "参数错误",
         "脚本里的分区参数不被接受（例如 size 超出磁盘可用空间）：核对向导里的分区大小",
     ),
+    0x8007000B: (
+        "ERROR_BAD_FORMAT",
+        "介质格式无法识别",
+        "分区表/卷里有磁盘不认的结构：先清盘重来；反复出现说明盘有坏道，换盘",
+    ),
+    0x80070490: (
+        "ERROR_NOT_FOUND",
+        "找不到指定的分区/卷",
+        "分区号已经变了（前一条命令刚重建过分区表）：重扫后按真实分区表重试",
+    ),
     0x8007000E: (
         "ERROR_OUTOFMEMORY",
         "资源不足",
@@ -260,6 +270,34 @@ $items = foreach ($part in Get-Partition -DiskNumber $number -ErrorAction Silent
 """
 
 
+#: 只读查询：一块盘的“身份 + 健康状态”。
+#:
+#: 用途是**每段 diskpart 之前复核**「马上要动的还是不是确认时那块盘」，顺便把
+#: 脱机/只读/健康状态拿出来，好在清盘前拦住。比 ``PARTITIONS_SCRIPT`` 便宜得多
+#: （不枚举分区、不查卷），单次约 0.4 s。
+#:
+#: 盘不存在时 ``Get-Disk`` 直接报错退出（非 0），调用方据此判定“盘掉线了”。
+DISK_STATE_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$number = [int]$env:VIX_DISK_NUMBER
+$disk = Get-Disk -Number $number
+[pscustomobject]@{
+    disk_number      = $number
+    model            = [string]$disk.FriendlyName
+    friendly_name    = [string]$disk.FriendlyName
+    serial_number    = [string]$disk.SerialNumber
+    unique_id        = [string]$disk.UniqueId
+    size_bytes       = [long]$disk.Size
+    bus_type         = [string]$disk.BusType
+    partition_style  = [string]$disk.PartitionStyle
+    is_offline       = [bool]$disk.IsOffline
+    is_read_only     = [bool]$disk.IsReadOnly
+    health_status    = [string]$disk.HealthStatus
+    operational_status = [string]$disk.OperationalStatus
+} | ConvertTo-Json -Compress
+"""
+
+
 def find_program(name: str) -> str | None:
     """在 PATH / System32 里找可执行文件（找不到返回 ``None``）。"""
     found = shutil.which(name)
@@ -273,6 +311,17 @@ def find_program(name: str) -> str | None:
     return None
 
 
+def format_command_line(command: Sequence[str], quiet: str = "") -> str:
+    """日志里的命令行：``quiet`` 非空时只留一行说明（只读查询用）。
+
+    只读查询的 PowerShell 脚本有几十行，一块盘要查 4–6 次；原样落日志会把
+    真正要看的内容冲散。``quiet`` 里写清"这条是什么查询"，需要脚本本身时
+    去 ``shell.py`` 看常量即可。
+    """
+    text = str(quiet or "").strip()
+    return f"$ <{text}>" if text else f"$ {' '.join(command)}"
+
+
 def run_process(
     command: Sequence[str],
     timeout: float,
@@ -282,15 +331,18 @@ def run_process(
     env: Mapping[str, str] | None = None,
     cwd: str | None = None,
     source: str = "ProcessShell",
+    quiet: str = "",
 ) -> tuple[int, str, float]:
     """执行一条命令：先过护栏，再写日志，最后才交给操作系统。
 
     护栏放在"写日志"之前——被拦下的命令不应该看起来像执行过。
-    ``cwd`` 给 Ghost 这类"把失败原因写到当前目录"的程序用。
+    ``cwd`` 给 Ghost 这类"把失败原因写到当前目录"的程序用；``quiet`` 非空时
+    只记一行说明、不打印完整命令行——只读查询用的 PowerShell 脚本有几十行，
+    每次都整段落日志会把真正要看的内容冲散。
     """
     ensure_command_allowed(command, allow_real_disk=allow_real_disk, source=source)
     started = datetime.now()
-    log.write(f"$ {' '.join(command)}")
+    log.write(format_command_line(command, quiet))
     try:
         completed = subprocess.run(  # noqa: S603 - 命令由本模块拼装，参数来自配置
             list(command),
@@ -343,8 +395,13 @@ class ProcessShell:
         *,
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
+        quiet: str = "",
     ) -> tuple[int, str, float]:
-        """执行命令。注入的 ``runner`` 签名：``(command, timeout, *, env=None, cwd=None)``。"""
+        """执行命令。注入的 ``runner`` 签名：``(command, timeout, *, env=None, cwd=None)``。
+
+        ``quiet`` 只影响日志：只读查询（PowerShell 脚本几十行）不该把日志刷满，
+        但替身 runner 的签名保持不变（不把 quiet 透给替身）。
+        """
         if self._runner is not None:
             return self._runner(list(command), timeout, env=env, cwd=cwd)
         return run_process(
@@ -355,6 +412,7 @@ class ProcessShell:
             env=env if env is not None else self.env,
             cwd=cwd,
             source=self.source,
+            quiet=quiet,
         )
 
     def run_streaming(
@@ -530,6 +588,7 @@ class DiskpartShell:
             ],
             QUERY_TIMEOUT,
             env=env,
+            quiet=f"查询磁盘 {int(disk_number)} 的分区表（PowerShell 脚本见 shell.py）",
         )
         if code != 0:
             raise RunnerError(f"查询分区失败（退出码 {code}）：{tail(output, 400)}")
@@ -540,6 +599,40 @@ class DiskpartShell:
             raise RunnerError(f"查询分区的输出不是合法 JSON：{tail(raw, 300)}") from exc
         if not isinstance(payload, Mapping):
             raise RunnerError(f"查询分区的输出格式不对：{tail(raw, 300)}")
+        return dict(payload)
+
+    def disk_state(self, disk_number: int) -> dict[str, Any]:
+        """查一块盘的身份与健康字段（不碰盘）。
+
+        盘不存在 / PowerShell 报错时抛 ``RunnerError``：调用方据此判断“盘掉线了”。
+        """
+        if not self.powershell:
+            raise RunnerError("找不到 powershell.exe，无法复核磁盘")
+        env = dict(os.environ)
+        env["VIX_DISK_NUMBER"] = str(int(disk_number))
+        code, output, _elapsed = self.process.run(
+            [
+                self.powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                DISK_STATE_SCRIPT,
+            ],
+            QUERY_TIMEOUT,
+            env=env,
+            quiet=f"复核磁盘 {int(disk_number)} 的身份与健康状态（PowerShell 脚本见 shell.py）",
+        )
+        if code != 0:
+            raise RunnerError(
+                f"复核磁盘 {int(disk_number)} 失败（退出码 {code}）：{tail(output, 300)}"
+            )
+        raw = (output or "").strip()
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RunnerError(f"复核磁盘的输出不是合法 JSON：{tail(raw, 200)}") from exc
+        if not isinstance(payload, Mapping):
+            raise RunnerError(f"复核磁盘的输出格式不对：{tail(raw, 200)}")
         return dict(payload)
 
     def find_partition(
@@ -596,6 +689,7 @@ __all__ = [
     "DISKPART_EXITS",
     "DISKPART_TIMEOUT",
     "DISKPART_TRANSIENT_EXITS",
+    "DISK_STATE_SCRIPT",
     "GHOST_TIMEOUT",
     "PARTITIONS_SCRIPT",
     "QUERY_ATTEMPTS",
@@ -608,6 +702,7 @@ __all__ = [
     "describe_diskpart_exit",
     "diskpart_exit_hint",
     "find_program",
+    "format_command_line",
     "is_transient_diskpart_exit",
     "normalize_exit_code",
     "run_process",

@@ -70,6 +70,13 @@ def _job_log_path(job: Any) -> str | None:
     return None
 
 
+def _desktop_dir() -> Path:
+    """保存框的默认位置：桌面存在就用桌面，否则退回用户目录。"""
+    home = Path.home()
+    desktop = home / "Desktop"
+    return desktop if desktop.is_dir() else home
+
+
 class WebApi:
     """暴露给 JavaScript 的接口对象。
 
@@ -251,6 +258,143 @@ class WebApi:
         lines = text.splitlines()
         limit = max(1, min(int(tail or 200), 5000))
         return ok({"path": str(allowed), "lines": lines[-limit:], "total": len(lines)})
+
+    # ------------------------------------------------------------------ 日志导出
+    def export_logs(
+        self,
+        job_ids: list[str] | None = None,
+        path: str | None = None,
+    ) -> dict[str, Any]:
+        """把这一轮任务的结论与日志打成一个 zip（默认弹原生保存框）。
+
+        ``path`` 显式给定时不弹框（测试与命令行用）。包内结构见
+        :mod:`app.application.log_export`：``summary.txt`` 是给人看的结论，
+        ``logs/`` 是原始执行日志，任务还没结束时用"按盘号找最新日志"兜底。
+        """
+        from app.application import log_export
+
+        try:
+            jobs = list(self._wf.jobs())
+        except Exception as exc:  # noqa: BLE001
+            return err("E_EXPORT", f"读取任务列表失败：{exc}")
+        if not jobs:
+            return err("E_NO_JOBS", "还没有任务可以导出：先开始一次安装")
+
+        wanted = [str(item) for item in (job_ids or []) if str(item).strip()]
+        chosen = [job for job in jobs if not wanted or job.id in wanted]
+        if not chosen:
+            return err("E_NOT_FOUND", "要导出的任务不存在（可能已经被清理）")
+
+        log_paths: dict[str, str] = {}
+        for job in chosen:
+            found = _job_log_path(job) or self._latest_disk_log(job) or ""
+            if found:
+                log_paths[job.id] = found
+
+        try:
+            snapshot = dict(self._settings.get() or {})
+        except Exception:  # noqa: BLE001 - 设置读不到不影响导出
+            snapshot = None
+
+        bundle = log_export.build_bundle(
+            chosen,
+            job_ids=wanted or None,
+            log_paths=log_paths,
+            log_root=str(self._log_root or ""),
+            version=self._version,
+            settings=snapshot,
+            artifacts=self._recent_artifacts(chosen),
+        )
+
+        target = str(path or "").strip()
+        if not target:
+            from app.gui_web import native_dialog
+
+            default_name = bundle.default_name()
+            try:
+                chosen_path = native_dialog.pick_path(
+                    "save",
+                    initial=str(_desktop_dir() / default_name),
+                    title="导出日志（打包成一个 zip）",
+                    save_name=default_name,
+                    filter=native_dialog.ZIP_FILTER,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return err("E_PICK", str(exc))
+            if not chosen_path:
+                return ok({"cancelled": True})
+            target = chosen_path
+
+        try:
+            written = bundle.write(target)
+        except OSError as exc:
+            return err("E_EXPORT", f"写压缩包失败：{exc}")
+        return ok(
+            {
+                **written,
+                "jobs": len(bundle.entries),
+                "logs": len(bundle.logs),
+                "hint": log_export.shared_hint(),
+            }
+        )
+
+    def reveal(self, path: str = "") -> dict[str, Any]:
+        """在资源管理器里定位导出的文件（只允许家目录/日志目录下的路径）。"""
+        try:
+            target = Path(str(path or "")).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError):
+            return err("E_PATH", "路径不存在")
+        if not self._revealable(target):
+            return err("E_PATH", "只允许定位家目录或日志目录里的文件", {"path": str(target)})
+        if not sys.platform.startswith("win"):
+            return ok({"path": str(target), "opened": False})
+        try:
+            import os
+
+            os.startfile(str(target.parent))  # type: ignore[attr-defined]  # noqa: S606
+        except OSError as exc:
+            return err("E_SHELL", f"打开资源管理器失败：{exc}")
+        return ok({"path": str(target), "opened": True})
+
+    def _revealable(self, target: Path) -> bool:
+        roots: list[Path] = []
+        for candidate in (self._log_root, str(Path.home())):
+            if not candidate:
+                continue
+            try:
+                roots.append(Path(candidate).expanduser().resolve())
+            except (OSError, RuntimeError):
+                continue
+        return any(root == target or root in target.parents for root in roots)
+
+    def _recent_artifacts(self, jobs: list[Any]) -> list[tuple[str, Path]]:
+        """Ghost 失败原因（``ghosterr-*.txt``）这类附加文件，有就带上。"""
+        root = self._log_root
+        if not root:
+            return []
+        began: float | None = None
+        for job in jobs:
+            started = str(getattr(job, "started_at", "") or "").strip()
+            if not started:
+                continue
+            try:
+                stamp = datetime.fromisoformat(started).timestamp()
+            except ValueError:
+                continue
+            began = stamp if began is None else min(began, stamp)
+        out: list[tuple[str, Path]] = []
+        try:
+            candidates = sorted(Path(root).glob("ghosterr-*.txt"))
+        except OSError:
+            return []
+        for item in candidates:
+            try:
+                if began is not None and item.stat().st_mtime + 2.0 < began:
+                    continue
+            except OSError:
+                continue
+            out.append((f"artifacts/{item.name}", item))
+        return out
 
     def _allowed_log_path(self, path: str) -> Path | None:
         """把日志路径收敛到 ``log_dir`` 内的 ``.log`` 文件；越界返回 None。"""

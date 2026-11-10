@@ -99,6 +99,9 @@ class ExecutionPlan:
     """给界面看的执行计划；``blockers`` 非空时 workflow 会拒绝执行。"""
 
     disk_number: int
+    #: 界面/导出统一用的显示名（``Msft Virtual Disk（磁盘 2）``）；老调用方不传
+    #: 时由界面自己按 ``磁盘 N`` 兜底。
+    label: str = ""
     model: str = ""
     size_display: str = ""
     identity: dict[str, Any] = field(default_factory=dict)
@@ -121,6 +124,7 @@ class ExecutionPlan:
     def to_dict(self) -> dict[str, Any]:
         return {
             "disk_number": self.disk_number,
+            "label": self.label,
             "model": self.model,
             "size_display": self.size_display,
             "identity": dict(self.identity),

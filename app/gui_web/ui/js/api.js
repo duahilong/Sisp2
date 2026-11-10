@@ -66,6 +66,13 @@ export const api = {
   jobs: () => get('/api/jobs'),
   job: (jobId) => get(`/api/jobs/${encodeURIComponent(jobId)}`),
   jobLog: (jobId, tail = 200) => get(`/api/jobs/${encodeURIComponent(jobId)}/log?tail=${tail}`),
+  /**
+   * 导出日志：把这一轮任务（或指定的几个任务）的结论 + 原始日志打包成 zip。
+   * 不给 path 时后端弹原生保存框；用户取消返回 {cancelled: true}。
+   */
+  exportLogs: (jobIds = [], path = '') => post('/api/logs/export', { job_ids: jobIds, path }),
+  /** 在资源管理器里定位导出的文件（家目录/日志目录内才允许）。 */
+  reveal: (path) => post('/api/reveal', { path }),
 
   // 分区脚本预览（只读：与执行器同源生成，不执行任何命令）
   partitionPreview: (diskNumber) => post('/api/partition/preview', { disk_number: diskNumber }),

@@ -30,6 +30,7 @@ class FakeProcess:
         self.calls: list[list[str]] = []
         self.envs: list[dict[str, str]] = []
         self.cwds: list[str | None] = []
+        self.quiet: list[str] = []
         self._handler = handler
 
     def run(
@@ -39,8 +40,10 @@ class FakeProcess:
         *,
         env: Any = None,
         cwd: Any = None,
+        quiet: str = "",
     ):
         self.calls.append(list(command))
+        self.quiet.append(str(quiet or ""))
         env = dict(env or {})
         self.envs.append(env)
         self.cwds.append(cwd)
@@ -63,6 +66,7 @@ class FakeDiskpartShell:
         *,
         diskpart_handler: Any = None,
         query_handler: Any = None,
+        disk_state_handler: Any = None,
         msr: Any = None,
         esp: Any = None,
         release_result: bool = True,
@@ -70,10 +74,12 @@ class FakeDiskpartShell:
         self.scripts: list[list[str]] = []
         self.titles: list[str] = []
         self.queries: list[int] = []
+        self.disk_states: list[int] = []
         self.released: list[tuple[int, int, str]] = []
         self.rescans = 0
         self._diskpart = diskpart_handler
         self._query = query_handler
+        self._disk_state = disk_state_handler
         self._msr = msr
         self._esp = esp
         self.release_result = release_result
@@ -85,6 +91,26 @@ class FakeDiskpartShell:
         if self._diskpart is not None:
             return self._diskpart(list(lines), title, timeout)
         return 0, "diskpart ok"
+
+    def disk_state(self, disk_number: int):
+        """复核磁盘身份时用的 ``Get-Disk`` 快照；默认是“健康、未脱机、可写”。"""
+        self.disk_states.append(int(disk_number))
+        if self._disk_state is not None:
+            return self._disk_state(int(disk_number))
+        return {
+            "disk_number": int(disk_number),
+            "model": "Test Disk 120GB",
+            "friendly_name": "Test Disk 120GB",
+            "serial_number": None,
+            "unique_id": None,
+            "size_bytes": None,
+            "bus_type": "NVMe",
+            "partition_style": "RAW",
+            "is_offline": False,
+            "is_read_only": False,
+            "health_status": "Healthy",
+            "operational_status": "Online",
+        }
 
     def rescan(self, *, timeout: float = 120.0) -> bool:
         self.rescans += 1

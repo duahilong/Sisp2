@@ -32,6 +32,11 @@ KIND_DIALOGS: dict[str, str] = {
 
 DEFAULT_SAVE_NAME = "sisp2-settings.json"
 
+#: 默认的文件类型过滤器；日志导出等场景传自己的（例如 ``ZIP (*.zip)|*.zip``）。
+DEFAULT_FILTER = "JSON (*.json)|*.json|所有文件 (*.*)|*.*"
+ALL_FILES_FILTER = "所有文件 (*.*)|*.*"
+ZIP_FILTER = "ZIP 压缩包 (*.zip)|*.zip|所有文件 (*.*)|*.*"
+
 _POWERSHELL_NAMES = ("powershell", "pwsh")
 
 #: 每个脚本都先做的事：出错即停、强制 UTF-8 输出（否则 PS 5.1 按 OEM 码页往
@@ -210,6 +215,7 @@ def build_script(
     initial: str = "",
     title: str = "",
     save_name: str = "",
+    filter: str = "",
 ) -> str:
     """生成 PowerShell 脚本：弹框 → 选中的路径写到 stdout；取消 exit 1。
 
@@ -227,7 +233,7 @@ def build_script(
         lines += [
             "$dlg = New-Object System.Windows.Forms.SaveFileDialog",
             f"$dlg.Title = {_ps_string(title or '保存文件')}",
-            "$dlg.Filter = 'JSON (*.json)|*.json|所有文件 (*.*)|*.*'",
+            f"$dlg.Filter = {_ps_string(filter or DEFAULT_FILTER)}",
             "$dlg.OverwritePrompt = $true",
             f"$dlg.FileName = {_ps_string(save_name or name or DEFAULT_SAVE_NAME)}",
             f"if ({_ps_string(folder)}) {{ $dlg.InitialDirectory = {_ps_string(folder)} }}",
@@ -236,7 +242,7 @@ def build_script(
         lines += [
             "$dlg = New-Object System.Windows.Forms.OpenFileDialog",
             f"$dlg.Title = {_ps_string(title or '选择文件')}",
-            "$dlg.Filter = '所有文件 (*.*)|*.*'",
+            f"$dlg.Filter = {_ps_string(filter or ALL_FILES_FILTER)}",
             "$dlg.CheckFileExists = $false",
             f"if ({_ps_string(name)}) {{ $dlg.FileName = {_ps_string(name)} }}",
             f"if ({_ps_string(folder)}) {{ $dlg.InitialDirectory = {_ps_string(folder)} }}",
@@ -294,6 +300,7 @@ def pick_path(
     initial: str = "",
     title: str = "",
     save_name: str = "",
+    filter: str = "",
     runner: Runner | None = None,
     powershell: str | None = None,
 ) -> str | None:
@@ -302,7 +309,9 @@ def pick_path(
     ``runner`` 只为测试存在（默认走 ``subprocess``）；异常向上抛，由 API 层
     包成 ``E_PICK``。
     """
-    script = build_script(kind, initial=initial, title=title, save_name=save_name)
+    script = build_script(
+        kind, initial=initial, title=title, save_name=save_name, filter=filter
+    )
     exe = powershell or find_powershell()
     if not exe:
         raise RuntimeError("找不到 powershell.exe，无法弹出选择框")
@@ -314,9 +323,12 @@ def pick_path(
 
 
 __all__ = [
+    "ALL_FILES_FILTER",
+    "DEFAULT_FILTER",
     "DEFAULT_SAVE_NAME",
     "KIND_DIALOGS",
     "PICK_TIMEOUT",
+    "ZIP_FILTER",
     "build_script",
     "find_powershell",
     "parse_selection",
