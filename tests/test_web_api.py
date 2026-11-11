@@ -725,3 +725,79 @@ def test_reveal_rejects_paths_outside_home_and_logs(tmp_path: Path) -> None:
     body = client.post("/api/reveal", json={"path": r"C:\Windows\win.ini"}).json()
     assert body["ok"] is False
     assert body["error"]["code"] == "E_PATH"
+
+
+# ---------------------------------------------------------------- 会话缓存（启动优化）
+def test_session_is_served_from_cache(tmp_path: Path) -> None:
+    """后台已经热身好的会话不能因为界面再调一次就重扫一遍盘。
+
+    启动阶段那次扫描（PowerShell 冷启动约 1 秒）以前会被 ``POST /api/session``
+    再算一遍，界面首屏白等两秒。
+    """
+    client, wf = _build_client(tmp_path)
+    calls: list[int] = []
+    original = wf.start
+
+    def spy():
+        calls.append(1)
+        return original()
+
+    wf.start = spy  # type: ignore[method-assign]
+
+    session = _unwrap(client.post("/api/session", json={}))
+    assert len(session["disks"]) == 2
+    assert calls == [], "已有会话就该直接返回缓存"
+    assert wf.session is not None
+
+
+def test_session_force_reruns(tmp_path: Path) -> None:
+    """显式 ``{"force": true}`` 才重新预检 + 扫盘（“重新开始一次会话”）。"""
+    client, wf = _build_client(tmp_path)
+    calls: list[int] = []
+    original = wf.start
+
+    def spy():
+        calls.append(1)
+        return original()
+
+    wf.start = spy  # type: ignore[method-assign]
+    _unwrap(client.post("/api/session", json={"force": True}))
+    assert calls == [1]
+
+
+def test_warm_session_fills_the_session(tmp_path: Path) -> None:
+    """``warm_session()`` 就是“后台把会话跑起来”，/health 不必等它。"""
+    wf = WorkflowController(
+        service=_FakeService([_disk(1)]),
+        preflight_runner=_preflight,
+        partition_defaults=_PARTITION_DEFAULTS,
+        settings_provider=lambda: dict(_SETTINGS),
+    )
+    api = WebApi(wf, settings=build_store(tmp_path / "settings.json"))
+    assert wf.session is None, "构造 WebApi 不该顺手扫盘"
+    data = api.warm_session()
+    assert data["ok"] is True
+    assert wf.session is not None
+    # 再调一次走缓存（不重复扫盘）
+    again = api.start_session()
+    assert again["ok"] is True
+
+
+def test_warm_session_failure_is_reported_not_raised(tmp_path: Path) -> None:
+    """热身失败不能让进程崩：界面调 /api/session 时会拿到 E_START。"""
+    wf = WorkflowController(
+        service=_FakeService([_disk(1)]),
+        preflight_runner=_preflight,
+        partition_defaults=_PARTITION_DEFAULTS,
+        settings_provider=lambda: dict(_SETTINGS),
+    )
+
+    def boom():
+        raise RuntimeError("扫描炸了")
+
+    wf.start = boom  # type: ignore[method-assign]
+    api = WebApi(wf, settings=build_store(tmp_path / "settings.json"))
+    data = api.warm_session()
+    assert data["ok"] is False
+    assert data["error"]["code"] == "E_START"
+    assert "扫描炸了" in data["error"]["message"]

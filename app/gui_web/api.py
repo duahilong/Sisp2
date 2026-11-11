@@ -104,6 +104,11 @@ class WebApi:
 
             settings = build_store()
         self._settings = settings
+        # 会话只能跑一次一次地算：/health 一就绪后台就开始热身，界面自己再调
+        # ``/api/session`` 时直接拿结果。以前这个接口每次都重跑一遍预检 + 扫盘，
+        # 白白多花一秒多（PowerShell 冷启动）。
+        self._session_lock = threading.Lock()
+        self._session_ready = False
 
     # ------------------------------------------------------------------ 事件
     def _on_event(self, event: Any) -> None:
@@ -132,16 +137,31 @@ class WebApi:
         })
 
     # ------------------------------------------------------------------ 会话
-    def start_session(self) -> dict[str, Any]:
-        """启动会话（运行前检查 + 扫描硬盘 + 生成任务载荷快照）。"""
-        try:
-            session = self._wf.start()
-        except Exception as exc:  # noqa: BLE001 - 任何异常都要变成信封返回给界面
-            return err("E_START", str(exc))
-        with self._lock:
-            self._events.clear()
-            self._base = 0
-        return ok(session.to_dict())
+    def warm_session(self) -> dict[str, Any]:
+        """后台预热会话（幂等）；失败不抛，留给下一次 ``/api/session`` 重试。"""
+        return self.start_session()
+
+    def start_session(self, force: bool = False) -> dict[str, Any]:
+        """启动会话（运行前检查 + 扫描硬盘 + 生成任务载荷快照）。
+
+        ``force=False`` 且已经有会话时直接返回缓存：启动阶段后台已经算过一遍，
+        界面再调一次不应该再扫一次盘。要重新扫盘请传 ``force=True``。
+        """
+        with self._session_lock:
+            cached = None if force else self._wf.session
+            if cached is not None:
+                self._session_ready = True
+                return ok(cached.to_dict())
+            try:
+                session = self._wf.start()
+            except Exception as exc:  # noqa: BLE001 - 任何异常都要变成信封返回给界面
+                self._session_ready = False
+                return err("E_START", str(exc))
+            self._session_ready = True
+            with self._lock:
+                self._events.clear()
+                self._base = 0
+            return ok(session.to_dict())
 
     def refresh_disks(self) -> dict[str, Any]:
         try:

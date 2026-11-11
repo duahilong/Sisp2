@@ -37,7 +37,7 @@ const FIELDS = [
   { section: 'general', key: 'theme', kind: 'enum', effect: '立即生效' },
   { section: 'general', key: 'density', kind: 'enum', effect: '立即生效' },
   { section: 'general', key: 'rememberWindow', kind: 'bool', effect: '下次启动生效', hint: '关掉后窗口每次都从默认大小开始。' },
-  { section: 'general', key: 'autoRefresh', kind: 'bool', effect: '下次启动生效', hint: '打开窗口时自动扫描一次硬盘。' },
+  { section: 'general', key: 'autoRefresh', kind: 'bool', effect: '下次启动生效', hint: '启动时自动刷新磁盘。关掉后首屏不再额外刷新一次（磁盘列表由启动会话带回，两者取数只差一次扫描）。' },
   { section: 'general', key: 'startView', kind: 'enum', effect: '下次启动生效' },
 
   { section: 'install', key: 'sysDefaultGb', kind: 'int', effect: '下次生成计划生效', hint: '向导第 2 步的初始值，可以在那一步改。' },

@@ -86,33 +86,40 @@ window.__sispGoMain = () => goTo('main');
 
 /* ------------------------------------------------------------------ 数据加载 */
 async function loadAll() {
-  try {
-    state.info = await api.info();
-  } catch (exc) {
+  // 信息与设置相互独立：并行取，省一个来回。
+  const [infoRes, settingsRes] = await Promise.allSettled([api.info(), api.settings()]);
+
+  if (infoRes.status !== 'fulfilled') {
+    const exc = infoRes.reason;
     showFatal('读不到本地服务的信息接口。', exc instanceof ApiError ? `${exc.code}: ${exc.message}` : String(exc));
     return false;
   }
+  state.info = infoRes.value;
 
-  try {
-    const data = await api.settings();
+  if (settingsRes.status === 'fulfilled') {
+    const data = settingsRes.value;
     state.settings = data.settings || {};
     state.settingsMeta = data;
     applyAppearance(state.settings);
     for (const warning of data.warnings || []) pushLog(`设置提醒：${warning}`, 'warn', 'settings');
-  } catch (exc) {
+  } else {
+    const exc = settingsRes.reason;
     state.settings = state.settings || {};
     pushLog(`读取设置失败：${exc instanceof ApiError ? exc.message : exc}`, 'err', 'settings');
   }
 
-  await startSession();
-
+  // 起始视图先定下来（设置已经到了），免得"先闪一下主界面再跳到设置"。
   const startView = (state.settings && state.settings.startView) || 'main';
   state.view = ['main', 'install', 'settings'].includes(startView) ? startView : 'main';
   if (state.view === 'install') invalidateSettings();
+  render();
 
-  const autoRefresh = state.settings ? state.settings.autoRefresh !== false : true;
-  if (autoRefresh) await refreshDisks(true);
+  // 会话（预检 + 扫盘）由后端在启动时就热身好了，这里通常直接拿缓存；
+  // 第一次打开时可能还在算，界面先显示骨架，别白屏。
+  await startSession();
+  render();
 
+  // 不再额外 GET /api/disks：会话已经带回磁盘列表，再扫一次要多等一秒。
   try {
     setJobs(await api.jobs());
   } catch (exc) {
@@ -291,6 +298,10 @@ async function boot() {
   });
 
   subscribe(render);
+
+  // 先把界面骨架画出来再去要数据：窗口一出现就有东西，而不是白屏等后端。
+  render();
+  setStatus('正在连接本地服务…');
 
   const ready = await loadAll();
   if (!ready) return;

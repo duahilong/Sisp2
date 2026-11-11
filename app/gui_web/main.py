@@ -39,6 +39,11 @@ from pathlib import Path
 
 from app.gui.elevation import is_admin
 from app.gui.webengine import inspect_engine
+from app.gui_web.single_instance import (
+    EXIT_ALREADY_RUNNING,
+    SingleInstance,
+    already_running_message,
+)
 from app.resources import ui_path
 
 MODULE = "app.gui_web"
@@ -314,7 +319,11 @@ def webview_storage_path() -> str | None:
 
 
 def build_api(settings_path: str | None = None):
-    """构造 WorkflowController + WebApi，并立刻建立会话。"""
+    """构造 WorkflowController + WebApi，并在后台把会话热起来。
+
+    返回值是 ``(api, wf)``。注意：会话（预检 + 扫盘）不再在这里同步跑完——
+    同步跑会让 uvicorn 晚一秒多才 bind，界面就要多等一秒多才看得到窗口。
+    """
     from app.application.workflow import WorkflowController
     from app.gui_web.api import WebApi
     from app.modules.settings.service import build_store
@@ -345,8 +354,25 @@ def build_api(settings_path: str | None = None):
         # 预检与执行器可选项都从设置里取最新值（改完设置不用重建控制器）。
         settings_provider=store.get,
     )
-    wf.start()
-    return WebApi(wf, settings=store, log_dir=log_dir), wf
+    api = WebApi(wf, settings=store, log_dir=log_dir)
+    # 会话（运行前检查 + 扫盘，约 1 秒，主要是 PowerShell 冷启动）**在后台热身**：
+    # 以前这里同步 wf.start()，结果是 uvicorn 要等扫描跑完才 bind，界面白白多等
+    # 一秒多才看到窗口。现在 /health 立刻可用，界面先出骨架，扫描同时进行。
+    _warm_session(api)
+    return api, wf
+
+
+def _warm_session(api) -> threading.Thread:
+    """后台把会话跑起来（失败不抛：前端调 /api/session 时会重试并拿到真错误）。"""
+    def _run() -> None:
+        try:
+            api.warm_session()
+        except Exception as exc:  # noqa: BLE001 - 热身失败留给 /api/session 报错
+            LOG.warning("会话预热失败（前端会重试）：%s", exc)
+
+    thread = threading.Thread(target=_run, name="sisp-session-warm", daemon=True)
+    thread.start()
+    return thread
 
 
 def _check_port_free(host: str, port: int) -> str | None:
@@ -567,6 +593,52 @@ def _run_desktop(args) -> int:
     return 0
 
 
+#: 进程级的门闩对象：同一个进程里多次调用 ``main()``（测试、重启逻辑）不算多开。
+_INSTANCE_LOCK: SingleInstance | None = None
+
+
+def _instance_lock() -> SingleInstance:
+    global _INSTANCE_LOCK  # noqa: PLW0603 - 进程级单例，就是这个用途
+    if _INSTANCE_LOCK is None:
+        _INSTANCE_LOCK = SingleInstance()
+    return _INSTANCE_LOCK
+
+
+def acquire_single_instance(args, *, lock=None, alert=None, say=None) -> int | None:
+    """单实例门闩：返回 ``None`` = 可以继续；返回数字 = 直接以该退出码结束。
+
+    为什么"只有用户面前的那个进程"拿锁：提权后端（``--backend``）是本实例的
+    一部分，让它也去抢锁会把自己锁在外面。提权重启时父子进程有极短的交接
+    窗口，所以 ``--elevate`` 路径上给几秒钟等父进程放手。
+    """
+    if getattr(args, "backend", False) or getattr(args, "allow_multiple", False):
+        return None
+    lock = lock or _instance_lock()
+    if lock.acquire(wait=3.0 if getattr(args, "elevate", False) else 0.0):
+        return None
+    activated = False
+    try:
+        activated = bool(lock.activate_window())
+    except Exception:  # noqa: BLE001 - 叫不动已有的窗口不影响后续提示
+        activated = False
+    message = already_running_message()
+    if activated:
+        message = message.replace(
+            "· 已经打开的窗口应该已经切到前台；", "· 已经把已有的窗口切到前台；"
+        )
+    (say or _say_stderr)("硬盘工具箱已经在运行了（只允许一个实例）。")
+    if not getattr(args, "serve", False):
+        (alert or alert_blocking)(message)
+    return EXIT_ALREADY_RUNNING
+
+
+def _say_stderr(text: str) -> None:
+    try:
+        print(text, file=sys.stderr)
+    except Exception:  # noqa: BLE001, S110 - 没有 stderr（窗口模式）也不能崩
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     _ensure_std_streams()
     parser = argparse.ArgumentParser(description="Sisp2 Web 界面")
@@ -578,6 +650,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--settings", default=None, help="设置文件路径，默认 %%APPDATA%%\\Sisp\\settings.json")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=860)
+    parser.add_argument(
+        "--allow-multiple",
+        action="store_true",
+        help="允许多开（排障/自动化测试用；正常使用不要加，两个实例会同时扫盘并抢同一块盘）",
+    )
     # 下面两个是内部参数：界面给自己拉起的提权后端用，不对外。
     parser.add_argument("--backend", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--parent-pid", type=int, default=None, help=argparse.SUPPRESS)
@@ -591,6 +668,10 @@ def main(argv: list[str] | None = None) -> int:
         if relaunch_as_admin(argv):
             return 0
         print("提权被取消，继续以普通权限运行（写盘会失败）", file=sys.stderr)
+
+    blocked = acquire_single_instance(args)
+    if blocked is not None:
+        return blocked
 
     if args.serve:
         return _run_serve(args)

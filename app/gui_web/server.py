@@ -109,8 +109,10 @@ def create_app(
 
     # ------------------------------------------------------------- 会话与磁盘
     @app.post("/api/session")
-    def start_session() -> dict[str, Any]:
-        return api.start_session()
+    def start_session(body: dict[str, Any] | None = None) -> dict[str, Any]:
+        # 默认拿后台预热好的会话；显式传 {"force": true} 才重新预检 + 扫盘
+        body = body or {}
+        return api.start_session(force=bool(body.get("force")))
 
     @app.get("/api/disks")
     def refresh_disks() -> dict[str, Any]:
