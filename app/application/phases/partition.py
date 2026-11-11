@@ -18,6 +18,7 @@ from typing import Any
 from app.application import activity
 from app.application.disk_label import disk_label
 from app.application.partitions import (
+    FORMAT_OVERRIDE,
     PlannedPartition,
     create_geometry_lines,
     format_lines,
@@ -62,15 +63,26 @@ CREATE_REPAIR_ATTEMPTS = 2
 # 但**查得到且不一致**（盘号漂移/换盘/脱机/只读/不健康）必须立刻中止。
 DISK_GUARD_ATTEMPTS = 2
 
-# 「建分区」只建几何：瞬时错误按真实分区表补齐缺失项的次数。
-CREATE_REPAIR_ATTEMPTS = 2
-
-# 单个分区的格式化尝试次数与等待（秒）。现场证据：卷被占用时同一秒内重试必失败，
-# 而 6~12 秒后仍失败——所以要退避，并且必须换工具（见 FORMAT_PLAN）。
+# 单个分区的格式化尝试次数与等待（秒）。现场证据：
+#  - 2026-11-10：建完分区立刻 format → 0x80042413，同一条命令重试也失败；
+#  - 2026-11-11：三块盘全部卡在 EFI 分区，diskpart 明确提示「请使用 OVERRIDE 参数」。
+# 所以第一次就带 override（见 ``partitions.FORMAT_OVERRIDE``），
+# ``format.com /X`` 作为第 2、4 次手段，每次都 rescan + 退避。
 FORMAT_ATTEMPTS = 4
 FORMAT_BACKOFF: tuple[float, ...] = (1.0, 5.0, 10.0)
 # 每次尝试用哪个格式化途径（第 2 / 4 次用 format.com /X 强制卸载）。
 FORMAT_PLAN: tuple[str, ...] = ("diskpart", "format.com", "diskpart", "format.com")
+
+# 我们自己的哨兵码（不是 Windows 错误码，绝不能当成 diskpart 退出码去翻译）：
+#  ``TOOL_NOT_STARTED`` 进程没起来（找不到/被拦/不是有效程序）→ 换下一种途径；
+#  ``FALLBACK_REFUSED`` 安全闸拒绝（盘符归属核对不上/拿不到盘符）→ 也换下一种途径。
+# 两者都**不是**"这块盘废了"，以前把它们当永久失败直接 break，把后面真正能用的
+# 手段（diskpart + override）全掐掉了——2026-11-11 现场就是这么失败的。
+TOOL_NOT_STARTED = -1
+FALLBACK_REFUSED = -2
+
+# 隐藏分区（ESP/OEM/恢复）没有普通卷的 ``drive_letter``，只有 ``mounted_letter``。
+HIDDEN_PARTITION_TYPES = frozenset({"system", "oem", "recovery", "unknown"})
 
 # 建完分区后等「分区表/卷」就绪的上限与轮询间隔（秒）。
 VOLUME_READY_TIMEOUT = 12.0
@@ -125,6 +137,7 @@ class PartitionPhase:
         format_attempts: int = FORMAT_ATTEMPTS,
         format_backoff: Sequence[float] = FORMAT_BACKOFF,
         format_plan: Sequence[str] = FORMAT_PLAN,
+        format_force: bool = FORMAT_OVERRIDE,
         ready_timeout: float = VOLUME_READY_TIMEOUT,
         ready_interval: float = VOLUME_READY_INTERVAL,
     ) -> None:
@@ -138,6 +151,7 @@ class PartitionPhase:
         self.format_attempts = max(1, int(format_attempts))
         self.format_backoff = tuple(max(0.0, float(item)) for item in format_backoff)
         self.format_plan = tuple(str(item) for item in format_plan) or ("diskpart",)
+        self.format_force = bool(format_force)
         self.ready_timeout = max(0.0, float(ready_timeout))
         self.ready_interval = max(0.05, float(ready_interval))
 
@@ -523,7 +537,8 @@ class PartitionPhase:
                 )
                 break
             self._sleep(self.ready_interval)
-        self._settle(ctx, log, "格式化前")
+        # 注意：这里**不再**多等一次 ``partitionSettleMs``——逐分区的 ``_settle`` 已经
+        # 等过（1.4.0 两处都等，白浪费 1 秒/分区）。
 
     # ------------------------------------------------------------------ 逐分区格式化
     def _format_one(
@@ -535,22 +550,31 @@ class PartitionPhase:
     ) -> PhaseOutcome | None:
         """格式化并分配盘符**一个**分区；返回非 ``None`` = 失败（已完成归因）。
 
-        现场证据（两个不同型号的盘都是同一处失败）：
+        现场证据（2026-11-10 / 2026-11-11 两批日志）：
           1. ``diskpart format`` 卡 0% 十几秒 → ``0x80042413 设备使用中``；
           2. 紧接着重试（1 秒后）同样失败；
-          3. 6~12 秒后再试仍然失败 —— 卷处于"被占用"的稳定状态。
-        所以策略是：先 diskpart（正常路径），再退避后用 ``format.com /X``
-        **强制卸载卷**（官方手段），交替重试；每次之间 rescan。
+          3. 6~12 秒后再试仍然失败 —— 卷处于"被占用"的稳定状态；
+          4. **diskpart 自己提示「若要继续操作，请使用 OVERRIDE 参数」**。
+
+        所以策略是：第一次就带 ``override``（强制卸载卷，见
+        :data:`app.application.partitions.FORMAT_OVERRIDE`），失败后 rescan +
+        退避，再用 ``format.com /X``，交替进行。
+
+        两条“这条路走不通”的情况（安全闸拒绝、工具没起来）只记日志并换下一种
+        途径，**不算失败**——以前把它们当永久失败直接结束，正好把唯一能用的
+        ``override`` 拖掉了（2026-11-11 三块盘的直接原因）。
         """
         code = 0
         output = ""
+        history: list[str] = []
         total = self.format_attempts
         for attempt in range(1, total + 1):
             tool = self.format_plan[(attempt - 1) % len(self.format_plan)]
+            label = self._tool_label(tool)
             if attempt > 1:
                 wait = self._backoff(attempt - 2)
                 log.write(
-                    f"第 {attempt} 次尝试（{tool}）前等待 {wait:.0f}s 并重新扫描磁盘"
+                    f"第 {attempt} 次尝试（{label}）前等待 {wait:.0f}s 并重新扫描磁盘"
                     f"（上一次：{describe_diskpart_exit(code)}）"
                 )
                 if wait > 0:
@@ -559,32 +583,60 @@ class PartitionPhase:
                     self.shell.rescan()
                 except Exception as exc:  # noqa: BLE001
                     log.write(f"重试前重新扫描失败（已忽略）：{exc}")
-            self._settle(ctx, log, f"格式化分区 #{position}（{part.label}，第 {attempt} 次）前")
+            self._settle(
+                ctx, log, f"格式化分区 #{position}（{part.label}，第 {attempt} 次）前"
+            )
 
             if tool == "format.com":
                 code, output = self._format_with_tool(ctx, log, position, part)
             else:
                 try:
                     code, output = self.shell.run_diskpart(
-                        format_lines(ctx.disk_number, position, part),
-                        title=f"diskpart 脚本（格式化 #{position} {part.label}）",
+                        format_lines(
+                            ctx.disk_number, position, part, force=self.format_force
+                        ),
+                        title=(
+                            f"diskpart 脚本（格式化 #{position} {part.label}"
+                            f"{'，override' if self.format_force else ''}）"
+                        ),
                     )
                 except Exception as exc:  # noqa: BLE001
-                    code, output = -1, str(exc)
+                    code, output = TOOL_NOT_STARTED, str(exc)
             if code == 0:
                 log.write(
                     f"分区 #{position}（{part.label}）已格式化"
                     + (f"并分配盘符 {part.letter}" if part.letter else "（无盘符）")
+                    + (f"（途径 {label}）" if label else "")
                 )
                 return None
 
+            # 「这条路走不通」≠「这块盘废了」：记下来，换下一种途径继续。
+            if code in (FALLBACK_REFUSED, TOOL_NOT_STARTED):
+                why = "安全闸拒绝" if code == FALLBACK_REFUSED else "工具未启动"
+                reason = tail(output, 200) or why
+                log.write(
+                    f"分区 #{position}（{part.label}）第 {attempt} 次途径 {label} 不可用"
+                    f"（{why}：{reason}），继续下一种途径"
+                )
+                history.append(f"第{attempt}次 {label}：{why}（{reason}）")
+                continue
+
             log.write(
                 f"分区 #{position}（{part.label}）格式化失败"
-                f"（{describe_diskpart_exit(code)}，途径 {tool}）"
+                f"（{describe_diskpart_exit(code)}，途径 {label}）"
             )
+            history.append(f"第{attempt}次 {label}：{describe_diskpart_exit(code)}")
             if not is_transient_diskpart_exit(code):
                 break
-        return self._partition_failure(ctx, position, part, code, output)
+        return self._partition_failure(
+            ctx, position, part, code, output, history=history
+        )
+
+    def _tool_label(self, tool: str) -> str:
+        """日志里给人看的途径名（diskpart 带 override 时要写出来）。"""
+        if tool == "format.com":
+            return "format.com /X"
+        return "diskpart（含 override）" if self.format_force else "diskpart"
 
     def _format_with_tool(
         self,
@@ -597,22 +649,26 @@ class PartitionPhase:
 
         **安全闸**：格式化前必须确认"这个盘符挂在我要格式化的那个分区上、
         容量也对得上"，否则宁可失败也绝不格式化别人的卷。
+
+        拒绝时返回 :data:`FALLBACK_REFUSED`（不是错误码，由调用方换下一种途径）。
         """
         letter = self._ensure_letter(ctx, log, position, part)
         if not letter:
-            return -1, "拿不到盘符，无法使用 format.com 兜底"
+            return FALLBACK_REFUSED, "拿不到盘符，无法使用 format.com 兜底"
         if not self._letter_belongs_to(ctx, letter, position, part):
-            return -1, (
+            return FALLBACK_REFUSED, (
                 f"盘符 {letter}: 与分区 #{position}（{part.label}）对不上，"
                 "放弃 format.com 兜底（防止误格式化其它卷）"
             )
-        log.write(f"改用 format.com {letter}: /FS:{part.file_system} /Q /V:{part.label} /Y /X（强制卸载）")
+        log.write(
+            f"改用 format.com {letter}: /FS:{part.file_system} /Q /V:{part.label} /Y /X（强制卸载）"
+        )
         try:
             return self.shell.format_letter(
                 letter, file_system=part.file_system, label=part.label
             )
         except Exception as exc:  # noqa: BLE001
-            return -1, str(exc)
+            return TOOL_NOT_STARTED, str(exc)
 
     def _ensure_letter(
         self,
@@ -621,14 +677,20 @@ class PartitionPhase:
         position: int,
         part: PlannedPartition,
     ) -> str:
-        """确保这个分区有盘符（format.com 需要盘符）；返回实际可用的字母。"""
+        """确保这个分区有盘符（format.com 需要盘符）；返回实际可用的字母。
+
+        ESP（EFI 系统分区）是**隐藏卷**：它的 ``drive_letter`` 永远是 ``null``，
+        真盘符只出现在 ``mounted_letter`` 里。1.4.0 只看 ``drive_letter``，
+        于是每次都以为"没盘符"→ 重新 assign → 再核对仍然"对不上"，
+        恰好在最需要兜底的分区上把兜底拒掉（2026-11-11 现场三块盘全部如此）。
+        """
         actual = None
         try:
             actual = self.shell.query(ctx.disk_number)
         except Exception as exc:  # noqa: BLE001
             log.write(f"兜底格式化前查询分区失败：{exc}")
         got = _actual_partition(actual, position)
-        current = str((got or {}).get("drive_letter") or "").strip().upper()[:1]
+        current = _letter_of(got)
         if current:
             return current
         wanted = str(part.letter or "").strip().upper()[:1]
@@ -662,7 +724,16 @@ class PartitionPhase:
         position: int,
         part: PlannedPartition,
     ) -> bool:
-        """盘符是否真的挂在分区 #position 上（并且容量与计划相符）。"""
+        """盘符是否真的挂在分区 #position 上（并且容量与计划相符）。
+
+        严格性分两级，**不放松**：
+
+        - 普通卷（有 ``drive_letter``）：必须精确命中这个盘符；
+        - 隐藏分区（ESP/OEM/恢复）：允许用 ``mounted_letter`` 认定，但**只有**
+          隐藏类型才能走这条道——数据分区如果只有 ``mounted_letter``，一律拒绝。
+
+        两者都要过容量核对（误差 ≤ 2 MB），防止盘号漂移/认错卷。
+        """
         try:
             actual = self.shell.query(ctx.disk_number)
         except Exception:  # noqa: BLE001
@@ -670,8 +741,16 @@ class PartitionPhase:
         got = _actual_partition(actual, position)
         if not got:
             return False
-        current = str(got.get("drive_letter") or "").strip().upper()[:1]
-        if current != str(letter).strip().upper()[:1]:
+        wanted = str(letter).strip().upper()[:1]
+        drive = str(got.get("drive_letter") or "").strip().upper()[:1]
+        mounted = str(got.get("mounted_letter") or "").strip().upper()[:1]
+        if drive:
+            if drive != wanted:
+                return False
+        elif mounted:
+            if mounted != wanted or not _is_hidden_partition(got):
+                return False
+        else:
             return False
         if part.size_mb is not None:
             actual_mb = (to_int(got.get("size_bytes")) or 0) / BYTES_PER_MB
@@ -796,16 +875,28 @@ class PartitionPhase:
         part: PlannedPartition,
         code: int,
         output: str,
+        *,
+        history: Sequence[str] = (),
     ) -> PhaseOutcome:
         """格式化失败：**归因到真正失败的那个分区**，而不是一律记在 EFI 上。
 
         以前不管是第几个分区挂的，界面都标在「创建 EFI 分区」✗ 上——现场看到
         EFI 明明成功却报它失败，误导排查方向（2026-11-10 现场就是第 2 个分区挂的）。
+
+        ``history`` 是每条途径的结果（如"第1次 diskpart（含 override）：0x80042413 …"），
+        有它就能在界面/导出包里一眼看出"试过什么、每条为何不行"，
+        而不是只看到一个假的 ``0xFFFFFFFF 途径 format.com``。
         """
-        if code in (-1, 0xFFFFFFFF):
-            # 我们自己的哨兵（工具没跑起来/被拒绝启动）：没有"退出码"可言，
-            # 直接把原因写出来，别让用户看到一个 0xFFFFFFFF。
+        tried = "；".join(history)
+        if history:
+            message = f"分区 #{position}（{part.label}）格式化失败：{len(history)} 次尝试均未成功"
+            message += f"（{tried}）"
+        elif code in (TOOL_NOT_STARTED, 0xFFFFFFFF):
+            # 工具没跑起来：没有"退出码"可言，直接把原因写出来。
             reason = tail(output, 240) or "格式化工具未能启动"
+            message = f"分区 #{position}（{part.label}）格式化失败：{reason}"
+        elif code == FALLBACK_REFUSED:
+            reason = tail(output, 240) or "兜底被安全闸拒绝"
             message = f"分区 #{position}（{part.label}）格式化失败：{reason}"
         else:
             message = (
@@ -863,6 +954,8 @@ class PartitionPhase:
             "failed_partition": position,
             "settle_ms": self._settle_ms,
             "format_attempts": self.format_attempts,
+            "format_force": self.format_force,
+            "format_history": list(history),
             "parallel_activity": activity.describe(exclude=ctx.disk_number, style="plain"),
         }
         return PhaseOutcome.failed(
@@ -965,6 +1058,29 @@ def _step_of_position(position: int) -> str:
     if position == 2:
         return "windows"
     return "data"
+
+
+def _letter_of(part: Mapping[str, Any] | None) -> str:
+    """这个分区当前的盘符：普通卷看 ``drive_letter``，ESP/隐藏卷看 ``mounted_letter``。"""
+    if not isinstance(part, Mapping):
+        return ""
+    for key in ("drive_letter", "mounted_letter"):
+        value = str(part.get(key) or "").strip().upper()[:1]
+        if value:
+            return value
+    return ""
+
+
+def _is_hidden_partition(part: Mapping[str, Any] | None) -> bool:
+    """是不是 ESP/OEM/恢复这类隐藏分区（它们只有 ``mounted_letter``）。"""
+    if not isinstance(part, Mapping):
+        return False
+    kind = str(part.get("type") or "").strip().lower()
+    if kind in HIDDEN_PARTITION_TYPES:
+        return True
+    gpt = str(part.get("gpt_type") or "").strip().lower().strip("{}")
+    # c12a7328… = EFI 系统分区；de94bba4… = Windows 恢复分区
+    return gpt.startswith(("c12a7328", "de94bba4"))
 
 
 def _actual_partition(payload: Mapping[str, Any] | Any, number: int) -> Mapping[str, Any]:

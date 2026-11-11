@@ -15,11 +15,17 @@
 
 1. 建分区那一段**只 create**（不 format、不 assign），格式化单独一段；
 2. 格式化前等「分区数与计划一致」，逐分区执行；
-3. 卷被占用时**换工具**：退避后用 ``format.com /X`` 强制卸载，交替重试；
+3. 卷被占用时先由 diskpart 自己 ``override`` 强制卸载，不行再换 ``format.com /X``；
 4. 失败要归因到真正的那个分区（以前一律记在「创建 EFI 分区」上）。
 
 外加一条安全闸：走 ``format.com`` 之前必须确认盘符真的挂在自己的目标分区上，
-否则宁可失败，绝不格式化别人的卷。
+否则宁可失败，绝不格式化别人的卷。安全闸“拒绝”与工具“失败”分开处理，
+不允许把两者的错都算成永久失败（那会把后面能用的途径全拖掉）。
+
+> 2026-11-11 现场（三块盘全卡在新建 EFI 分区）：diskpart 打出
+> `0x80042413 设备使用中` + 「若要继续操作，请使用 OVERRIDE 参数」，
+> 而 1.4.0 只会用 ``format.com``，又因为 ESP 的 ``drive_letter`` 永远是 null
+> 被安全闸拒掉——两下夹死。1.4.1 就是补这两块。
 """
 
 from __future__ import annotations
@@ -113,11 +119,13 @@ def test_create_script_only_creates_and_format_script_only_formats() -> None:
     assert one == [
         "select disk 1",
         "select partition 2",
-        "format quick fs=ntfs label=Windows",
+        "format quick fs=ntfs label=Windows override",
         "assign letter=F",
         "exit",
     ]
     assert not any(line.startswith("create") for line in one)
+    # ``force=False`` 是 1.4.0 的老行为（保留为可回退的开关）
+    assert format_lines(1, 2, parts[1], force=False)[2] == "format quick fs=ntfs label=Windows"
 
 
 # ---------------------------------------------------------------- 等卷就绪
@@ -328,3 +336,170 @@ def test_tool_startup_failure_has_a_human_message(tmp_path) -> None:
     assert "无法启动 format.com" in message
     assert "0xFFFFFFFF" not in message
     assert "前面 1 个分区已完成" in message
+
+
+# ---------------------------------------------------------------- 1.4.1：override 与 ESP
+def test_format_script_carries_override_by_default(tmp_path) -> None:
+    """2026-11-11 现场：diskpart 自己让用 OVERRIDE，所以 format 一律带 override。
+
+    卷被判「设备使用中」时，``override`` 先在卷上强制卸载再格式化；对刚在清过盘的
+    磁盘上建出来的 RAW 分区没有任何数据可丢。
+    """
+    shell = _shell()
+    ctx = _ctx(tmp_path)
+    _phase(shell).run(ctx)
+
+    format_scripts = [
+        script for script in shell.scripts if any(line.startswith("format") for line in script)
+    ]
+    assert format_scripts, "应该跑过格式化脚本"
+    for script in format_scripts:
+        line = next(item for item in script if item.startswith("format"))
+        assert line.endswith(" override"), line
+    assert any("override" in title for title in shell.titles)
+
+
+def test_format_force_can_be_switched_off(tmp_path) -> None:
+    """``format_force=False`` 回到 1.4.0 的老行为（留一条可回退的路）。"""
+    shell = _shell()
+    ctx = _ctx(tmp_path)
+    outcome = _phase(shell, format_force=False).run(ctx)
+
+    assert outcome.ok is True
+    format_scripts = [
+        script for script in shell.scripts if any(line.startswith("format") for line in script)
+    ]
+    for script in format_scripts:
+        line = next(item for item in script if item.startswith("format"))
+        assert not line.endswith("override")
+    assert not any("override" in title for title in shell.titles)
+
+
+def test_esp_fallback_passes_the_ownership_gate_via_mounted_letter(tmp_path) -> None:
+    """**2026-11-11 的回归**：ESP 只有 ``mounted_letter``，兜底不能再被误拒。
+
+    现场日志：``盘符 E: 与分区 #1（EFI）对不上，放弃 format.com 兜底``——ESP 的
+    ``drive_letter`` 永远是 null，只看它必然"对不上"，而 ESP 恰恰是最需要兜底的。
+    """
+    ctx = _ctx(tmp_path)
+    shell = _shell(diskpart_handler=_fails_partition(1))
+    outcome = _phase(shell, format_attempts=2).run(ctx)
+
+    assert outcome.ok is True, outcome.message
+    assert shell.formats == [("E", "FAT32", "EFI")], "ESP 也要能用兜底"
+    assert "对不上" not in ctx.log.summary()
+
+
+def test_data_partition_without_drive_letter_is_still_refused(tmp_path) -> None:
+    """严格性不降：数据分区（非隐藏类型）只有 mounted_letter 时仍然拒绝兜底。"""
+    parts = _parts()
+    payload = build_snapshot(parts)
+    for part in payload["partitions"]:
+        if part.get("number") == 2:
+            part["drive_letter"] = None
+            part["mounted_letter"] = "F"  # 看着像有盘符，但它不是隐藏分区
+
+    ctx = _ctx(tmp_path)
+    shell = _shell(diskpart_handler=_fails_partition(2), query_handler=lambda _d: payload)
+    outcome = _phase(shell, format_attempts=2).run(ctx)
+
+    assert outcome.ok is False
+    assert shell.formats == [], "数据分区不许靠 mounted_letter 蒙混过关"
+
+
+def test_mounted_letter_size_mismatch_is_refused(tmp_path) -> None:
+    """容量对不上就不能格式化（防止盘号漂移把别人的卷格掉）。"""
+    parts = _parts()
+    payload = build_snapshot(parts)
+    for part in payload["partitions"]:
+        if part.get("number") == 1:
+            part["size_bytes"] = int(part["size_bytes"]) + 8 * 1024 * 1024  # +8 MB
+
+    ctx = _ctx(tmp_path)
+    shell = _shell(diskpart_handler=_fails_partition(1), query_handler=lambda _d: payload)
+    outcome = _phase(shell, format_attempts=2).run(ctx)
+
+    assert outcome.ok is False
+    assert shell.formats == []
+
+
+def test_refused_fallback_keeps_going_through_the_plan(tmp_path) -> None:
+    """安全闸拒绝 ≠ 失败：还要继续试后面的途径（1.4.0 就是在这里 break 掉的）。"""
+    parts = _parts()
+    payload = build_snapshot(parts)
+    for part in payload["partitions"]:
+        if part.get("number") == 2:
+            part["drive_letter"] = None  # 数据分区拿不到盘符 → 兜底必被拒
+
+    def diskpart(lines, _title, _timeout):
+        joined = " ".join(lines)
+        is_format = any(line.startswith("format") for line in lines)
+        if "select partition 2" in joined and is_format:
+            return VDS_IN_USE, "虚拟磁盘服务错误: 设备使用中。"
+        if not is_format and "assign letter" in joined:
+            return ACCESS_DENIED, "指定的驱动器号不是空闲的"
+        return 0, "ok"
+
+    ctx = _ctx(tmp_path)
+    shell = _shell(diskpart_handler=diskpart, query_handler=lambda _d: payload)
+    outcome = _phase(shell).run(ctx)
+
+    assert outcome.ok is False
+    # 4 次尝试：diskpart、format.com(拒)、diskpart、format.com(拒)
+    p2 = [
+        script
+        for script in shell.scripts
+        if "select partition 2" in " ".join(script)
+        and any(item.startswith("format") for item in script)
+    ]
+    assert len(p2) == 2, "被拒绝之后必须再走一次 diskpart"
+    assert shell.formats == []
+    text = ctx.log.summary()
+    assert "继续下一种途径" in text
+    assert "0xFFFFFFFF" not in text
+
+
+def test_tool_not_started_and_refused_report_every_way(tmp_path) -> None:
+    """失败信息要把每条途径都列出来，而不是只留最后一个假错误码。"""
+    ctx = _ctx(tmp_path)
+    shell = _shell(
+        diskpart_handler=_fails_partition(2),
+        format_handler=lambda _l, _f, _v: (-1, "[WinError 193] 不是有效的 Win32 应用程序"),
+    )
+    outcome = _phase(shell).run(ctx)
+
+    assert outcome.ok is False
+    message = outcome.message or ""
+    assert "4 次尝试均未成功" in message
+    assert "diskpart（含 override）" in message
+    assert "format.com /X" in message
+    assert "0x80042413" in message
+    assert "0xFFFFFFFF" not in message
+    assert "不是有效的 Win32 应用程序" in message
+    assert len(outcome.details["format_history"]) == 4
+    assert outcome.details["format_force"] is True
+
+
+def test_tool_not_started_does_not_stop_the_next_diskpart_try(tmp_path) -> None:
+    """format.com 没跑起来（哨兵 -1）只是这条路不通，后面还能成功。"""
+    calls = {"diskpart": 0}
+
+    def diskpart(lines, _title, _timeout):
+        joined = " ".join(lines)
+        if "select partition 2" in joined and "format" in joined:
+            calls["diskpart"] += 1
+            if calls["diskpart"] == 1:
+                return VDS_IN_USE, "设备使用中"
+            return 0, "ok"
+        return 0, "ok"
+
+    ctx = _ctx(tmp_path)
+    shell = _shell(
+        diskpart_handler=diskpart,
+        format_handler=lambda _l, _f, _v: (-1, "找不到 format.com"),
+    )
+    outcome = _phase(shell, format_attempts=3).run(ctx)
+
+    assert outcome.ok is True, outcome.message
+    assert calls["diskpart"] == 2, "第 3 次又回到 diskpart，并且这次成功了"
+    assert "不可用" in ctx.log.summary()

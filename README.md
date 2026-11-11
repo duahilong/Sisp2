@@ -101,11 +101,12 @@ python -m pytest tests/ -q
 
 ## 版本与定版
 
-当前版本：**v1.4.0**（1.2.0 起移除演练模式，启动即真实写盘；预览改用只读的
+当前版本：**v1.4.1**（1.2.0 起移除演练模式，启动即真实写盘；预览改用只读的
 `prepare` + `/api/partition/preview`）。1.3.0 加了「安装页一键导出日志」与
-「日志用型号说话」；1.4.0 把「建分区」与「格式化」拆成两段，并加了
-`format.com /X` 兜底。功能语义以 tag 上的代码与文档为准；
-变更历史见 [CHANGELOG.md](CHANGELOG.md)。
+「日志用型号说话」；1.4.0 把「建分区」与「格式化」拆成两段并加了
+`format.com /X` 兜底；1.4.1 让 `format` 一律带 diskpart 的 `override`
+（强制卸载卷），并修好「ESP 没有可见盘符导致兜底永远被拒」的死结。
+功能语义以 tag 上的代码与文档为准；变更历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 - 版本号只有一处来源：`app/version.py` 的 `__version__`，`packaging/version_info.txt`
   与它由 `tests/test_packaging.py` 强校验（界面标题、`/api/info`、exe 的 FileVersion 都用它）。

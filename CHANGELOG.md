@@ -7,6 +7,61 @@ tag 上的提交树就是那一版的完整代码与文档快照。
 定版（`v1.1.0`）之后只做优化与修复：功能以 tag 为准，`main` 继续向前走，
 需要回到某一版时 `git checkout v1.1.0` 或 `git archive v1.1.0`。
 
+## 1.4.1 — 格式化：用上 diskpart 自己的 `override`，修好 ESP 兜底的死结
+
+现场（2026-11-11 13:53，三块盘：GeIL G7T 1TB ×2、GeIL P3L 512GB）三份日志
+**同一个位置、同一个错误码**：
+
+```
+13:53:38  create partition efi size=100           成功
+13:53:41  卷就绪：盘上已有 4 个分区（计划 4）
+13:53:43  format quick fs=fat32 label=EFI         卡在 0% 8.5 秒
+13:53:51  虚拟磁盘服务错误: 设备使用中。
+          所选的卷或分区正在使用。
+          若要继续操作，请使用 OVERRIDE 参数。     ← Windows 自己给了答案
+13:53:56  assign letter=E                         成功（drive_letter=null, mounted_letter=E）
+13:53:58  盘符 E: 与分区 #1（EFI）对不上，放弃 format.com 兜底   ← 我们把自己的退路堵死了
+```
+
+### 三层原因
+
+1. **Windows 侧**：刚建好的分区被判「设备使用中」（VDS `0x80042413`），
+   diskpart 明确提示「若要继续操作，请使用 OVERRIDE 参数」；
+2. **我们的漏洞一**：`format.com /X` 兜底要先校验盘符归属，而 ESP 是隐藏卷，
+   `drive_letter` 永远是 `null`、真盘符只在 `mounted_letter` —— 只看 `drive_letter`
+   必然「对不上」，于是**最需要兜底的 ESP 恰恰永远拿不到兜底**；
+3. **我们的漏洞二**：安全闸「拒绝」返回 `-1`，被 `is_transient_diskpart_exit()`
+   判成永久失败 → `break`，后面真正能用的途径（含从未尝试过的 `override`）全被掐掉。
+
+### 改法
+
+| # | 改动 | 落点 |
+| --- | --- | --- |
+| 1 | **`format` 一律带 `override`**（第一次就用）：对刚在清过盘的磁盘上建出来的 RAW 分区没有任何数据可丢，而 `override` 就是 VDS `FormatPartitionEx` 的 `bForce`；它按「磁盘号 + 分区号」选对象，**不需要盘符**，ESP 也能用 | `partitions.FORMAT_OVERRIDE` / `format_lines(..., force=True)` |
+| 2 | **ESP 盘符识别**：`drive_letter` **或** `mounted_letter`，但只有隐藏类型（`System`/`OEM`/`Recovery`/GPT GUID `c12a7328…`）才允许走 `mounted_letter` 这条道；数据分区仍然必须精确命中 `drive_letter`，并且都要过容量核对（≤ 2 MB） | `_letter_of()` / `_is_hidden_partition()` / `_letter_belongs_to()` |
+| 3 | **拒绝 ≠ 失败**：安全闸拒绝 `FALLBACK_REFUSED(-2)`、工具没起来 `TOOL_NOT_STARTED(-1)` 各自记账并**继续下一种途径**，不再 `break` | `_format_one()` / `_format_with_tool()` |
+| 4 | **失败文案如实汇总**：`4 次尝试均未成功（第1次 diskpart（含 override）：0x80042413…；第2次 format.com /X：…）`，不再出现假的 `0xFFFFFFFF 途径 format.com`；`details` 增加 `format_history` / `format_force` | `_partition_failure()` |
+| 5 | 去掉重复等待：`_wait_volumes()` 末尾不再多等一次 `partitionSettleMs`（逐分区那次已经等过，省 1 秒/分区） | `_wait_volumes()` |
+
+`format_force=False` 保留为可回退开关（回到 1.4.0 的“先普通 format、失败再换工具”）。
+
+### VM 验证（两块 120 GB 一次性 VHD，Disk 2/3；Disk 0/1 事后逐项核对未变）
+
+自建 `diskpart.exe` 包装器，新增两条注入：`require_override=1`（不带 `override`
+的 `format` 一律返回 `0x80042413`）、`format_fail_label=EFI`（EFI 的 `format` 永久失败）。
+
+| 场景 | 源码版 | 打包 exe |
+| --- | --- | --- |
+| S1 不带 override 就失败 | 第 1 次 `diskpart（含 override）` 直接过，3 个分区全部格式化，验收通过；`nooverride` 计数 **0** | 同上（`1.4.1.0`、`python=3.14.6`） |
+| S2 EFI 的 diskpart 永久失败 | 第 2 次走 `format.com G: /FS:FAT32 /Q /Y /X /V:EFI` → 成功 → 验收通过（**1.4.0 在这里报“对不上”直接放弃**） | 同上 |
+| S3 全部途径都失败 | `步骤 ✗ 创建 EFI 分区`，原因列出两条途径（`0x80042413` + format.com 的退出码），无 `0xFFFFFFFF`，其余步骤 skipped | — |
+
+- 单测 **682 passed**（1.4.0 为 674），`ruff` / `compileall` / `ui_check` 全绿；
+- `POST /api/logs/export` 在 1.4.1 exe 上仍可用（9,641 B，含 `summary.txt/json`、
+  `logs/`、`settings.json`）；
+- 收尾：VHD 已 detach 并删除、无 `diskpart`/`ghost64`/`Sisp2-141` 残留、8892/8893 无监听；
+  Disk 1 分区（100 / 307200 / 1600428 MB）逐项未变。
+
 ## 1.4.0 — 分区彻底重做：建分区与格式化拆开 + `format.com /X` 兜底
 
 现场（2026-11-10，4 块 NVMe 只成功 1 块）导出的三份日志把问题钉死了：

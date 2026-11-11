@@ -292,12 +292,13 @@ def test_diskpart_script_layout():
     assert not any(line.startswith("format") for line in layout)
     assert not any(line.startswith("assign") for line in layout)
 
-    # 格式化单独一段，且一次只处理一个分区
+    # 格式化单独一段，且一次只处理一个分区（1.4.1 起 format 带 override：
+    # 卷被判「设备使用中」时由 diskpart 自己强制卸载，见 2026-11-11 现场日志）
     windows = format_lines(2, 2, parts[1])
     assert windows == [
         "select disk 2",
         "select partition 2",
-        "format quick fs=ntfs label=Windows",
+        "format quick fs=ntfs label=Windows override",
         "assign letter=F",
         "exit",
     ]

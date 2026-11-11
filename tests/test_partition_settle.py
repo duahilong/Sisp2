@@ -124,7 +124,9 @@ def test_settle_happens_between_diskpart_calls(tmp_path) -> None:
     log_text = ctx.log.summary()
     assert "删除 MSR 前：等待 1000 ms" in log_text
     assert "建分区前：等待 1000 ms" in log_text
-    assert "格式化前：等待 1000 ms" in log_text
+    # 1.4.1 起只等一次（卷就绪后不再重复等，见 _wait_volumes）
+    assert "格式化分区 #1（EFI，第 1 次）前：等待 1000 ms" in log_text
+    assert "格式化前：等待 1000 ms" not in log_text, "卷就绪后不再重复等待"
     assert delays and set(delays) == {1.0}
 
 
@@ -154,7 +156,7 @@ def test_settle_is_clamped_for_absurd_values(tmp_path) -> None:
 
 
 def test_no_settle_needed_when_there_is_no_msr(tmp_path) -> None:
-    """没有 MSR 时少一次 diskpart，但「建分区前 / 格式化前」的等待仍然要有。"""
+    """没有 MSR 时少一次 diskpart，但「建分区前 / 逐分区格式化前」的等待仍然要有。"""
     delays: list[float] = []
     phase = PartitionPhase(_shell(msr=None), sleep=delays.append)
     outcome = phase.run(_ctx(tmp_path))

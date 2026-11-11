@@ -534,21 +534,44 @@ def create_geometry_lines(
     return lines
 
 
+#: 格式化时是否带上 diskpart 的 ``override``（**强制卸载卷**再格式化）。
+#:
+#: 2026-11-11 现场：三块盘（两块 GeIL G7T 1TB、一块 P3L 512GB）全部卡在刚建好的
+#: EFI 分区上，``format quick fs=fat32`` 打 ``0x80042413``「设备使用中」，而 diskpart
+#: 自己就把答案打在了屏幕上——「若要继续操作，请使用 OVERRIDE 参数」。
+#:
+#: ``override`` 等于 VDS 里 ``FormatPartitionEx`` 的 ``bForce``：先把卷强制卸载
+#: （让所有打开的句柄失效）再格式化。对我们**刚在清过盘的磁盘上建出来的 RAW
+#: 分区**来说没有任何数据可丢，所以它是安全的；更关键的是它按"磁盘号 + 分区号"
+#: 选对象，**不需要盘符**——ESP 这种隐藏分区也能用，而 ``format.com /X`` 必须
+#: 先有一个可见盘符（ESP 的 ``drive_letter`` 永远是 null）。
+FORMAT_OVERRIDE = True
+
+
 def format_lines(
     disk_number: int,
     position: int,
     part: PlannedPartition,
+    *,
+    force: bool = FORMAT_OVERRIDE,
 ) -> list[str]:
     """第 4 段（格式化）：**只处理一个分区**——格式化 + 分配盘符。
 
     一次 diskpart 只干一个分区，好处有三：失败能精确归因到"第几个分区"、
     重试只重跑这一块（不会连带把后面几个 create 一起作废）、每次之间都能插入
     等待与重扫（现场正是缺这个空档）。
+
+    ``force=True``（默认，见 :data:`FORMAT_OVERRIDE`）时格式化成
+    ``format quick fs=… label=… override``：卷被判"设备使用中"时由 diskpart
+    自己强制卸载，这是 2026-11-11 现场唯一真正有效的办法。
     """
+    line = f"format quick fs={part.file_system.lower()} label={part.label}"
+    if force:
+        line += " override"
     lines = [
         f"select disk {int(disk_number)}",
         f"select partition {int(position)}",
-        f"format quick fs={part.file_system.lower()} label={part.label}",
+        line,
     ]
     if part.letter:
         lines.append(f"assign letter={part.letter}")
@@ -625,8 +648,9 @@ def preview_segments(
             + ["exit"],
             "dynamic": True,
             "note": (
-                "实际执行时每个分区单独一次 diskpart；卷被占用（0x80042413）时"
-                "退避重试，仍不行则改用 format.com /X（强制卸载卷）"
+                "实际执行时每个分区单独一次 diskpart，format 一律带 override"
+                "（强制卸载卷）；卷仍被占用（0x80042413）时退避重试，"
+                "再不行则改用 format.com /X"
             ),
         },
     ]
