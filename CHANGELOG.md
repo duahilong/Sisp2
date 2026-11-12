@@ -7,6 +7,49 @@ tag 上的提交树就是那一版的完整代码与文档快照。
 定版（`v1.1.0`）之后只做优化与修复：功能以 tag 为准，`main` 继续向前走，
 需要回到某一版时 `git checkout v1.1.0` 或 `git archive v1.1.0`。
 
+## 未发布（main）— 优化第一批：热点路径与死代码
+
+只做性能/健壮性优化，不改对外行为、写盘路径与安全语义（`ruff check` 全绿、`pytest` 707 passed；
+源码与 exe 各在 300 GB VHDX 上跑一遍真实写盘，均全步骤 ok）。
+
+### 1. 命令日志
+
+- `CommandLog.block()` / `banner()` 改成整块一次写入：diskpart 脚本预览、命令的完整输出
+  动辄几十上百行，原来每行一次 open/close（Windows 上这几个系统调用比写内容本身贵得多）；
+- 内存摘要从无界 list 改成 `deque(maxlen=1000)` + `islice` 取最后 40 行：写镜像两个小时
+  也不再无界增长；
+- `streaming()` 的写入补捕获 `ValueError`（句柄已关闭时读取线程仍在写，原来会打崩读取线程）。
+
+### 2. 事件与任务
+
+- `WebApi` 事件缓冲：`list` 切片淘汰改成 `deque(maxlen=5000)` + `_base` 递增，消除每次
+  溢出的 O(n) 整体复制；游标语义（`cursor = _base + 下标`）完全不变；
+- `JobManager` 的 `on_step` 签名探测按执行器缓存，不再每个任务调一次 `inspect.signature()`。
+
+### 3. 工具探测与脚本编码
+
+- `find_program` 加 `functools.cache`：`WindowsDiskRunner` 按任务造 `DiskpartShell`，
+  8 块盘就是几十次 `shutil.which` + System32 目录探测（`tests/conftest.py` 在用例间清缓存）；
+- diskpart `/s` 脚本编码从 `ascii` 改成 `mbcs`（`/s` 只认系统代码页）：非 ASCII 卷标/说明
+  原来会在真正调起 diskpart 之前抛 `UnicodeEncodeError`；映射不了时回退 `errors="replace"`。
+
+### 4. SSE 心跳
+
+`except (asyncio.TimeoutError, TimeoutError)`：`asyncio.TimeoutError` 到 3.12 才与内置
+`TimeoutError` 统一，3.10/3.11 上只写后者会漏捕，表现成“SSE 每 15 秒断一次”。
+
+### 5. 清理与文案
+
+- 删除无引用代码：`api._session_ready`、`real_runner._which`、`workflow._service_injected`、
+  `main.js` 的 `goStep` 导入、`state.js` 的 `freeBytes` 导入、`shell.js` 里 CSS 不存在的
+  `'dry'` class 操作；
+- 设置页 `autoRefresh` 的说明改成“只保存、不参与行为”，与 1.5.0 起的实际代码一致。
+
+### 6. 测试工具
+
+- `tools/ui_smoke.mjs` 新增 `--disk <盘号>`；`--start --allow-write` 缺少 `--disk` 时
+  直接以退出码 2 拒绝运行——它默认选“容量最大的可选盘”，在多盘测试机上会选中真实数据盘。
+
 ## 1.5.0 — 单实例（一台电脑只许开一个）+ 启动提速（窗口早 2 秒、首屏早 3 秒）
 
 ### 1. 单实例：不允许开第二个

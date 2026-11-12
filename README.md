@@ -23,7 +23,7 @@ python -m app.gui_web.main
 python -m app.gui_web.main --serve
 ```
 
-扫盘、装机向导、修复引导、镜像索引全部在界面里完成，命令行已经不是必需入口（`app.cli` 已移除）。**分区只在装机向导里做**（整盘重建 EFI + 系统 + 数据分区）：单盘级的新建/格式化/删分区属于破坏性操作，请用 Windows 磁盘管理（`diskmgmt.msc`）——历史上那套 `/api/partition/*` 已于 2026-11 移除。启动即真实模式：**确认后会把选中的磁盘重新分区**。要看“会执行什么”，用只读的计划与脚本预览——向导第 4 步、`POST /api/prepare`、`GET /api/partition/preview` 都不执行命令；真正写盘只发生在 `POST /api/confirm` 之后。启动 GUI/服务不等同于安全操作，请先备份并核对盘号与身份。
+扫盘、装机向导、修复引导、镜像文件头校验全部在界面里完成，命令行已经不是必需入口（`app.cli` 已移除）。**分区只在装机向导里做**（整盘重建 EFI + 系统 + 数据分区）：单盘级的新建/格式化/删分区属于破坏性操作，请用 Windows 磁盘管理（`diskmgmt.msc`）——历史上那套单盘分区接口（`/api/partition/*`）已于 2026-11 移除，只保留只读的 `POST /api/partition/preview`。启动即真实模式：**确认后会把选中的磁盘重新分区**。要看“会执行什么”，用只读的计划与脚本预览——向导第 4 步、`POST /api/prepare`、`POST /api/partition/preview` 都不执行命令；真正写盘只发生在 `POST /api/confirm` 之后。启动 GUI/服务不等同于安全操作，请先备份并核对盘号与身份。
 
 **只允许开一个实例**：第二次启动会先把已打开的窗口叫到前台，然后以退出码 6 退出
 （`--serve` 只打一行提示；排障/自动化测试可加 `--allow-multiple`）。

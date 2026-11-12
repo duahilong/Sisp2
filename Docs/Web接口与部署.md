@@ -35,10 +35,10 @@ python -m app.gui_web.main --serve --port 8765
 | `GET /api/info` | 版本、平台 |
 | `POST /api/session` | 取本次会话（预检 + 扫盘 + 任务载荷快照）。**1.5.0 起**：启动时后台已经热身，不带 body（或 `{}`）直接返回缓存，不会再扫一次盘；要强制重扫请传 `{"force": true}` |
 | `GET /api/disks` | 重扫硬盘 |
-| `POST /api/prepare` | `{selection}`；selection 为盘号数组或盘号到覆盖对象的映射（每盘覆盖支持 `c_size`、`data_size`、`data_partitions`、`win_gho`）；省略 selection 表示「本次扫描里所有可选定的盘」，显式传空数组仍然报错（`E_PREPARE`） |
+| `POST /api/prepare` | `{selection}`；selection 为盘号数组或盘号到覆盖对象的映射（每盘覆盖支持 `efi_size`、`c_size`、`data_size`、`data_partitions`、`win_gho`；`*_size_gb` / `efi_size_mb` 是等价长名）；省略 selection 表示「本次扫描里所有可选定的盘」，显式传空数组仍然报错（`E_PREPARE`） |
 | `POST /api/submit` | 登记等待确认任务 |
 | `POST /api/confirm` | `{job_ids}`；把等待确认的任务放行（授权来自界面上的勾选，不需要额外文本）|
-| `POST /api/cancel` | `{job_id}`，协作式取消 |
+| `POST /api/cancel` | `{job_id}`，协作式取消（只置取消标志并立即返回）；**不传 `job_id` 时取消当前全部任务** |
 | `GET /api/jobs` | 任务列表（首屏兜底，SSE 未连上时也能画出进度） |
 | `GET /api/jobs/{job_id}` | 单任务查询（含 `progress`） |
 | `GET /api/jobs/{job_id}/log?tail=200` | 任务日志尾部；只允许日志目录（`logDir`，留空时是 `%APPDATA%\Sisp\logs`）下的 `.log` 文件，越界返回 `E_PATH`。任务运行中 `details["log_path"]` 还不存在，此时按文件名里的盘号（`disk-runner-d<N>-*.log`）找「不早于任务启动时刻」的最新一份；都没有则返回 `message` 说明原因 |
@@ -55,7 +55,7 @@ python -m app.gui_web.main --serve --port 8765
 | `POST /api/settings/export`、`POST /api/settings/import` | 导出/导入设置（封套 `{"version":1,"settings":{…}}`；导入任一字段非法则整体拒绝） |
 | `POST /api/settings/probe` | `{key, path?}` 路径探测；给 `path` 时探测这个“草稿值”（设置页选完还没保存），不给就探测已保存值 |
 | `POST /api/settings/open_folder` | 打开设置文件夹（Windows） |
-| `POST /api/dialog/pick` | `{key, kind}` 弹原生文件/目录选择框（`file` / `dir` / `save`）。由本进程用 System.Windows.Forms / `IFileOpenDialog` 弹，**不依赖 pywebview 窗口**（桌面模式下窗口在父进程，API 在提权子进程）；只返回 `{path}`，**不写入设置**，由界面放进草稿等“保存设置” |
+| `POST /api/dialog/pick` | `{key, kind}` 弹原生文件/目录/保存选择框（`file` / `dir` / `save`）。由本进程用 System.Windows.Forms / `IFileOpenDialog` 弹，**不依赖 pywebview 窗口**（桌面模式下窗口在父进程，API 在提权子进程）；返回 `{path, cancelled: false}`，用户取消返回 `{cancelled: true}`。**不写入设置**，由界面放进草稿等“保存设置” |
 
 业务路由以同步 `def` 实现，由 FastAPI 在线程池运行。
 
@@ -73,7 +73,7 @@ python -m app.gui_web.main --serve --port 8765
      "size_display":"120.00 GB","letter":"F"},
     {"role":"data","label":"Data","file_system":"NTFS","size_mb":307200,
      "size_display":"300.00 GB","letter":"G"},
-    {"role":"data2","label":"Data2","file_system":"exFAT","size_mb":204800,
+    {"role":"data2","label":"Data2","file_system":"NTFS","size_mb":204800,
      "size_display":"200.00 GB","letter":"H"}
   ],
   "unallocated_bytes": 0
@@ -101,7 +101,7 @@ SSE 首帧为 `snapshot`，包含 `poll_events(cursor, 1000)` 返回的可用补
 ```json
 {"key":"windows","status":"running",
  "message":"正在安装系统分区",
- "progress":{"total":6,"completed":["efi"],"current":"windows","percent":33,"message":"正在安装系统分区"}}
+ "progress":{"total":7,"completed":["efi"],"current":"windows","percent":14,"message":"正在安装系统分区"}}
 ```
 
 `key` 取 `STEP_TITLES` 的键（`efi/windows/data/layout/image/boot/copy`），`status` 是
@@ -126,9 +126,10 @@ ui/
    ├─ main.js        # 入口：装配、渲染调度、事件流、轮询
    ├─ api.js         # REST 封装（统一解 {ok,data} / {ok,error}）、EventSource
    ├─ dom.js         # $ / $$ / esc / 事件委托 / 时间戳
-   ├─ derive.js      # 纯函数：容量格式化、分区地图切片、大小校验
+   ├─ derive.js      # 纯函数：容量格式化、分区地图切片、大小校验、计划/进度分组
    ├─ state.js       # 唯一可变状态 + 订阅通知 + 向导数据操作
    ├─ shell.js       # 外壳：菜单、工具栏、日志坞、状态栏、toast、弹窗、主题
+   ├─ engine-guard.js# ES5 兜底：内核跑不了 ES 模块 / 主模块未启动时在页顶报警
    ├─ view-main.js   # 主页面：磁盘概览条、盘头、分区地图、分区明细表
    ├─ view-install.js# 系统安装：4 步向导 + 进度页
    ├─ view-settings.js # 设置页
@@ -138,7 +139,9 @@ ui/
 ### 开发约定
 
 - **ES 模块，无构建步骤**：`<script type="module">` 直接加载，模块之间用相对路径
-  `import './x.js'`。新增文件后要同时更新 `tests/test_ui_assets.py` 的文件清单。
+  `import './x.js'`。新增文件会被 `tools/ui_check.py` 自动扫到（它对 `ui/js/*.js` 逐个
+  做语法/引用/导出核对）；`tests/test_ui_assets.py::test_ui_files_present` 只断言必需文件
+  存在，不需要手工维护清单。
 - **渲染策略**：事件 → 改 `state` → `notify()` → `render()`。只有视图读状态，写状态
   的地方改完必须 `notify()`；`main.js` 里对向导和设置页各加了一层防抖，避免进度事件
   把正在输入的输入框刷掉。
@@ -153,9 +156,10 @@ ui/
   `[hidden]{display:none!important}` 兜底——否则一块空的遮罩能把整个界面糊成背景色。
 - 页面始终由本机 HTTP 服务加载（桌面窗口与 `--serve` 相同），不存在 pywebview
   `js_api` 桥接分支。
-- 任务更新只通过 `EventSource` 连接 `GET /api/events`；断线由浏览器按 `Last-Event-ID`
-  自动重连，重连后服务端补发快照。另外两处拉取是刻意保留的兜底，不是周期轮询：
-  首屏 `GET /api/jobs`，进度页的日志尾部 `GET /api/jobs/{id}/log?tail=`。
+- 任务更新的主通道是 `EventSource` 连接 `GET /api/events`；断线由浏览器按
+  `Last-Event-ID` 自动重连，重连后服务端补发快照。另有两条刻意保留的拉取路径：
+  首屏 `GET /api/jobs`（SSE 未连上时的兜底），以及进度页在运行中每 1.5 s 一次的
+  `GET /api/jobs` + `GET /api/jobs/{id}/log?tail=` 轮询（日志区只在展开时拉）。
 - 设置页的字段表（`FIELDS` / `LABELS`）在前端，因为 `GET /api/settings` 只回
   `{settings, warnings, sections, pathKeys}`。`tests/test_ui_assets.py` 会拿
   `settings.DEFAULTS` 逐个对账，后端加键而前端没加会直接失败。
@@ -167,9 +171,13 @@ ui/
 
 ```powershell
 python tools/ui_check.py                                                  # 语法/引用/纯函数行为
-node tools/ui_smoke.mjs --url http://127.0.0.1:8765/ --out build/shots     # 浏览器冒烟 + 截图
-node tools/ui_smoke.mjs --url http://127.0.0.1:8901/ --start --allow-write --out build/shots  # 再跑到进度页（会真实写盘，只对临时盘）
+node tools/ui_smoke.mjs --url http://127.0.0.1:8765/ --disk 2 --out build/shots     # 浏览器冒烟 + 截图（只读，--disk 钉住测试盘）
+node tools/ui_smoke.mjs --url http://127.0.0.1:8901/ --disk 2 --start --allow-write --out build/shots  # 再跑到进度页（会真实写盘）
 ```
+
+选盘默认是“容量最大的可选盘”；**真实写盘路径（`--start --allow-write`）必须同时给
+`--disk <盘号>`**，否则脚本直接以退出码 2 拒绝——在有多块大盘的测试机上“选最大”会选到
+真实数据盘，一次冒烟就把用户数据清掉。
 
 `ui_check.py` 也需要 `node`（只做语法与纯函数行为，不挂浏览器依赖）；没有 `node`
 时打印“跳过”并以 0 退出。`ui_smoke.mjs` 用 headless Chrome 的 DevTools 协议走一遍
