@@ -33,10 +33,18 @@ tag 上的提交树就是那一版的完整代码与文档快照。
 - diskpart `/s` 脚本编码从 `ascii` 改成 `mbcs`（`/s` 只认系统代码页）：非 ASCII 卷标/说明
   原来会在真正调起 diskpart 之前抛 `UnicodeEncodeError`；映射不了时回退 `errors="replace"`。
 
-### 4. SSE 心跳
+### 4. SSE 心跳（3.10 上真的会断流）
 
-`except (asyncio.TimeoutError, TimeoutError)`：`asyncio.TimeoutError` 到 3.12 才与内置
-`TimeoutError` 统一，3.10/3.11 上只写后者会漏捕，表现成“SSE 每 15 秒断一次”。
+旧实现是 `asyncio.wait_for()` + `except TimeoutError`。`asyncio.TimeoutError` 在 3.10 是
+独立类（MRO `TimeoutError → Exception`），到 3.11 才是内置 `TimeoutError` 的别名
+（MRO `TimeoutError → OSError`），所以 3.10 上这个 except 捕不到 → SSE 每 15 秒断一次
+（3.10.11 实测：`asyncio.exceptions.TimeoutError` 直接漏出去）。
+
+现在改用 `asyncio.wait({task}, timeout=)`：超时**不抛异常**，只返回空的 done 集合，
+3.10–3.13 行为完全一致；`finally` 里 cancel + await 掉 `queue.get()`，客户端断开时也不会
+再出现 `coroutine 'Queue.get' was never awaited`（pytest 输出里出现过这条 RuntimeWarning）。
+逻辑抽到 `app/gui_web/sse.py`（不 import FastAPI，方便单测与低版本实测），
+`tests/test_sse_heartbeat.py` 钉住三条行为。
 
 ### 5. 清理与文案
 
@@ -49,6 +57,13 @@ tag 上的提交树就是那一版的完整代码与文档快照。
 
 - `tools/ui_smoke.mjs` 新增 `--disk <盘号>`；`--start --allow-write` 缺少 `--disk` 时
   直接以退出码 2 拒绝运行——它默认选“容量最大的可选盘”，在多盘测试机上会选中真实数据盘。
+- **第 4 步（确认页）的断言以前永远被跳过**：危险提示本身就是 `.warnbox.warnline`，
+  旧代码把 `.warnbox` 一律当 error。现在只有“没有任何计划卡片”才算生成计划失败；
+  数据分区数改成数 `.pline[data-role^="data"]`（`partRowHtml` 补了 `data-role`），
+  盘符改成数 `.lbadge:not(.ghost)`，并要求最后一个分区显示“剩余空间（约 …）”。
+- **第 2 步“删掉 E 再加回去”其实一直失败**：把 C|D 拖到 0.999 后剩余空间不够，
+  `addExtraPartition` 返回 false、界面只弹 toast。现在先点快捷容量 150 复位再加，
+  并新增 `step2extraBack` 断言；最后稳定在 120（四分区路径）。
 
 ## 1.5.0 — 单实例（一台电脑只许开一个）+ 启动提速（窗口早 2 秒、首屏早 3 秒）
 

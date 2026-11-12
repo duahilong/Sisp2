@@ -94,7 +94,7 @@ python -m app.gui_web.main --serve --port 8765
 
 ## SSE 游标与缓冲
 
-SSE 首帧为 `snapshot`，包含 `poll_events(cursor, 1000)` 返回的可用补发事件及任务快照；后续帧为 `{cursor, event, jobs}`，事件帧 `id` 为整数 `seq`。客户端重连时服务端取查询参数 `cursor` 与合法数字 `Last-Event-ID` 的较大值。空闲约 15 秒发 `: ping`。每个连接订阅 JobManager，连接结束时取消订阅。
+SSE 首帧为 `snapshot`，包含 `poll_events(cursor, 1000)` 返回的可用补发事件及任务快照；后续帧为 `{cursor, event, jobs}`，事件帧 `id` 为整数 `seq`。客户端重连时服务端取查询参数 `cursor` 与合法数字 `Last-Event-ID` 的较大值。空闲约 15 秒发 `: ping`（实现是 `asyncio.wait(timeout=)`：超时**不抛异常**，因此不受 `asyncio.TimeoutError` 在 3.10 与 3.11+ 的类差异影响，见 `app/gui_web/sse.py`）。每个连接订阅 JobManager，连接结束时取消订阅。
 
 进度事件是 `job.step`：
 
