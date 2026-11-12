@@ -35,6 +35,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.gui_web.sse import wait_for_event
 from app.resources import ui_path
 
 _LOGGER = logging.getLogger(__name__)
@@ -256,14 +257,11 @@ def create_app(
                 while True:
                     if await request.is_disconnected():
                         break
-                    try:
-                        item = await asyncio.wait_for(
-                            queue.get(), timeout=_SSE_HEARTBEAT_SECONDS
-                        )
-                    except (asyncio.TimeoutError, TimeoutError):
-                        # 3.10/3.11 里 ``asyncio.TimeoutError`` 还不是内置
-                        # ``TimeoutError`` 的别名（3.12 起才统一），只捕后者会漏掉，
-                        # 表现成“SSE 每 15 秒断一次”。两个都写才能兑底 3.10+。
+                    # 超时算心跳（不抛异常）：asyncio.TimeoutError 到 3.12 才与内置
+                    # TimeoutError 统一，3.10 上两者是不同类；具体处理在
+                    # app/gui_web/sse.py 里（可直接单测，也能在 3.10 解释器下跑）。
+                    item = await wait_for_event(queue, _SSE_HEARTBEAT_SECONDS)
+                    if item is None:
                         yield ": ping\n\n"
                         continue
                     seq = item.get("seq")

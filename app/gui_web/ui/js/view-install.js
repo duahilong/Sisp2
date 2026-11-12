@@ -668,7 +668,7 @@ function partRowHtml(role, letter, size, fileSystem) {
   const badge = text
     ? `<span class="lbadge" style="background:${color}">${esc(text)}</span>`
     : '<span class="lbadge ghost">·</span>';
-  return `<div class="pline">${badge}<span class="pln">${esc(roleLabel(role))}</span>
+  return `<div class="pline" data-role="${esc(role)}">${badge}<span class="pln">${esc(roleLabel(role))}</span>
     <span class="pls">${esc(size || '')}${fileSystem ? ` · ${esc(fileSystem)}` : ''}</span></div>`;
 }
 

@@ -643,10 +643,38 @@ async function main() {
       if (removedResult.error) problems.push(`删掉 E 之后报错: ${removedResult.error}`);
       summary.shots.push(await shoot('05b3-install-step2-extra-removed'));
 
-      // 再加回去，让后面第 3、4 步和真实写盘都是“四个分区”的路径
+      // 再加回去，让后面第 3、4 步和真实写盘都是“四个分区”的路径。
+      // 注意：上面把 C|D 拖到 0.999 之后剩余空间所剩无几，直接点 ➕ 会失败
+      // （addExtraPartition 要求能平分出 D ≥ 20 GB 且 E ≥ 1 GB）。所以先点
+      // 快捷容量 150 把 C 拉回合理值，再加 E；最后点 120 稳定下来。
+      await evaluate(`(function () {
+        const preset = document.querySelector('#wzBody .presets button[data-preset="150"]');
+        if (preset) preset.click();
+        return Boolean(preset);
+      })()`);
+      await sleep(250);
       await evaluate(`(function () {
         const add = document.querySelector('#wzBody button[data-add]');
         if (add) add.click();
+        return true;
+      })()`);
+      await sleep(300);
+      summary.steps.push({
+        step2extraBack: JSON.parse(await evaluate(`JSON.stringify({
+          rows: document.querySelectorAll('#wzBody .szrow.extra').length,
+          sysGb: Number((document.querySelector('#wzBody .szrow input[data-size="sys"]') || {}).value) || 0,
+          err: String((document.querySelector('#wzBody .errmsg') || {}).textContent || ''),
+        })`)),
+      });
+      const backResult = summary.steps[summary.steps.length - 1].step2extraBack;
+      if (backResult.rows !== 1) {
+        problems.push(`删掉 E 之后再加回去失败（额外分区行数 ${backResult.rows}），第 4 步会变成三分区路径`);
+      }
+      if (backResult.err) problems.push(`再加回 E 之后报错: ${backResult.err}`);
+      // 最终稳定在 C=120（D/E 平分，两个都远高于下限）
+      await evaluate(`(function () {
+        const preset = document.querySelector('#wzBody .presets button[data-preset="120"]');
+        if (preset) preset.click();
         return true;
       })()`);
       await sleep(250);
@@ -676,15 +704,22 @@ async function main() {
         step4: JSON.parse(await evaluate(`(function () {
           const body = document.querySelector('#wzBody') || { innerText: '' };
           const text = String(body.innerText || '');
+          const cards = document.querySelectorAll('#wzBody .pcard').length;
+          // 第 4 步的危险提示本身就是 `.warnbox.warnline`（阻断项提示也是 .warnbox）。
+          // 以前的错在这里：把 `.warnbox` 一律当 error，于是 planDataRows/盘符那几条
+          // 断言永远被跳过——计划其实是好的，测试却什么都没验证到。
+          const notes = document.querySelector('#wzBody .warnbox:not(.warnline)');
           return JSON.stringify({
-            cards: document.querySelectorAll('#wzBody .pcard').length,
+            cards,
             partRows: document.querySelectorAll('#wzBody .pcard .pline').length,
+            dataRows: document.querySelectorAll('#wzBody .pcard .pline[data-role^="data"]').length,
+            letters: document.querySelectorAll('#wzBody .pcard .pline .lbadge:not(.ghost)').length,
             start: (document.querySelector('#wzNext') || {}).disabled,
-            error: (document.querySelector('#wzBody .warnbox') || {}).innerText || '',
-            planDataRows: (text.match(/数据分区/g) || []).length,
-            planUnalloc: text.indexOf('未分配') >= 0,  // 永远是 false：最后一项吃满
+            // 只有“没有任何计划卡片”才算计划失败（wizard.error 分支）
+            error: cards === 0 ? text.slice(0, 400) : '',
+            notices: notes ? String(notes.innerText || '').slice(0, 300) : '',
+            planUnalloc: text.indexOf('未分配') >= 0,   // 永远是 false：最后一项吃满
             planAuto: text.indexOf('剩余空间（约') >= 0,
-            planLetters: text.indexOf('盘符') >= 0,
             text: text.slice(0, 400),
           });
         })()`)),
@@ -832,13 +867,17 @@ async function main() {
       problems.push('点 ✕ 之后额外分区没有被删掉');
     }
     const step4 = (summary.steps.find((step) => step.step4) || {}).step4;
-    if (step4 && !step4.error) {
-      if ((step4.planDataRows || 0) < 2) {
-        problems.push(`第 4 步计划表里只有一个数据分区（${step4.planDataRows}，期望 2：D 和 E）`);
+    if (step4 && step4.cards > 0) {
+      if ((step4.dataRows || 0) < 2) {
+        problems.push(`第 4 步计划表里只有 ${step4.dataRows || 0} 个数据分区（期望 2：D 和 E）`);
       }
-      if (!step4.planLetters) problems.push('第 4 步没有显示计划盘符');
+      if ((step4.letters || 0) < (step4.partRows || 0)) {
+        problems.push(`第 4 步有分区没显示计划盘符（${step4.letters || 0}/${step4.partRows || 0}）`);
+      }
       if (step4.planUnalloc) problems.push('第 4 步不该出现“未分配”（最后一个分区永远吃满）');
       if (!step4.planAuto) problems.push('第 4 步应把最后一个分区显示为“剩余空间（约 X GB）”');
+    } else if (step4 && step4.error) {
+      problems.push(`第 4 步没有生成执行计划：${String(step4.error).slice(0, 160)}`);
     }
 
     const progressStep = (summary.steps.find((step) => step.progress) || {}).progress;
