@@ -705,9 +705,10 @@ async function main() {
           const body = document.querySelector('#wzBody') || { innerText: '' };
           const text = String(body.innerText || '');
           const cards = document.querySelectorAll('#wzBody .pcard').length;
-          // 第 4 步的危险提示本身就是 `.warnbox.warnline`（阻断项提示也是 .warnbox）。
-          // 以前的错在这里：把 `.warnbox` 一律当 error，于是 planDataRows/盘符那几条
+          // 第 4 步的危险提示本身就是 warnbox + warnline（阻断项提示也是 warnbox）。
+          // 以前的错在这里：把 warnbox 一律当 error，于是数据分区数/盘符那几条
           // 断言永远被跳过——计划其实是好的，测试却什么都没验证到。
+          // 注意：这段代码在模板字符串里，注释中不能出现反引号（会提前结束模板串）。
           const notes = document.querySelector('#wzBody .warnbox:not(.warnline)');
           return JSON.stringify({
             cards,
