@@ -403,10 +403,6 @@ class WindowsDiskRunner:
             return None
         return to_text(info.get("image_path"))
 
-    @staticmethod
-    def _which(name: str) -> str | None:
-        return find_program(name)
-
 
 def _to_step_result(result: PhaseResult) -> StepResult:
     return StepResult(

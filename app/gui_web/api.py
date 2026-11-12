@@ -18,11 +18,13 @@ probe_path / pick_path / open_settings_folder），
 
 from __future__ import annotations
 
+import itertools
 import json
 import platform
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -95,7 +97,10 @@ class WebApi:
         self._version = app_version
         # 日志读取的白名单根目录：只能读这个目录下的 *.log。
         self._log_root = log_dir
-        self._events: list[dict[str, Any]] = []
+        # 事件游标缓冲：环形``deque`` + 已淘汰条数 ``_base``。
+        # 历史实现是 list，每溢出一次就 ``self._events = self._events[overflow:]``
+        # 整体复制一遍（5000 条时每次事件都 O(n)）。
+        self._events: deque[dict[str, Any]] = deque(maxlen=MAX_BUFFER)
         self._base = 0
         self._lock = threading.Lock()
         self._unsub = wf.job_manager.subscribe(self._on_event)
@@ -108,7 +113,6 @@ class WebApi:
         # ``/api/session`` 时直接拿结果。以前这个接口每次都重跑一遍预检 + 扫盘，
         # 白白多花一秒多（PowerShell 冷启动）。
         self._session_lock = threading.Lock()
-        self._session_ready = False
 
     # ------------------------------------------------------------------ 事件
     def _on_event(self, event: Any) -> None:
@@ -117,18 +121,18 @@ class WebApi:
         except Exception:  # noqa: BLE001 - 缓冲失败绝不能拖垮工作线程
             data = {"type": getattr(event, "type", "unknown"), "payload": {}}
         with self._lock:
+            # deque 满时 append 会自动丢掉最旧的；同步推进 ``_base``，
+            # 保持“光标 = 已淘汰条数 + 下标”的语义不变。
+            if len(self._events) == MAX_BUFFER:
+                self._base += 1
             self._events.append(data)
-            overflow = len(self._events) - MAX_BUFFER
-            if overflow > 0:
-                self._events = self._events[overflow:]
-                self._base += overflow
 
     def poll_events(self, cursor: int = 0, limit: int = 300) -> dict[str, Any]:
         """按游标取事件；``cursor`` 只增不减。"""
         limit = max(1, min(int(limit), 1000))
         with self._lock:
             start = max(int(cursor) - self._base, 0)
-            chunk = self._events[start:start + limit]
+            chunk = list(itertools.islice(self._events, start, start + limit))
             next_cursor = self._base + start + len(chunk)
         return ok({
             "cursor": next_cursor,
@@ -150,14 +154,11 @@ class WebApi:
         with self._session_lock:
             cached = None if force else self._wf.session
             if cached is not None:
-                self._session_ready = True
                 return ok(cached.to_dict())
             try:
                 session = self._wf.start()
             except Exception as exc:  # noqa: BLE001 - 任何异常都要变成信封返回给界面
-                self._session_ready = False
                 return err("E_START", str(exc))
-            self._session_ready = True
             with self._lock:
                 self._events.clear()
                 self._base = 0

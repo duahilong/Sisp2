@@ -260,7 +260,10 @@ def create_app(
                         item = await asyncio.wait_for(
                             queue.get(), timeout=_SSE_HEARTBEAT_SECONDS
                         )
-                    except TimeoutError:
+                    except (asyncio.TimeoutError, TimeoutError):
+                        # 3.10/3.11 里 ``asyncio.TimeoutError`` 还不是内置
+                        # ``TimeoutError`` 的别名（3.12 起才统一），只捕后者会漏掉，
+                        # 表现成“SSE 每 15 秒断一次”。两个都写才能兑底 3.10+。
                         yield ": ping\n\n"
                         continue
                     seq = item.get("seq")

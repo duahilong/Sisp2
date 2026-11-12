@@ -69,6 +69,29 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+# ``inspect.signature()`` 对同一个执行器只需算一次。真实业务里执行器是
+# ``SispService.execute_spec`` 这样的绑定方法（整个进程就一个），逐任务重算只是浪费。
+_ACCEPTS_STEP: dict[Any, bool] = {}
+
+
+def _accepts_on_step(executor: Executor) -> bool:
+    """执行器接不接受 ``on_step`` 关键字参数（带缓存）。"""
+    try:
+        key: Any = getattr(executor, "__func__", executor)
+        cached = _ACCEPTS_STEP.get(key)
+    except TypeError:  # 不可哈希的 callable：不缓存，直接算
+        key, cached = None, None
+    if cached is not None:
+        return cached
+    try:
+        value = "on_step" in inspect.signature(executor).parameters
+    except (TypeError, ValueError):
+        value = False
+    if key is not None:
+        _ACCEPTS_STEP[key] = value
+    return value
+
+
 class JobStatus(str, Enum):
     """任务状态；值直接进 JSON，界面对字符串做比较。"""
 
@@ -504,11 +527,7 @@ class JobManager:
         if executor is None:
             raise RuntimeError("No executor")
         reporter = self._make_reporter(job)
-        try:
-            accepts_step = "on_step" in inspect.signature(executor).parameters
-        except (TypeError, ValueError):
-            accepts_step = False
-        if accepts_step:
+        if _accepts_on_step(executor):
             return executor(job.spec, job.cancel_event, on_step=reporter)
         return executor(job.spec, job.cancel_event)
 

@@ -17,7 +17,7 @@ import {
 } from './shell.js';
 import { renderMain } from './view-main.js';
 import {
-  renderInstall, goStep, next, back, resetAll, onStepEvent, refreshPhase,
+  renderInstall, next, back, resetAll, onStepEvent, refreshPhase,
   pollJobLogs, loadImages,
 } from './view-install.js';
 import { renderSettings, saveSettings, resetSettings, exportSettings, importSettings, probeAllQuiet } from './view-settings.js';

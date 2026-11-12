@@ -65,6 +65,23 @@ def app_logger_isolated():
     logger.setLevel(before_level)
 
 
+@pytest.fixture(autouse=True)
+def program_lookup_isolated():
+    """用例之间清掉 ``find_program`` 的进程级缓存。
+
+    ``find_program`` 现在带 ``functools.cache``（生产里 PATH 在执行期间不变，缓存是
+    对的）；但用例会 monkeypatch ``shutil.which`` / ``SYSTEMROOT``（比如验证“没装
+    Ghost 就该阻断”），不清缓存就会把上一个用例的探测结果带进来。
+    """
+    from app.application.shell import find_program
+
+    reset = getattr(find_program, "cache_clear", None)
+    if reset is not None:
+        reset()
+    yield
+    if reset is not None:
+        reset()
+
 
 @pytest.fixture(autouse=True)
 def ghost_tool_present(monkeypatch):

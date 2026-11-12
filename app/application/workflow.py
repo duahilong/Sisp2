@@ -382,7 +382,6 @@ class WorkflowController:
         # 分区脚本是交错执行的（现场 0x80070017 就出在这种交错下）。
         self._sequencer = PartitionSequencer()
         self._ghost_gate = GhostStartGate()
-        self._service_injected = service is not None
         self._service = service if service is not None else self._build_service()
         # 默认执行器直接调本会话的 service。
         self._manager = job_manager or JobManager(

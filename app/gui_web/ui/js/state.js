@@ -7,7 +7,7 @@
  */
 
 import {
-  clamp, freeBytes, isSelectable, checkLayout, fitLayout, reserveGb as reserveGbFor,
+  clamp, isSelectable, checkLayout, fitLayout, reserveGb as reserveGbFor,
   DEFAULT_EFI_MB, MIN_DATA_GB, MIN_EXTRA_GB, MAX_EXTRAS, toGb, autoPartitionRole,
 } from './derive.js';
 

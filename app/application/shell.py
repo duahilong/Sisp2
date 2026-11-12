@@ -24,6 +24,7 @@ import tempfile
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -301,8 +302,8 @@ $disk = Get-Disk -Number $number
 """
 
 
-def find_program(name: str) -> str | None:
-    """在 PATH / System32 里找可执行文件（找不到返回 ``None``）。"""
+@cache
+def _find_program_cached(name: str) -> str | None:
     found = shutil.which(name)
     if found:
         return found
@@ -312,6 +313,21 @@ def find_program(name: str) -> str | None:
         if candidate.is_file():
             return str(candidate)
     return None
+
+
+def find_program(name: str) -> str | None:
+    """在 PATH / System32 里找可执行文件（找不到返回 ``None``）。
+
+    结果按进程缓存：``PATH`` 在执行期间不会变，而 ``WindowsDiskRunner`` 是按任务造
+    ``DiskpartShell`` 的——8 块盘就是几十次 ``shutil.which`` + 目录探测。
+    装完新工具后调 ``find_program.cache_clear()`` 重置（与“改 extGhost 要重启”的
+    现有约定一致）。
+    """
+    return _find_program_cached(str(name))
+
+
+# 供测试/设置变更后重置缓存（与 ``functools.cache`` 同名）。
+find_program.cache_clear = _find_program_cached.cache_clear  # type: ignore[attr-defined]
 
 
 def format_command_line(command: Sequence[str], quiet: str = "") -> str:
@@ -525,7 +541,17 @@ class DiskpartShell:
         )
         os.close(handle)
         try:
-            Path(path).write_text("\r\n".join(lines) + "\r\n", encoding="ascii")
+            # diskpart 的 ``/s`` 只认 ANSI（系统代码页）：卷标/说明里一旦出现非 ASCII
+            # 字符，``encoding="ascii"`` 会在真正调起 diskpart 之前抛
+            # ``UnicodeEncodeError``——那是最难查的一种“写盘前崩”。
+            script_text = "\r\n".join(lines) + "\r\n"
+            encoding = "mbcs" if os.name == "nt" else "utf-8"
+            try:
+                Path(path).write_text(script_text, encoding=encoding)
+            except UnicodeEncodeError:
+                # 极端字符（emoji 等）在当前代码页映射不了：替换成 ``?`` 总比中止强，
+                # 日志里已经原样留了一份脚本（上面那行 ``log.block``）。
+                Path(path).write_text(script_text, encoding=encoding, errors="replace")
             runner = getattr(self.process, "run_streaming", None)
             if runner is not None:
                 # 流式：diskpart 的输出也会实时出现在任务日志里（取消不在这里做，

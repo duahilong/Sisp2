@@ -157,7 +157,6 @@ export function renderChrome(info) {
   }
   const chipMode = $('#chipMode');
   if (chipMode) {
-    chipMode.classList.remove('dry');
     chipMode.classList.add('alert');
     chipMode.title = '真实模式：确认后会把选中的磁盘重新分区';
   }
