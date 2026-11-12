@@ -3,7 +3,7 @@
 
 用法::
 
-    python build/ui_check.py
+    python tools/ui_check.py
 
 只依赖 ``node``（PATH 里能找到即可）。检查项：
 

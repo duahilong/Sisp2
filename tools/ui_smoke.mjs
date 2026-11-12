@@ -3,7 +3,8 @@
  *
  * 用法（先起服务）：
  *   python -m app.gui_web.main --serve --port 8901
- *   node build/ui_smoke.mjs --url http://127.0.0.1:8901/ --out build/shots
+ *   node tools/ui_smoke.mjs --url http://127.0.0.1:8901/ --out build/shots
+ *   node tools/ui_smoke.mjs --url http://127.0.0.1:8901/ --disk 2 --out build/shots
  *
  * 它会：
  *   1. 用 --headless=new 起一个临时 Chrome（独立 user-data-dir），跑完自动关掉；
@@ -11,9 +12,11 @@
  *   3. 依次切到 系统安装 → 选盘 → 分区大小 → 版本 → 确认，再切到 设置；
  *   4. 每屏截一张 png，最后把结果（含 JS 报错）打成一坨 JSON。
  *
+ * 选盘：默认选**容量最大的可选盘**；`--disk <N>` 指定盘号（推荐）。
  * 加 ``--start --allow-write`` 时会勾选确认框、点“开始安装”，等进度页出来后
  * 再截图与断言（任务卡片 / 阶段行 / 日志折叠）。**这会真实写盘**：只允许在
- * 测试机的临时盘（VHD/空盘）上跑，界面里选中的盘必须是可以清空的。
+ * 测试机的临时盘（VHD/空盘）上跑，所以这条路径**强制要求** `--disk`，
+ * 免得在“虚拟机 + 真实数据盘”的机器上选错盘。
  *
  * 有 JS 异常 / 致命错误屏 / 关键节点为空 → 退出码 1。
  */
@@ -33,6 +36,19 @@ const URL_ = argOf('url', 'http://127.0.0.1:8901/');
 const OUT = argOf('out', 'build/shots');
 const START = args.includes('--start');
 const ALLOW_WRITE = args.includes('--allow-write');
+// 指定盘号（推荐）：不指定时脚本选“容量最大的可选盘”，在多盘机器上会选错——
+// 真实写盘前必须用 --disk 钉住测试盘（VHD）。
+const DISK_ARG = argOf('disk', '');
+const ONLY_DISK = /^\d+$/.test(String(DISK_ARG)) ? Number(DISK_ARG) : null;
+if (DISK_ARG !== '' && ONLY_DISK === null) {
+  console.error(`--disk 需要一个盘号（整数），收到: ${DISK_ARG}`);
+  process.exit(2);
+}
+if (START && ALLOW_WRITE && ONLY_DISK === null) {
+  console.error('拒绝运行：--start --allow-write 必须同时给 --disk <盘号>。');
+  console.error('默认选盘是“容量最大的可选盘”，多盘机器上会选到真实数据盘（不可恢复）。');
+  process.exit(2);
+}
 // 端口默认随机抽一个：固定端口一旦有残留的 headless Chrome 占着，就会连到上一轮的浏览器上。
 const PORT = Number(argOf('port', String(9300 + Math.floor(Math.random() * 600))));
 // 自动找一个 Chromium 内核的浏览器：开发机上通常是 Chrome，干净的测试机可能只有 Edge。
@@ -307,12 +323,18 @@ async function main() {
       };
       const picks = [...document.querySelectorAll('#wzBody .dsel:not([disabled])')];
       if (!picks.length) return JSON.stringify({ ok: false, capacityGb: 0 });
-      const pick = picks.sort((a, b) => sizeOf(b) - sizeOf(a))[0];
+      const pick = ${ONLY_DISK === null
+        ? 'picks.sort((a, b) => sizeOf(b) - sizeOf(a))[0]'
+        : `picks.find((el) => Number(el.dataset.disk) === ${ONLY_DISK})`};
+      if (!pick) return JSON.stringify({ ok: false, capacityGb: 0, missingDisk: ${ONLY_DISK === null ? 'null' : ONLY_DISK} });
       pick.click();
       return JSON.stringify({ ok: true, capacityGb: sizeOf(pick), disk: Number(pick.dataset.disk) });
     })()`);
     const choseInfo = JSON.parse(chose || '{}');
     summary.steps.push({ step1pick: choseInfo });
+    if (!choseInfo.ok && choseInfo.missingDisk !== undefined) {
+      problems.push(`--disk ${JSON.stringify(choseInfo.missingDisk)} 不在可选磁盘里（被保护/离线/不存在）`);
+    }
     if (choseInfo.ok && !choseInfo.capacityGb) {
       problems.push('无法从磁盘卡片读出容量（选盘逻辑失效，后续容量断言不可信）');
     }
@@ -322,7 +344,7 @@ async function main() {
         + `${choseInfo.capacityGb.toFixed(1)} GB 不够`,
       );
     }
-    if (chose) {
+    if (choseInfo.ok) {
       await sleep(300);
       summary.shots.push(await shoot('04-install-step1-picked'));
       await evaluate(`document.querySelector('#wzNext').click(); true`);
