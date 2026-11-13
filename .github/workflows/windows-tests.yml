@@ -1,4 +1,4 @@
-name: Windows non-destructive tests
+name: Windows test, build and nightly release
 
 on:
   push:
@@ -8,7 +8,12 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+
+# main 连续推送时只让最新提交发布；旧运行被取消后不会覆盖新 exe。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -43,3 +48,81 @@ jobs:
 
       - name: Run isolated tests
         run: python -m pytest tests -q
+
+  nightly:
+    name: Build exe and update rolling prerelease
+    needs: test
+    # PR 和手动触发只检查；只有 main 的 push 才更新滚动预发布。
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      SISP_BLOCK_REAL_DISK: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-build.txt
+
+      - name: Build single-file exe
+        run: python packaging/build.py
+
+      - name: Verify artifact and create checksum
+        id: artifact
+        shell: pwsh
+        run: |
+          $file = Get-Item "dist/Sisp2.exe"
+          if ($file.Length -le 0) { throw "Sisp2.exe 是空文件" }
+          $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  Sisp2.exe" | Set-Content "dist/Sisp2.exe.sha256" -Encoding ascii
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+          "size=$($file.Length)" >> $env:GITHUB_OUTPUT
+
+      - name: Keep the exact build as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sisp2-${{ github.sha }}
+          path: |
+            dist/Sisp2.exe
+            dist/Sisp2.exe.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish rolling nightly release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<EOF
+          这是 main 分支的滚动预发布，每次推送并通过全部自动化检查后更新。
+
+          - 提交：${GITHUB_SHA}
+          - 工作流：https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - exe 字节数：${{ steps.artifact.outputs.size }}
+          - SHA256：${{ steps.artifact.outputs.sha256 }}
+
+          自动化检查不包含真实清盘、Ghost 写盘和现场硬件验收。用于现场装机前，
+          请先在隔离 VM 或备用测试机上验证。
+          EOF
+
+          # Release 的源码快照也必须跟随 exe 所对应的提交，不能只替换附件。
+          git tag -f nightly "${GITHUB_SHA}"
+          git push -f origin refs/tags/nightly
+
+          title="Nightly · ${GITHUB_SHA::7}"
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release edit nightly --title "$title" --notes-file release-notes.md
+          else
+            gh release create nightly --prerelease --title "$title" --notes-file release-notes.md
+          fi
+          gh release upload nightly dist/Sisp2.exe dist/Sisp2.exe.sha256 --clobber

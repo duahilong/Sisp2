@@ -7,6 +7,13 @@ tag 上的提交树就是那一版的完整代码与文档快照。
 定版（`v1.1.0`）之后只做优化与修复：功能以 tag 为准，`main` 继续向前走，
 需要回到某一版时 `git checkout v1.1.0` 或 `git archive v1.1.0`。
 
+## 未发布（main）— 自动构建与滚动预发布
+
+- `.github/workflows/windows-tests.yml` 扩展为检查、测试、构建、发布一体化流水线：main 推送后，
+  Python 3.10 / 3.12 的 ruff、`compileall`、pytest 全部通过才构建单文件 exe。
+- 构建生成 SHA256 校验文件，Actions Artifact 保留 7 天；同一个 `nightly` 滚动预发布 Release
+  自动更新到对应提交并替换 exe，连续推送只发布最新结果。失败时不替换现有 Release。
+
 ## 未发布（main）— 第二批外围功能修复
 
 以下修复不涉及写盘路径；新增回归用例，验证只在 GitHub Actions 的隔离 Windows runner 上进行。
