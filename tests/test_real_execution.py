@@ -35,6 +35,7 @@ from app.application.real_runner import (
     build_real_runner,
     prune_runner_logs,
 )
+from app.application.shell import DiskpartShell
 from app.application.workflow import WorkflowController
 from app.models import WorkerResult
 from tests.fakes import FakeDiskpartShell as FakeShell
@@ -369,9 +370,23 @@ def test_runner_reports_missing_image_without_touching_disks(tmp_path):
     assert result.steps == ()
 
 
-def test_runner_fails_cleanly_when_diskpart_cannot_start(tmp_path):
+def test_runner_fails_cleanly_when_diskpart_cannot_start(tmp_path, monkeypatch):
     image = tmp_path / "tiny.GHO"
     image.write_bytes(b"not a real wim")
+    # 只固定只读身份复核结果，让本用例走到“diskpart 可执行文件不存在”；
+    # 不查询云 runner 的真实磁盘，也不依赖机器上的磁盘型号。
+    monkeypatch.setattr(
+        DiskpartShell,
+        "disk_state",
+        lambda _self, _number: {
+            "model": "Test Disk 120GB",
+            "size_bytes": None,
+            "is_offline": False,
+            "is_read_only": False,
+            "health_status": "Healthy",
+            "operational_status": "Online",
+        },
+    )
     runner = WindowsDiskRunner(
         diskpart=r"C:\nope\diskpart.exe",
         ghost=r"C:\nope\ghost64.exe",
@@ -1161,7 +1176,8 @@ def test_run_steps_aborts_when_layout_check_fails(
     result = runner.run(_tiny_spec(image, payload=payload), threading.Event())
 
     assert result.success is False
-    assert "分区数与计划不符" in (result.error or "")
+    assert "分区 #2" in (result.error or "")
+    assert "盘符" in (result.error or ""), "缺失分区会在格式化后的盘符复核处提前中止"
     assert process.calls == []
 
 

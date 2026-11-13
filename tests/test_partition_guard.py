@@ -291,7 +291,7 @@ def _acceptance_repair_shell(*, repair_succeeds=True):
         if part.get("label") == "Windows":
             part["drive_letter"] = None
             part["mounted_letter"] = None
-    state = {"p2_formats": 0, "p2_assigns": 0}
+    state = {"p2_formats": 0, "p2_assigns": 0, "queries_after_assign": 0}
 
     def diskpart(lines, _title, _timeout):
         joined = " ".join(lines)
@@ -304,7 +304,15 @@ def _acceptance_repair_shell(*, repair_succeeds=True):
         return 0, "ok"
 
     def query(_n):
-        return full if state["p2_assigns"] >= 2 else partial
+        # 格式化后的即时盘符确认看到完整状态；第一次正式验收才暴露缺盘符，
+        # 从而真正覆盖 acceptance repair，而不是在 _confirm_letter 中提前修好。
+        if state["p2_assigns"]:
+            state["queries_after_assign"] += 1
+        if state["p2_assigns"] >= 2:
+            return full
+        if state["p2_assigns"] == 1 and state["queries_after_assign"] == 1:
+            return full
+        return partial
 
     return _shell(msr=None, diskpart_handler=diskpart, query_handler=query), state
 

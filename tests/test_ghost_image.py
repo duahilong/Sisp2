@@ -251,7 +251,7 @@ def test_phase_failure_reads_ghosterr(tmp_path) -> None:
     cwd.mkdir()
 
     def write_ghosterr() -> None:
-        (cwd / "ghosterr.txt").write_bytes("分区块错误：目标分区太小\nFATAL".encode("mbcs"))
+        (cwd / "ghosterr.txt").write_bytes("分区块错误：目标分区太小\nFATAL".encode("gbk"))
 
     phase = _phase(commands, code=1, output="", cwd=str(cwd), on_run=write_ghosterr)
     outcome = phase.run(_ctx(tmp_path))
@@ -265,7 +265,7 @@ def test_phase_clears_stale_ghosterr(tmp_path) -> None:
     """上一次失败的 ghosterr.txt 不能当成本次原因。"""
     cwd = tmp_path / "logs"
     cwd.mkdir()
-    (cwd / "ghosterr.txt").write_text("旧错误", encoding="mbcs")
+    (cwd / "ghosterr.txt").write_text("旧错误", encoding="gbk")
     phase = _phase([], code=0, cwd=str(cwd))
     outcome = phase.run(_ctx(tmp_path))
     assert outcome.ok is True
@@ -330,7 +330,7 @@ def test_phase_retries_once_after_transient_8027(tmp_path, monkeypatch) -> None:
 
     def on_call(index: int) -> None:
         if index == 1:
-            (tmp_path / "ghosterr.txt").write_bytes(GHOSTERR_8027.encode("mbcs"))
+            (tmp_path / "ghosterr.txt").write_bytes(GHOSTERR_8027.encode("gbk"))
 
     phase = _sequence_phase(
         [(1, ""), (0, "ok")], cwd=str(tmp_path), gate=gate, on_call=on_call
@@ -347,7 +347,7 @@ def test_phase_gives_up_after_two_transient_failures(tmp_path, monkeypatch) -> N
     monkeypatch.setattr("app.application.phases.ghost.RETRY_DELAY", 0.01)
 
     def on_call(index: int) -> None:
-        (tmp_path / "ghosterr.txt").write_bytes(GHOSTERR_8027.encode("mbcs"))
+        (tmp_path / "ghosterr.txt").write_bytes(GHOSTERR_8027.encode("gbk"))
 
     phase = _sequence_phase([(1, ""), (1, "")], cwd=str(tmp_path), on_call=on_call)
     outcome = phase.run(_ctx(tmp_path))
@@ -364,7 +364,7 @@ def test_phase_does_not_retry_real_errors(tmp_path, monkeypatch) -> None:
 
     def on_call(index: int) -> None:
         (tmp_path / "ghosterr.txt").write_bytes(
-            "分区块错误：目标分区太小\nFATAL".encode("mbcs")
+            "分区块错误：目标分区太小\nFATAL".encode("gbk")
         )
 
     phase = _sequence_phase([(1, ""), (0, "ok")], cwd=str(tmp_path), on_call=on_call)
@@ -382,7 +382,7 @@ def test_phase_cancel_during_retry_wait(tmp_path, monkeypatch) -> None:
 
     def on_call(index: int) -> None:
         if index == 1:
-            (tmp_path / "ghosterr.txt").write_bytes(GHOSTERR_8027.encode("mbcs"))
+            (tmp_path / "ghosterr.txt").write_bytes(GHOSTERR_8027.encode("gbk"))
             ctx.cancel.set()
 
     phase = _sequence_phase([(1, ""), (0, "ok")], cwd=str(tmp_path), on_call=on_call)

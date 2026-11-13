@@ -231,7 +231,7 @@ class GhostImagePhase:
             pass
 
     def _ghosterr(self) -> str:
-        """读 Ghost 写下的失败原因（GBK/OEM 编码，先 mbcs 再兜底）。"""
+        """读 Ghost 写下的失败原因（优先 UTF-8 / GBK，再兼容当前系统 ACP）。"""
         path = self._ghosterr_path()
         if path is None:
             return ""
@@ -239,7 +239,10 @@ class GhostImagePhase:
             raw = path.read_bytes()
         except OSError:
             return ""
-        for encoding in ("mbcs", "utf-8", "latin-1"):
+        # Ghost 的中文错误通常是 GBK；不能优先按当前 Windows ACP/mbcs 猜，
+        # 否则英文系统会把 GBK 当 cp1252 且“解码成功”为乱码。
+        # ASCII 在 utf-8/gb18030 下结果一致；显式 UTF-8 也优先保留。
+        for encoding in ("utf-8", "gb18030", "mbcs", "latin-1"):
             try:
                 return parse_ghosterr(raw.decode(encoding))
             except (UnicodeDecodeError, LookupError):
