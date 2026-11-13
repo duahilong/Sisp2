@@ -48,7 +48,7 @@ def replace_app_version(text: str, version: str) -> str:
     """只替换基础版本模块的赋值行，供构建期临时注入。"""
     version_tuple(version)
     result, count = re.subn(
-        r'(?m)^__version__ = "[^"]+"\s*$',
+        r'(?m)^__version__ = "[^"]+"[ \t]*$',
         f'__version__ = "{version}"',
         text,
         count=1,
