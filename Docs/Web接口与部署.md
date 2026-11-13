@@ -41,7 +41,7 @@ python -m app.gui_web.main --serve --port 8765
 | `POST /api/cancel` | `{job_id}`，协作式取消（只置取消标志并立即返回）；**不传 `job_id` 时取消当前全部任务** |
 | `GET /api/jobs` | 任务列表（首屏兜底，SSE 未连上时也能画出进度） |
 | `GET /api/jobs/{job_id}` | 单任务查询（含 `progress`） |
-| `GET /api/jobs/{job_id}/log?tail=200` | 任务日志尾部；只允许日志目录（`logDir`，留空时是 `%APPDATA%\Sisp\logs`）下的 `.log` 文件，越界返回 `E_PATH`。任务运行中 `details["log_path"]` 还不存在，此时按文件名里的盘号（`disk-runner-d<N>-*.log`）找「不早于任务启动时刻」的最新一份；都没有则返回 `message` 说明原因 |
+| `GET /api/jobs/{job_id}/log?tail=200` | 任务日志尾部；只允许日志目录（`logDir`，留空时是 `%APPDATA%\Sisp\logs`）下的 `.log` 文件，越界返回 `E_PATH`。**按文件增量读取**（`app/gui_web/log_tail.py`）：只读上次之后新增的字节，`lines` / `total` 与“读全文再 `splitlines()[-tail:]`”逐条一致（含 CRLF、末尾半行、UTF-8 跨块）；文件读不了才返回 `E_LOG`。任务运行中 `details["log_path"]` 还不存在，此时按文件名里的盘号（`disk-runner-d<N>-*.log`）找「不早于任务启动时刻」的最新一份；都没有则返回 `message` 说明原因 |
 | `POST /api/logs/export` | `{job_ids?, path?}`；把这一轮任务打成排查包 zip：`README.txt` + `summary.txt`（人读：型号/每步结果/失败原文/诊断）+ `summary.json` + `settings.json` + `logs/*.log` + `artifacts/*`。不传 `path` 时弹原生保存框（取消返回 `{cancelled: true}`）；传了则静默写盘（自动化用）。没有任务时返回 `E_NO_JOBS`，写盘失败返回 `E_EXPORT`。任务运行中也能导：没有 `details.log_path` 的按盘号兜底找最新日志 |
 | `POST /api/reveal` | `{path}`；在资源管理器里定位导出的 zip（只允许家目录或日志目录内的路径，越界返回 `E_PATH`） |
 | `GET /api/jobs/{job_id}/log` 的补充 | 1.3.0 起日志文件名带型号片段（`disk-runner-d2-msft-virtual-disk-…log`），`disk-runner-d<N>-` 前缀与「按盘号找最新日志」的兜底逻辑保持不变；日志内容含抬头/步骤/结论块（见 `README` 的「出问题怎么排查」） |
@@ -178,6 +178,12 @@ node tools/ui_smoke.mjs --url http://127.0.0.1:8901/ --disk 2 --start --allow-wr
 选盘默认是“容量最大的可选盘”；**真实写盘路径（`--start --allow-write`）必须同时给
 `--disk <盘号>`**，否则脚本直接以退出码 2 拒绝——在有多块大盘的测试机上“选最大”会选到
 真实数据盘，一次冒烟就把用户数据清掉。
+
+`ui_check.py` 的检查分两类：跨文件静态检查（语法、`/static` 引用、模块存在性、
+具名导入必须真的被导出、`derive.js` 纯函数真跑一遍）和**字段/DOM 契约检查**
+（`.pline` 必须带 `data-role`、引导修复必须用 `result.success` 判成败、
+`item.detail` 必须同时有 `item.message` 兼容）。契约那类不需要 `node`，
+所以在没有 node 的机器上也会跑。
 
 `ui_check.py` 也需要 `node`（只做语法与纯函数行为，不挂浏览器依赖）；没有 `node`
 时打印“跳过”并以 0 退出。`ui_smoke.mjs` 用 headless Chrome 的 DevTools 协议走一遍

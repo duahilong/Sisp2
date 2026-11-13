@@ -7,6 +7,51 @@ tag 上的提交树就是那一版的完整代码与文档快照。
 定版（`v1.1.0`）之后只做优化与修复：功能以 tag 为准，`main` 继续向前走，
 需要回到某一版时 `git checkout v1.1.0` 或 `git archive v1.1.0`。
 
+## 未发布（main）— 优化第二批（一）：契约修正与日志增量尾随
+
+只修“代码与已写明的契约不一致”和两个内部实现热点，不改写盘路径、安全语义与提示文案主体
+（`ruff` 全绿、`pytest` 731 passed；源码与**本机打包的 exe** 各在 300 GB VHDX 上跑一遍真实写盘，均全步骤 ok）。
+
+### 1. 引导修复 / 引导检查的字段错位（界面显示错误）
+
+- `dialogs.js` 读 `result.exit` 判成败，而 `boot/service.py` 只返回 `{success, message, steps, log_path}`：
+  `undefined === 0` 恒为 false → **修复成功也渲染成“失败（退出码 undefined）”，日志还标红**。
+  改为 `result.success === true || result.exit === 0`；后端成功返回补 `"exit": 0`（失败路径本来就抛 `BootError`）。
+- 同一个对话框里 findings 的说明读 `item.detail`，而后端 `_finding()` 只给 `message` → **每条说明永远是空白**。
+  改成 `item.detail || item.message`。
+
+### 2. 任务日志尾部改成增量读取（`app/gui_web/log_tail.py`）
+
+`GET /api/jobs/{id}/log` 在进度页日志展开时每 1.5 秒被调一次，旧实现每次 `read_text()` 读整个文件再取尾部
+（Ghost 两小时能有几十 MB，而每次只要最后 120 行）。新实现维护 `(已消费字节, 尾部环形缓冲, 总行数, 未完成半行)`，
+只读新增字节，并与“全文 `splitlines()[-tail:]`”**逐条一致**（CRLF、末尾半行、UTF-8 跨块都有测试钉住）。
+
+VM 实测（14.8 MB / 200,000 行）：旧实现 42.0 ms/次，新实现首次 29.5 ms、常态 **0.085 ms/次**（约 490 倍）；
+真实写盘期间 104 次轮询：`total` 单调 35→235，接口 `total` 与全文 `splitlines()` 长度一致，最后 5000 行逐行相同。
+
+### 3. 设置落盘顺序
+
+`SettingsStore.update()` 原来先改内存再 `save()`：磁盘满/目录被占时接口报“保存失败”，但进程内行为已按新值走。
+改成 `save(候选值)` 落盘成功后才换内存（`reset()` 同理）。
+
+### 4. 日志句柄关闭后不再刷屏
+
+`streaming()` 的写入在句柄关闭后每行一条带堆栈 warning（Ghost 取消后成百上千条），改成一个闭包标志位只告警一次；
+内存尾部仍然完整。
+
+### 5. ctypes 显式声明签名
+
+`CreateMutexW` / `CloseHandle` / `FindWindowW` / `ShowWindow` / `SetForegroundWindow`（`single_instance.py`）、
+`ShellExecuteW` / `OpenProcess` / `WaitForSingleObject` / `MessageBoxW`（`main.py`、`gui/elevation.py`）都补了
+`argtypes` / `restype`。默认 `restype` 是 `c_int`，64 位下会把 `HANDLE` / `HWND` / `HINSTANCE` 截断成 32 位
+——现在句柄值都很小所以没出事，属于“运气正确”。
+
+### 6. 工具：`ui_check.py` 增加契约检查
+
+新增 `check_contracts()`（不需要 node）：`.pline` 必须带 `data-role`（`ui_smoke` 靠它数数据分区）、
+`dialogs.js` 出现 `result.exit` 时必须同时有 `result.success`、出现 `item.detail` 时必须同时有 `item.message`。
+三条都真的出过错，用来防回归。
+
 ## 未发布（main）— 优化第一批：热点路径与死代码
 
 只做性能/健壮性优化，不改对外行为、写盘路径与安全语义（`ruff check` 全绿、`pytest` 707 passed；
