@@ -137,7 +137,10 @@ class LogTailReader:
             complete, entry.partial = body, ""
         elif body.endswith("\r"):
             # 可能是 ``\r\n`` 的前半：先不消费这个 \r，等下一块拼起来再判断。
-            complete, entry.partial = body[:-1], ""
+            # ``\r`` 可能是 ``\r\n`` 的前半：先把完整部分消费掉，
+            # 把这个 ``\r`` 留到下一块拼起来再判断（丢掉它就少一个行边界，
+            # 下一块开头的 ``\n`` 会被当成一个“空行”的终止符）。
+            complete, entry.partial = body[:-1], "\r"
         else:
             index = max(body.rfind("\n"), body.rfind("\r"))
             if index < 0:
