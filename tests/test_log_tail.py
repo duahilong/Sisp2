@@ -32,6 +32,9 @@ def _reference(path: Path) -> list[str]:
         "中文一行\n第二行\n",
         "trailing blank\n\n",
         "cr only\rlast",       # 只有 \r 也算换行
+        "\r",                  # 单独 CR：splitlines() 返回一个空行
+        "\r\r",                # 连续 CR：两个空行
+        "a\n\r",               # 换行后的 CR：末尾还有一个空行
     ],
 )
 def test_matches_splitlines(tmp_path: Path, payload: str) -> None:
@@ -96,6 +99,18 @@ def test_crlf_split_across_chunks(tmp_path: Path) -> None:
     with log.open("ab") as handle:
         handle.write(b"\nb\r\n")
     assert reader.read(log, 10) == (["a", "b"], 2)
+
+
+def test_pending_cr_empty_line_survives_next_chunk(tmp_path: Path) -> None:
+    log = tmp_path / "x.log"
+    log.write_bytes(b"\r")
+    reader = LogTailReader()
+    assert reader.read(log, 10) == ([""], 1)
+
+    with log.open("ab") as handle:
+        handle.write(b"\nnext")
+    assert reader.read(log, 10) == _reference(log)
+    assert reader.read(log, 10)[1] == 2
 
 
 def test_truncated_file_is_recounted(tmp_path: Path) -> None:

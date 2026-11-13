@@ -710,9 +710,15 @@ def test_settings_import_rejects_broken_file(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------- 日志导出
-def test_export_logs_writes_a_readable_zip(tmp_path: Path) -> None:
-    """导出接口：不给 path 时弹框（这里显式给 path），包里有结论表与原始日志。"""
+def test_export_logs_writes_a_readable_zip(tmp_path: Path, monkeypatch) -> None:
+    """导出接口：任意保存位置生成可读 ZIP，且之后能定位这个确切文件。"""
+    import os
     import zipfile
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(os, "startfile", lambda _path: None, raising=False)
 
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
@@ -723,7 +729,7 @@ def test_export_logs_writes_a_readable_zip(tmp_path: Path) -> None:
     running = log_dir / "disk-runner-d1-test-disk-20261109-1200-1-abcdef.log"
     running.write_text("[12:00:01] 任务开始\n", encoding="utf-8")
 
-    target = tmp_path / "bundle.zip"
+    target = tmp_path / "outside-home" / "bundle.zip"
     data = _unwrap(client.post("/api/logs/export", json={"path": str(target)}))
 
     assert Path(data["path"]) == target
@@ -735,6 +741,9 @@ def test_export_logs_writes_a_readable_zip(tmp_path: Path) -> None:
         summary = archive.read("summary.txt").decode("utf-8")
         assert "test disk（磁盘 1）" in summary, summary
         assert any(name.startswith("logs/disk-runner-d1-") for name in names)
+
+    revealed = _unwrap(client.post("/api/reveal", json={"path": str(target)}))
+    assert Path(revealed["path"]) == target
 
 
 def test_export_logs_without_jobs_is_a_clear_error(tmp_path: Path) -> None:

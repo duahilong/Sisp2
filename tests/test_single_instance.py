@@ -33,6 +33,7 @@ class FakeBackend:
         self.closed: list[int] = []
         self.activated: list[str] = []
         self.window_found = True
+        self.window_results: list[bool] = []
 
     def create(self, name: str) -> tuple[int, bool]:
         self.creates.append(name)
@@ -51,6 +52,8 @@ class FakeBackend:
 
     def activate_window(self, title: str) -> bool:
         self.activated.append(title)
+        if self.window_results:
+            return self.window_results.pop(0)
         return self.window_found
 
 
@@ -119,6 +122,19 @@ def test_activate_window_delegates() -> None:
     lock.acquire()
     assert lock.activate_window("硬盘工具箱") is True
     assert backend.activated == ["硬盘工具箱"]
+
+
+def test_activate_window_waits_for_first_instance_to_create_it(monkeypatch) -> None:
+    """首个实例已拿锁但窗口还没建好时，第二次启动要轮询而不是立即放弃。"""
+    backend = FakeBackend()
+    backend.window_results = [False, False, True]
+    lock = SingleInstance(backend=backend)
+    ticks = iter([0.0, 0.2, 0.4])
+    monkeypatch.setattr("app.gui_web.single_instance.time.monotonic", lambda: next(ticks))
+    monkeypatch.setattr("app.gui_web.single_instance.time.sleep", lambda _seconds: None)
+
+    assert lock.activate_window("硬盘工具箱", wait=1.0) is True
+    assert backend.activated == ["硬盘工具箱"] * 3
 
 
 def test_message_tells_the_user_what_to_do() -> None:

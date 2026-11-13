@@ -224,12 +224,22 @@ class SingleInstance:
             self._handle = None
         self.held = False
 
-    def activate_window(self, title: str = WINDOW_TITLE) -> bool:
-        """把已经打开的窗口叫到前台（找不到返回 ``False``）。"""
+    def activate_window(self, title: str = WINDOW_TITLE, *, wait: float = 0.0) -> bool:
+        """把已经打开的窗口叫到前台；必要时等首个实例把窗口建出来。
+
+        首个实例先拿互斥体、再启动服务和创建窗口。第二个实例可能恰好在这段
+        间隙启动，所以不能只查一次就把“窗口尚未出现”当成“没有窗口”。
+        """
         ops = self._ops()
         if ops is None:
             return False
-        return bool(ops.activate_window(title))
+        deadline = time.monotonic() + max(0.0, float(wait))
+        while True:
+            if ops.activate_window(title):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.2)
 
 
 def already_running_message() -> str:

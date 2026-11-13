@@ -42,6 +42,12 @@ def test_label_puts_model_first_with_disk_number_in_brackets() -> None:
     assert disk_label(2, "Msft Virtual Disk") == "Msft Virtual Disk（磁盘 2）"
 
 
+def test_disk_zero_is_a_valid_windows_disk_number() -> None:
+    assert disk_label(0, "System SSD") == "System SSD（磁盘 0）"
+    assert disk_label("0", None) == "磁盘 0"
+    assert disk_label(0, "System SSD", style="short") == "磁盘 0 · System SSD"
+
+
 def test_label_short_style_keeps_number_first_for_ui_cards() -> None:
     assert disk_label(2, "Msft Virtual Disk", style="short") == "磁盘 2 · Msft Virtual Disk"
 

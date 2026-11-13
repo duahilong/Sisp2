@@ -109,6 +109,9 @@ class WebApi:
         # 日志尾部增量读取：进度页展开日志时每 1.5 秒调一次 ``job_log()``，
         # 历史实现每次读整个文件（Ghost 两小时能有几十 MB）。
         self._log_tail = LogTailReader()
+        # 原生保存框允许把 ZIP 放到任意目录。只把本进程成功导出的文件加入
+        # reveal 白名单，既不破坏定位功能，也不放开任意路径给前端。
+        self._exported_paths: set[Path] = set()
         self._lock = threading.Lock()
         self._unsub = wf.job_manager.subscribe(self._on_event)
         if settings is None:
@@ -354,8 +357,10 @@ class WebApi:
 
         try:
             written = bundle.write(target)
+            exported = Path(str(written["path"])).resolve(strict=True)
         except OSError as exc:
             return err("E_EXPORT", f"写压缩包失败：{exc}")
+        self._exported_paths.add(exported)
         return ok(
             {
                 **written,
@@ -366,13 +371,13 @@ class WebApi:
         )
 
     def reveal(self, path: str = "") -> dict[str, Any]:
-        """在资源管理器里定位导出的文件（只允许家目录/日志目录下的路径）。"""
+        """在资源管理器里定位日志目录或本进程成功导出的文件。"""
         try:
             target = Path(str(path or "")).expanduser().resolve(strict=True)
         except (OSError, RuntimeError):
             return err("E_PATH", "路径不存在")
         if not self._revealable(target):
-            return err("E_PATH", "只允许定位家目录或日志目录里的文件", {"path": str(target)})
+            return err("E_PATH", "只允许定位日志目录或本进程导出的文件", {"path": str(target)})
         if not sys.platform.startswith("win"):
             return ok({"path": str(target), "opened": False})
         try:
@@ -384,6 +389,8 @@ class WebApi:
         return ok({"path": str(target), "opened": True})
 
     def _revealable(self, target: Path) -> bool:
+        if target in self._exported_paths:
+            return True
         roots: list[Path] = []
         for candidate in (self._log_root, str(Path.home())):
             if not candidate:

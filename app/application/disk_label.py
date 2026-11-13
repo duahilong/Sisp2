@@ -98,10 +98,13 @@ def disk_label(
     （``磁盘 2 · 120 GB``），避免“只有盘号”的标签在导出表格里还能区分容量。
     """
     try:
-        disk = int(to_int(number) or 0)
+        parsed = to_int(number)
+        disk = int(parsed) if parsed is not None else 0
     except (TypeError, ValueError):
+        parsed = None
         disk = 0
-    number_text = f"磁盘 {disk}" if disk else "未知磁盘"
+    # Windows 的系统盘常见编号就是 0；只有缺失/非法/负数才显示“未知磁盘”。
+    number_text = f"磁盘 {disk}" if parsed is not None and disk >= 0 else "未知磁盘"
     name = clean_model(model)
     size_text = (to_text(size_display) or "").strip()
 

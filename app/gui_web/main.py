@@ -652,7 +652,7 @@ def acquire_single_instance(args, *, lock=None, alert=None, say=None) -> int | N
         return None
     activated = False
     try:
-        activated = bool(lock.activate_window())
+        activated = bool(lock.activate_window(wait=10.0))
     except Exception:  # noqa: BLE001 - 叫不动已有的窗口不影响后续提示
         activated = False
     message = already_running_message()

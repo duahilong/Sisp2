@@ -38,7 +38,7 @@ MAX_TRACKED_FILES = 64
 class _Entry:
     """一个文件的跟踪状态。"""
 
-    __slots__ = ("decoder", "offset", "partial", "tail", "total")
+    __slots__ = ("decoder", "offset", "partial", "pending_blank", "tail", "total")
 
     def __init__(self, max_tail: int) -> None:
         self.offset = 0
@@ -46,6 +46,9 @@ class _Entry:
         self.total = 0
         # 末尾没有行终止符的部分：返回时临时当一行，但不计入 total。
         self.partial = ""
+        # 末尾 ``\r`` 是否终止一个空行（文件只有 ``\r``，或前面刚有换行）。
+        # 它要等下一块确认不是 CRLF 后才正式计入，但读取时必须临时返回。
+        self.pending_blank = False
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
     def reset(self, max_tail: int) -> None:
@@ -53,6 +56,7 @@ class _Entry:
         self.tail = deque(maxlen=max_tail)
         self.total = 0
         self.partial = ""
+        self.pending_blank = False
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
 
@@ -89,8 +93,12 @@ class LogTailReader:
             self._refresh_locked(key, entry)
             rows = list(entry.tail)
             total = entry.total
-            # ``\r`` 是“还没等到 \r\n 后半”的待定终止符：它本身不构成一行。
-            if entry.partial and entry.partial != "\r":
+            # 单独的 ``\r`` 也是行终止符。``splitlines()`` 对文件唯一的
+            # ``\r``（或换行后的 ``\r``）会返回一个末尾空行。
+            if entry.partial == "\r" and entry.pending_blank:
+                rows.append("")
+                total += 1
+            elif entry.partial and entry.partial != "\r":
                 # ``splitlines()`` 把“末尾没有换行的半行”也算一行：临时展开，
                 # 不改状态（下次拼接时它还会变成完整行）。
                 tail_rows = entry.partial.splitlines()
@@ -126,6 +134,12 @@ class LogTailReader:
         # - 这块以 ``\n`` 开头 → 两者拼成一个终止符，跳过后面的 ``\n``；
         # - 否则 → 那个 ``\r`` 已经终止了上一行，直接丢掉。
         if entry.partial == "\r":
+            if entry.pending_blank:
+                # 上一块只有换行符 + 待定 CR 时，CR 终止的是一个空行；现在
+                # 已能确认它是 CR 或 CRLF，正式提交这个空行。
+                entry.total += 1
+                entry.tail.append("")
+                entry.pending_blank = False
             body = text[1:] if text.startswith("\n") else text
         else:
             body = entry.partial + text
@@ -141,6 +155,7 @@ class LogTailReader:
             # 把这个 ``\r`` 留到下一块拼起来再判断（丢掉它就少一个行边界，
             # 下一块开头的 ``\n`` 会被当成一个“空行”的终止符）。
             complete, entry.partial = body[:-1], "\r"
+            entry.pending_blank = not complete or complete.endswith(("\n", "\r"))
         else:
             index = max(body.rfind("\n"), body.rfind("\r"))
             if index < 0:
