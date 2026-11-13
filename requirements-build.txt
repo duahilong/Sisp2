@@ -1,4 +1,4 @@
-# Sisp2 打包依赖（生成 dist/Sisp2.exe 与 dist/Sisp2-CLI.exe）
+# Sisp2 打包依赖（生成 dist/Sisp2.exe）
 #
 # 安装：
 #   python -m pip install -r requirements-build.txt

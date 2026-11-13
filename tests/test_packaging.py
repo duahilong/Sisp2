@@ -91,6 +91,20 @@ def test_build_script_targets_match_spec() -> None:
     assert "PyInstaller" in text
 
 
+def test_requirements_do_not_mention_removed_cli() -> None:
+    """依赖清单的说明文字也要跟代码一致。
+
+    命令行入口 ``app/cli.py`` 与 ``Sisp2-CLI.exe`` 已经移除，但
+    ``requirements-build.txt`` 的标题里很久以后还写着“生成 dist/Sisp2.exe
+    与 dist/Sisp2-CLI.exe”——spec/build.py 都有断言钉住，只有这个文本文件
+    没人看，于是漂了好几个月。版本号/产物名这类“写死在注释里”的东西
+    一律用断言钉住，避免下次再漂。
+    """
+    for name in ("requirements.txt", "requirements-build.txt", "requirements-web.txt"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        assert "Sisp2-CLI" not in text, f"{name} 里残留了已移除的 Sisp2-CLI"
+
+
 def test_make_icon_produces_valid_ico(tmp_path: Path) -> None:
     sys.path.insert(0, str(PACKAGING))
     try:
