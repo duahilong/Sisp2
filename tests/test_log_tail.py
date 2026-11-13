@@ -109,7 +109,7 @@ def test_pending_cr_empty_line_survives_next_chunk(tmp_path: Path) -> None:
 
     with log.open("ab") as handle:
         handle.write(b"\nnext")
-    assert reader.read(log, 10) == _reference(log)
+    assert reader.read(log, 10) == (_reference(log), 2)
     assert reader.read(log, 10)[1] == 2
 
 
