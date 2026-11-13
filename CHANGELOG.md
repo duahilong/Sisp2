@@ -13,6 +13,9 @@ tag 上的提交树就是那一版的完整代码与文档快照。
   Python 3.10 / 3.12 的 ruff、`compileall`、pytest 全部通过才构建单文件 exe。
 - 构建生成 SHA256 校验文件，Actions Artifact 保留 7 天；同一个 `nightly` 滚动预发布 Release
   自动更新到对应提交并替换 exe，连续推送只发布最新结果。失败时不替换现有 Release。
+- 首次完整云端运行 `43444839983` 已通过：两个 Python 版本的 741 项测试、ruff、compileall、
+  PyInstaller 构建及 Release 创建均成功；首包 17,934,591 字节，SHA256
+  `1a197067fcaccfa03d2fecdf2b99b2fc5dd7577ed0461eedf49652f175b160af`。
 
 ## 未发布（main）— 第二批外围功能修复
 
