@@ -32,10 +32,6 @@ __all__ = ["GhostStartGate", "PartitionSequencer"]
 # 排队期间的轮询间隔：取消要能在一个可接受的时间内被感知（测试断言 300 ms 内）。
 POLL_SECONDS = 0.2
 
-# 兜底租约：持有闸门的盘超过这个时间还没 done()，放行下一块盘并告警。
-# 真实分区最坏也就几分钟（GHOST_TIMEOUT 之外的部分），30 分钟足够宽松。
-LEASE_SECONDS = 30 * 60.0
-
 
 class PartitionSequencer:
     """按给定顺序串行化「分区组」，与 Ghost/引导无关。
@@ -59,7 +55,6 @@ class PartitionSequencer:
         self._order: list[int] = []
         self._done: set[int] = set()
         self._running: int | None = None
-        self._lease: float = 0.0
         self.set_order(order)
 
     # ------------------------------------------------------------------ 配置
@@ -73,7 +68,6 @@ class PartitionSequencer:
                     self._order.append(value)
             self._done = set()
             self._running = None
-            self._lease = 0.0
             self._cond.notify_all()
 
     def reset(self) -> None:
@@ -86,8 +80,6 @@ class PartitionSequencer:
         cancelled: Callable[[], bool] | None = None,
         *,
         poll: float = POLL_SECONDS,
-        lease: float = LEASE_SECONDS,
-        clock: Callable[[], float] = time.monotonic,
     ) -> bool:
         """等到轮到 ``disk_number`` 再返回 True；排队期间被取消返回 False。
 
@@ -105,15 +97,9 @@ class PartitionSequencer:
                 head = self._head_locked()
                 if head is None or head == target:
                     self._running = target
-                    self._lease = clock() + lease
                     return True
-                # 持有闸门的那块盘超时未完成：放行，避免永久死锁。
-                if self._running is not None and self._lease and clock() > self._lease:
-                    self._done.add(self._running)
-                    self._running = None
-                    self._lease = 0.0
-                    self._cond.notify_all()
-                    continue
+                # 持有闸门只能由 done() 或 reset() 释放。绝不能按等待时长
+                # 推断旧任务已经结束，否则两块盘会同时进入清盘/分区阶段。
                 self._cond.wait(poll)
 
     def done(self, disk_number: int) -> None:
@@ -123,7 +109,6 @@ class PartitionSequencer:
             self._done.add(target)
             if self._running == target:
                 self._running = None
-            self._lease = 0.0
             self._cond.notify_all()
 
     def cancel_waiting(self) -> None:

@@ -697,13 +697,14 @@ def partition_verdict(
                         （EFI → ESP GUID，C/D/E → Basic Data）
     容量                显式分区 |实际 − 计划| ≤ 1 MB；最后那个 auto 分区不能用显式
                         值去比，但要够自己的下限
-    容量闭合            sum(实际分区) + GPT 首尾 2 MB == 盘容量（±2 MB）
+    容量闭合            有 auto 分区时，sum(实际分区) + GPT 首尾 2 MB == 盘容量
+                        （±2 MB）；全显式计划允许有意留下未分配空间
     盘符                计划里的盘符必须真的挂在这个分区上（C/D/E 硬校验；ESP 的
                         临时字母在 Get-Partition 里看不到，用 WMI 关联查，查不到
                         只记 warning）
     卷标                EFI / Windows / Data / Data2 —— 与计划一致
     文件系统            FAT32 / NTFS / exFAT —— 与计划一致
-    盘已吃满            LargestFreeExtent ≤ 2 MB（最后一个分区不带 size=）
+    盘已吃满            仅存在 auto 分区时要求 LargestFreeExtent ≤ 2 MB
     ==================  ==========================================================
 
     纯函数：输入是 PowerShell 查到的真实分区表 + 计划，方便用假 payload 测每一条
@@ -765,9 +766,11 @@ def partition_verdict(
         if got_fs is not None and got_fs.casefold() != want.file_system.casefold():
             problems.append(f"{where}文件系统不符：计划 {want.file_system}，实际 {got_fs}")
 
-    # 最后一个分区是 auto（不带 size=）：核对它吃到了下限以上，且没有留下大块空闲
+    # 只有 auto（不带 size=）分区才应当吃掉剩余空间。全显式计划允许用户
+    # 有意留下未分配空间；每个显式分区的实际大小已在上面逐项核对。
+    auto = [part for part in parts if part.size_mb is None]
     explicit_mb = sum(int(part.size_mb) for part in parts if part.size_mb is not None)
-    if disk_size > 0:
+    if auto and disk_size > 0:
         used_mb = sum((to_int(part.get("size_bytes")) or 0) for part in actual) / BYTES_PER_MB
         slack_mb = disk_size / BYTES_PER_MB - used_mb
         # GPT 首尾各 1 MB 是正常开销；超出 2 MB 说明中间留了未分配
@@ -777,15 +780,14 @@ def partition_verdict(
             problems.append(
                 f"容量对不上：分区合计 {used_mb:.0f} MB，盘容量 {disk_size / BYTES_PER_MB:.0f} MB"
             )
-        auto = [part for part in parts if part.size_mb is None]
-        if auto and used_mb > 0:
+        if used_mb > 0:
             auto_mb = used_mb - explicit_mb
             minimum_gb = MIN_DATA_GB if auto[-1].role == "data" else MIN_EXTRA_DATA_GB
             if auto_mb < minimum_gb * 1024:
                 problems.append(
                     f"{auto[-1].label} 只剩 {auto_mb / 1024:.1f} GB，低于下限 {minimum_gb} GB"
                 )
-    if largest_free > 2 * BYTES_PER_MB:
+    if auto and largest_free > 2 * BYTES_PER_MB:
         problems.append(f"盘上还有 {format_size(largest_free)} 未分配（最后分区应当吃满）")
 
     summary = "、".join(

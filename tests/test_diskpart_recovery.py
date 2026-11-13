@@ -66,6 +66,7 @@ def _ctx(tmp_path, options=None) -> PhaseContext:
         cancel=threading.Event(),
         log=CommandLog(None),
         options=dict(options or {}),
+        identity={"model": "Test Disk 120GB", "size_bytes": None},
     )
 
 

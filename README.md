@@ -97,6 +97,10 @@ python -m pytest tests/ -q
 测试主要依赖替身与注入实现，目标是验证逻辑而非真实设备写盘；`app/safety_guard.py` 会在
 执行前拦下 diskpart/format/bcdboot/ghost64 -clone/写盘 cmdlet 等危险命令（`ghost64 -ver`、`dism /Get-*` 这类只读查询除外，详见[测试指南](Docs/测试指南.md)）。Web API 测试需要 `httpx`；SSE 测试会在后台线程启动真实 uvicorn（随机空闲端口），因此需要 `uvicorn`。不要在真实磁盘环境中尝试写盘测试。
 
+仓库的 `.github/workflows/windows-tests.yml` 会在 GitHub 的 Windows runner 上对 Python 3.10 / 3.12
+运行上述非破坏性测试、ruff 与 `compileall`，适合本机或 VM 暂时不能跑测试时先做逻辑回归。
+**云端全绿只证明替身覆盖的逻辑与兼容性，不能替代隔离 VM 上的真实清盘、多盘串行和写盘验收。**
+
 ## 设计原型
 
 [`design/`](design/) 目录包含 `disk-tools-app.html` 与 `disk-tools-prototype.html` 两个可点击 HTML 界面原型，用于设计参考；原型不连接本项目后端，也不执行磁盘操作。正式运行界面位于 `app/gui_web/ui/index.html`。

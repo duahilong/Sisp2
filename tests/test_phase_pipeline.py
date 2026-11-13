@@ -69,6 +69,7 @@ def _ctx(tmp_path, *, parts=None, letters=None, options=None, cancel=False, on_s
         log=CommandLog(None),
         options=options or {},
         on_step=on_step,
+        identity={"model": "Test Disk 120GB", "size_bytes": None},
     )
 
 
@@ -524,6 +525,7 @@ def test_real_runner_fills_job_progress(tmp_path):
         JobSpec(
             disk_number=2,
             task_payload=payload,
+            expected_identity={"model": "Test Disk 120GB", "size_bytes": None},
             drive_letters=LETTERS,
         ),
         ExecutionPlan(disk_number=2),

@@ -384,6 +384,7 @@ def test_runner_fails_cleanly_when_diskpart_cannot_start(tmp_path):
             "image_info": {"image_path": str(image)},
         },
         drive_letters={"efi": "E", "windows": "F", "data": "G"},
+        expected_identity={"model": "Test Disk 120GB", "size_bytes": None},
     )
 
     result = runner.run(spec, threading.Event())
@@ -861,6 +862,7 @@ def test_runner_keeps_efi_letter_when_switch_off(
         disk_number=2,
         task_payload=payload,
         drive_letters=letters,
+        expected_identity={"model": "Test Disk 120GB", "size_bytes": None},
         runner_options={"release_efi_letter": False},
     )
 
@@ -892,6 +894,7 @@ def test_runner_releases_efi_letter_even_when_image_fails(
         disk_number=2,
         task_payload=payload,
         drive_letters=letters,
+        expected_identity={"model": "Test Disk 120GB", "size_bytes": None},
     )
 
     result = runner.run(spec, threading.Event())
@@ -916,6 +919,7 @@ def _tiny_spec(image, *, payload=None):
     return SimpleNamespace(
         disk_number=2,
         task_payload=payload or _payload(image),
+        expected_identity={"model": "Test Disk 120GB", "size_bytes": None},
         drive_letters={"efi": "E", "windows": "F", "data": "G"},
     )
 

@@ -282,6 +282,19 @@ def test_partition_verdict_rejects_leftover_free_space() -> None:
     assert "未分配" in message
 
 
+def test_partition_verdict_allows_unallocated_space_for_explicit_plan() -> None:
+    """所有分区都显式指定大小时，剩余空间是用户的选择，不应误判为失败。"""
+    parts = plan_partitions(
+        {"partition_info": {"efi_size_mb": 100, "c_size_gb": 120, "data_size_gb": 5}}
+    )
+    payload = _part_payload(largest_free=50 * GIB)
+    payload["partitions"][-1]["size_bytes"] = 5 * GIB
+
+    ok, message, _ = partition_verdict(payload, parts)
+
+    assert ok is True, message
+
+
 def test_partition_verdict_warns_when_efi_letter_missing() -> None:
     """ESP 的临时字母查不到只告警：它是隐藏卷，任务收尾就释放。"""
     payload = _part_payload(drop_efi_letter=True)

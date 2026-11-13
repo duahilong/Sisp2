@@ -104,13 +104,26 @@ def test_enter_returns_false_when_cancelled_while_queued() -> None:
     seq.done(1)
 
 
-def test_stale_lease_releases_next_disk() -> None:
-    """持有者异常卡死时，租约到期要放行下一块盘，不能永久死锁。"""
-    now = [100.0]
+def test_running_disk_is_never_released_by_a_wait_timeout() -> None:
+    """无论等多久都不能把仍在分区的盘当作完成；只能由 done() 释放。"""
     seq = PartitionSequencer([1, 2])
-    assert seq.enter(1, lease=5.0, clock=lambda: now[0]) is True
-    now[0] += 6.0  # 超过租约
-    assert seq.enter(2, poll=0.01, lease=5.0, clock=lambda: now[0]) is True
+    assert seq.enter(1) is True
+    result: dict[str, bool] = {}
+
+    def wait_second() -> None:
+        result["ok"] = seq.enter(2, poll=0.01)
+
+    thread = threading.Thread(target=wait_second)
+    thread.start()
+    time.sleep(0.15)
+    assert thread.is_alive()
+    assert "ok" not in result
+    assert seq.snapshot()["running"] == 1
+    assert seq.snapshot()["finished"] == []
+
+    seq.done(1)
+    thread.join(3)
+    assert result["ok"] is True
     assert seq.snapshot()["finished"] == [1]
 
 

@@ -1,0 +1,45 @@
+name: Windows non-destructive tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    env:
+      SISP_BLOCK_REAL_DISK: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-web.txt -r requirements-dev.txt ruff
+
+      - name: Static lint
+        run: python -m ruff check app tests tools packaging
+
+      - name: Compile sources
+        run: python -m compileall -q app tests tools packaging
+
+      - name: Run isolated tests
+        run: python -m pytest tests -q

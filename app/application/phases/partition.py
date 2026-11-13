@@ -59,8 +59,8 @@ DEFAULT_SETTLE_MS = 1000
 CREATE_REPAIR_ATTEMPTS = 2
 
 # 每段 diskpart 之前复核「要动的还是不是确认时那块盘」的查询次数。
-# 查询失败只记日志、不改变结论（写盘闸门在任务开始前已经复核过一次）；
-# 但**查得到且不一致**（盘号漂移/换盘/脱机/只读/不健康）必须立刻中止。
+# 身份缺失、查询失败或状态不一致都必须中止：这里宁可 fail-closed，
+# 也不能因为 PowerShell 抖动而继续 clean 一块无法确认的盘。
 DISK_GUARD_ATTEMPTS = 2
 
 # 单个分区的格式化尝试次数与等待（秒）。现场证据：
@@ -304,8 +304,13 @@ class PartitionPhase:
         """
         expected = dict(ctx.identity or {})
         if not expected:
-            log.write(f"[复核] {where}前跳过身份复核（任务没有带确认时的身份信息）")
-            return None
+            log.write(f"[复核] {where}前缺少确认时的磁盘身份，拒绝继续写盘")
+            return self._fail(
+                f"{where}前复核未通过：任务缺少确认时的磁盘身份信息。"
+                "已中止，不能仅凭磁盘号执行清盘或分区",
+                disk_touched=disk_touched,
+                extra={"guard_stage": where, "guard_reasons": ["缺少确认时的磁盘身份"]},
+            )
 
         state: dict[str, Any] | None = None
         last_error: Exception | None = None
@@ -313,16 +318,22 @@ class PartitionPhase:
             try:
                 state = self.shell.disk_state(ctx.disk_number)
                 break
-            except Exception as exc:  # noqa: BLE001 - 查不到不改变结论，只记日志
+            except Exception as exc:  # noqa: BLE001 - 统一在下方按复核失败中止
                 last_error = exc
                 if attempt < DISK_GUARD_ATTEMPTS:
                     self._sleep(0.3)
         if state is None:
-            log.write(
-                f"[复核] {where}前查不到磁盘状态，继续执行"
-                f"（身份闸门在任务开始前已经复核过）：{last_error}"
+            log.write(f"[复核] {where}前查不到磁盘状态，拒绝继续写盘：{last_error}")
+            return self._fail(
+                f"{where}前复核未通过：无法读取磁盘身份与健康状态（{last_error}）。"
+                "已中止，不能在无法确认目标磁盘时继续写盘",
+                disk_touched=disk_touched,
+                extra={
+                    "guard_stage": where,
+                    "guard_reasons": ["磁盘状态查询失败"],
+                    "guard_error": str(last_error),
+                },
             )
-            return None
 
         reasons: list[str] = []
         if state.get("is_offline"):
@@ -460,7 +471,24 @@ class PartitionPhase:
             "验收不通过：按真实分区表补做 "
             + "、".join(f"#{pos}（{part.label}）" for pos, part in pending)
         )
-        return all(self._format_one(ctx, log, pos, part) is None for pos, part in pending)
+        for pos, part in pending:
+            got = _actual_partition(actual, pos)
+            file_system = str(got.get("file_system") or "").strip().upper()
+            wanted = str(part.letter or "").strip().upper()[:1]
+            letter_only = (
+                bool(got)
+                and file_system == str(part.file_system or "").strip().upper()
+                and bool(wanted)
+                and _letter_of(got) != wanted
+            )
+            if letter_only:
+                corrected = self._ensure_letter(ctx, log, pos, part)
+                if corrected != wanted or not self._letter_belongs_to(ctx, wanted, pos, part):
+                    return False
+                continue
+            if self._format_one(ctx, log, pos, part) is not None:
+                return False
+        return True
 
     # ------------------------------------------------------------------ 建分区（几何）
     def _run_create(self, ctx: PhaseContext, log: Any) -> tuple[int, str, int]:
@@ -603,6 +631,9 @@ class PartitionPhase:
                 except Exception as exc:  # noqa: BLE001
                     code, output = TOOL_NOT_STARTED, str(exc)
             if code == 0:
+                letter_failure = self._confirm_letter(ctx, log, position, part)
+                if letter_failure is not None:
+                    return letter_failure
                 log.write(
                     f"分区 #{position}（{part.label}）已格式化"
                     + (f"并分配盘符 {part.letter}" if part.letter else "（无盘符）")
@@ -691,20 +722,27 @@ class PartitionPhase:
             log.write(f"兜底格式化前查询分区失败：{exc}")
         got = _actual_partition(actual, position)
         current = _letter_of(got)
-        if current:
-            return current
         wanted = str(part.letter or "").strip().upper()[:1]
         if not wanted:
             return ""
+        if current == wanted:
+            return wanted
+        if actual is None:
+            return ""
+        lines = [
+            f"select disk {int(ctx.disk_number)}",
+            f"select partition {int(position)}",
+        ]
+        if current and current != wanted:
+            # Windows 可能已自动分配另一个字母；直接 assign 会保留旧字母并
+            # 新增一个，而不是替换。先只移除这个分区的旧字母，再挂计划字母。
+            lines.append(f"remove letter={current}")
+            log.write(f"分区 #{position} 当前盘符为 {current}:，改为计划盘符 {wanted}:")
+        lines.extend([f"assign letter={wanted}", "exit"])
         try:
             code, output = self.shell.run_diskpart(
-                [
-                    f"select disk {int(ctx.disk_number)}",
-                    f"select partition {int(position)}",
-                    f"assign letter={wanted}",
-                    "exit",
-                ],
-                title=f"diskpart 脚本（分配盘符 #{position}）",
+                lines,
+                title=f"diskpart 脚本（校正盘符 #{position}）",
             )
         except Exception as exc:  # noqa: BLE001
             log.write(f"兜底格式化前分配盘符失败：{exc}")
@@ -716,6 +754,36 @@ class PartitionPhase:
             )
             return ""
         return wanted
+
+    def _confirm_letter(
+        self,
+        ctx: PhaseContext,
+        log: Any,
+        position: int,
+        part: PlannedPartition,
+    ) -> PhaseOutcome | None:
+        """格式化成功后确认盘符；被 Windows 自动改名时立即校正并复查。"""
+        wanted = str(part.letter or "").strip().upper()[:1]
+        if not wanted:
+            return None
+        try:
+            actual = self.shell.query(ctx.disk_number)
+        except Exception as exc:  # noqa: BLE001
+            return self._fail(
+                f"分区 #{position} 格式化后无法查询盘符：{exc}",
+                disk_touched=True,
+            )
+        current = _letter_of(_actual_partition(actual, position))
+        if current == wanted:
+            return None
+        corrected = self._ensure_letter(ctx, log, position, part)
+        if corrected == wanted and self._letter_belongs_to(ctx, wanted, position, part):
+            return None
+        return self._fail(
+            f"分区 #{position} 已格式化，但计划盘符 {wanted}: 未能分配或复查",
+            disk_touched=True,
+            extra={"failed_partition": position, "expected_letter": wanted},
+        )
 
     def _letter_belongs_to(
         self,
@@ -1106,7 +1174,7 @@ def _needs_format_or_letter(
         return True
     if file_system != str(part.file_system or "").strip().upper():
         return True
-    return bool(part.letter and not (got.get("drive_letter") or got.get("mounted_letter")))
+    return bool(part.letter and _letter_of(got) != str(part.letter).strip().upper()[:1])
 
 
 __all__ = ["EfiLetterReleaser", "PartitionAcceptance", "PartitionPhase"]

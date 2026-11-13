@@ -76,7 +76,7 @@ def _ctx(tmp_path, *, options=None):
         log=CommandLog(None),
         options=dict({"partition_settle_ms": 0, **(options or {})}),
         label="Test Disk（磁盘 1）",
-        identity={},
+        identity={"model": "Test Disk 120GB", "size_bytes": None},
     )
 
 
@@ -233,26 +233,51 @@ def test_format_com_is_skipped_when_no_letter_can_be_assigned(tmp_path) -> None:
     assert shell.formats == [], "拿不到盘符就绝对不能调用 format.com"
 
 
-def test_format_com_uses_the_letter_that_really_belongs_to_the_partition(tmp_path) -> None:
-    """卷上已有一个（非计划的）真实盘符时，兜底就用它——但**必须**是这块分区的。
-
-    这条是安全闸的正面断言：盘符来自"现场查询到的本分区盘符"，不是"计划里那个"，
-    更不是随便挑一个。
-    """
+def test_format_com_corrects_an_existing_wrong_letter_before_formatting(tmp_path) -> None:
+    """Windows 自动挂了非计划盘符时，先移除旧字母，再按计划分配并复查。"""
     parts = _parts()
     payload = build_snapshot(parts)
-    for part in payload["partitions"]:
-        if part.get("number") == 2:
-            part["drive_letter"] = "G"  # 现场挂的是 G，不是计划里的 F
+    windows = next(part for part in payload["partitions"] if part.get("number") == 2)
+    windows["drive_letter"] = "G"  # 现场挂的是 G，不是计划里的 F
+    windows["mounted_letter"] = "G"
+    fails_format = _fails_partition(2)
+
+    def diskpart(lines, title, timeout):
+        if "remove letter=G" in lines and "assign letter=F" in lines:
+            windows["drive_letter"] = "F"
+            windows["mounted_letter"] = "F"
+            return 0, "盘符已校正"
+        return fails_format(lines, title, timeout)
 
     ctx = _ctx(tmp_path)
-    shell = _shell(
-        diskpart_handler=_fails_partition(2),
-        query_handler=lambda _disk: payload,
-    )
-    _phase(shell, format_attempts=2).run(ctx)
+    shell = _shell(diskpart_handler=diskpart, query_handler=lambda _disk: payload)
+    outcome = _phase(shell, format_attempts=2).run(ctx)
 
-    assert shell.formats == [("G", "NTFS", "Windows")]
+    assert outcome.ok is True, outcome.message
+    assert shell.formats == [("F", "NTFS", "Windows")]
+    correction = next(script for script in shell.scripts if "remove letter=G" in script)
+    assert correction[-3:-1] == ["remove letter=G", "assign letter=F"]
+
+
+def test_successful_diskpart_format_also_corrects_wrong_letter(tmp_path) -> None:
+    """不只是 format.com：diskpart 成功后也不能把非计划盘符留到验收。"""
+    parts = _parts()
+    payload = build_snapshot(parts)
+    windows = next(part for part in payload["partitions"] if part.get("number") == 2)
+    windows["drive_letter"] = "G"
+    windows["mounted_letter"] = "G"
+
+    def diskpart(lines, _title, _timeout):
+        if "remove letter=G" in lines and "assign letter=F" in lines:
+            windows["drive_letter"] = "F"
+            windows["mounted_letter"] = "F"
+        return 0, "ok"
+
+    shell = _shell(diskpart_handler=diskpart, query_handler=lambda _disk: payload)
+    outcome = _phase(shell).run(_ctx(tmp_path))
+
+    assert outcome.ok is True, outcome.message
+    assert any("remove letter=G" in script for script in shell.scripts)
 
 
 # ---------------------------------------------------------------- 归因

@@ -61,6 +61,7 @@ def _ctx(tmp_path, *, options=None) -> PhaseContext:
         cancel=threading.Event(),
         log=CommandLog(None),
         options=options or {},
+        identity={"model": "Test Disk 120GB", "size_bytes": None},
     )
 
 
@@ -196,6 +197,7 @@ def test_partition_logs_what_other_disks_are_doing(tmp_path) -> None:
         cancel=threading.Event(),
         log=log,
         options={"partition_settle_ms": 0},
+        identity={"model": "Test Disk 120GB", "size_bytes": None},
     )
     (tmp_path / "tiny.GHO").write_bytes(bytes([0xFE, 0xEF]) + bytes(8))
 

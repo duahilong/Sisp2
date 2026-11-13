@@ -150,8 +150,8 @@ def test_offline_or_readonly_disk_aborts(tmp_path) -> None:
         assert shell.scripts == [], overrides
 
 
-def test_guard_query_failure_does_not_change_the_result(tmp_path) -> None:
-    """复核查询本身失败（PowerShell 抖动/盘刚掉线）→ 只记日志，继续走。"""
+def test_guard_query_failure_aborts_before_any_diskpart(tmp_path) -> None:
+    """复核查询本身失败（PowerShell 抖动/盘刚掉线）→ 绝不能继续清盘。"""
 
     def boom(_n):
         raise RuntimeError("powershell 挂了")
@@ -166,8 +166,11 @@ def test_guard_query_failure_does_not_change_the_result(tmp_path) -> None:
     ctx.log = log
     outcome = _phase(shell).run(ctx)
 
-    assert outcome.ok is True, outcome.message
-    assert "查不到磁盘状态，继续执行" in log.summary()
+    assert outcome.ok is False
+    assert "复核未通过" in (outcome.message or "")
+    assert "查不到磁盘状态，拒绝继续写盘" in log.summary()
+    assert shell.scripts == [], "查不到目标身份时一条 diskpart 都不能执行"
+    assert outcome.disk_touched is False
 
 
 def test_guard_transient_query_error_is_retried(tmp_path) -> None:
@@ -190,15 +193,16 @@ def test_guard_transient_query_error_is_retried(tmp_path) -> None:
     assert shell.disk_states  # 复核真的被调用了
 
 
-def test_guard_without_identity_skips_silently(tmp_path) -> None:
-    """老调用方（没有确认时的身份）不该被新护栏挡住。"""
+def test_guard_without_identity_aborts_before_any_diskpart(tmp_path) -> None:
+    """没有确认时的身份就没有可靠的复核基准，不能仅凭盘号清盘。"""
     shell = _shell(msr=None, query_handler=lambda _n: build_snapshot(_parts()))
     ctx = _ctx(tmp_path, identity={})
     outcome = _phase(shell).run(ctx)
 
-    assert outcome.ok is True
-    assert shell.disk_states == [], "没有身份时不该白花一次 PowerShell"
-    assert "跳过身份复核" in ctx.log.summary()
+    assert outcome.ok is False
+    assert shell.disk_states == [], "没有身份基准时不必再查询，直接拒绝"
+    assert shell.scripts == []
+    assert "缺少确认时的磁盘身份" in ctx.log.summary()
 
 
 def test_guard_runs_again_before_create(tmp_path) -> None:
@@ -278,7 +282,7 @@ def test_msr_delete_treats_already_gone_as_success(tmp_path) -> None:
 def _acceptance_repair_shell(*, repair_succeeds=True):
     """验收第一次不通过（Windows 分区没挂盘符），补做之后通过。
 
-    判定"补做"的依据是「第 2 个分区被格式化了几次」：正常流程一次，补做再一次。
+    判定"补做"的依据是「第 2 个分区被分配盘符几次」：正常流程一次，补做再一次。
     """
     parts = _parts()
     partial = build_snapshot(parts)
@@ -286,18 +290,21 @@ def _acceptance_repair_shell(*, repair_succeeds=True):
     for part in partial["partitions"]:
         if part.get("label") == "Windows":
             part["drive_letter"] = None
-    state = {"p2_formats": 0}
+            part["mounted_letter"] = None
+    state = {"p2_formats": 0, "p2_assigns": 0}
 
     def diskpart(lines, _title, _timeout):
         joined = " ".join(lines)
         if "select partition 2" in joined and "format" in joined:
             state["p2_formats"] += 1
-            if not repair_succeeds and state["p2_formats"] > 1:
+        if "select partition 2" in joined and "assign letter=F" in joined:
+            state["p2_assigns"] += 1
+            if not repair_succeeds and state["p2_assigns"] > 1:
                 return 1, "补做也失败"
         return 0, "ok"
 
     def query(_n):
-        return full if state["p2_formats"] >= 2 else partial
+        return full if state["p2_assigns"] >= 2 else partial
 
     return _shell(msr=None, diskpart_handler=diskpart, query_handler=query), state
 
@@ -308,11 +315,37 @@ def test_acceptance_failure_is_repaired_then_passes(tmp_path) -> None:
     outcome = _phase(shell).run(ctx)
 
     assert outcome.ok is True, outcome.message
-    assert state["p2_formats"] == 2, "正常格式化一次 + 验收后补做一次"
+    assert state["p2_formats"] == 1, "只缺盘符时不应重复格式化"
+    assert state["p2_assigns"] == 2, "正常分配一次 + 验收后补做一次"
     text = ctx.log.summary()
     assert "验收不通过：按真实分区表补做" in text
     repair_scripts = [script for script in shell.scripts if "assign letter=F" in " ".join(script)]
     assert len(repair_scripts) >= 2, "补做脚本里应当有 assign letter=F"
+
+
+def test_acceptance_repairs_wrong_letter_without_reformatting(tmp_path) -> None:
+    """仅盘符不符时只 remove + assign，不应把已经好的文件系统再格式化一次。"""
+    parts = _parts()
+    payload = build_snapshot(parts)
+    windows = next(part for part in payload["partitions"] if part.get("number") == 2)
+    windows["drive_letter"] = "G"
+    windows["mounted_letter"] = "G"
+
+    def diskpart(lines, _title, _timeout):
+        if "remove letter=G" in lines and "assign letter=F" in lines:
+            windows["drive_letter"] = "F"
+            windows["mounted_letter"] = "F"
+        return 0, "ok"
+
+    shell = _shell(msr=None, diskpart_handler=diskpart, query_handler=lambda _n: payload)
+    ctx = _ctx(tmp_path)
+
+    assert _phase(shell)._repair_after_acceptance(ctx, ctx.log) is True
+    correction = next(script for script in shell.scripts if "remove letter=G" in script)
+    assert correction[-3:-1] == ["remove letter=G", "assign letter=F"]
+    assert not any(
+        any(line.startswith("format") for line in script) for script in shell.scripts
+    )
 
 
 def test_acceptance_failure_with_nothing_to_repair_still_fails(tmp_path) -> None:

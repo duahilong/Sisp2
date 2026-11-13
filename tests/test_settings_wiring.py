@@ -312,6 +312,7 @@ def test_runner_accepts_runner_options_on_spec(
         disk_number=1,
         task_payload=payload,
         drive_letters=letters,
+        expected_identity={"model": "Test Disk 120GB", "size_bytes": None},
         # 旧的引导源选项即便传进来也不该影响 bcdboot 的命令行
         runner_options={"boot_source": "D:/boot"},
     )
