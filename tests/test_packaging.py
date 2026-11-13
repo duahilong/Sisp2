@@ -10,10 +10,13 @@
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import struct
 import sys
 from pathlib import Path
+
+import pytest
 
 from app import resources
 from app.version import __version__
@@ -26,6 +29,15 @@ VERSION_TUPLE = tuple(int(part) for part in __version__.split(".")) + (0,) * (
 
 ROOT = Path(__file__).resolve().parent.parent
 PACKAGING = ROOT / "packaging"
+
+
+def _load_build_script():
+    """按路径加载，避免与第三方 ``packaging`` / ``build`` 包重名。"""
+    spec = importlib.util.spec_from_file_location("sisp2_build_script", PACKAGING / "build.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_version_info_matches_app_version() -> None:
@@ -41,6 +53,46 @@ def test_version_info_matches_app_version() -> None:
     assert parse(prodvers.group(1)) == VERSION_TUPLE
     assert f"StringStruct('FileVersion', '{__version__}.0')" in text
     assert f"StringStruct('ProductVersion', '{__version__}.0')" in text
+
+
+def test_beta_version_is_shared_by_app_and_windows_resources() -> None:
+    build = _load_build_script()
+    version = "1.5.0-beta.8"
+    assert build.version_tuple(version) == (1, 5, 0, 8)
+    assert build.version_tuple("1.5.0") == (1, 5, 0, 0)
+
+    app_text = build.replace_app_version('__version__ = "1.5.0"\n', version)
+    assert app_text == '__version__ = "1.5.0-beta.8"\n'
+    resource = build.render_version_info(
+        (PACKAGING / "version_info.txt").read_text(encoding="utf-8"), version
+    )
+    assert resource.count("filevers=(1, 5, 0, 8)") == 1
+    assert resource.count("prodvers=(1, 5, 0, 8)") == 1
+    assert f"StringStruct('FileVersion', '{version}')" in resource
+    assert f"StringStruct('ProductVersion', '{version}')" in resource
+    with pytest.raises(ValueError, match="不支持的版本号"):
+        build.version_tuple("1.5.0-rc.1")
+
+
+def test_version_injection_restores_sources_after_build(tmp_path: Path, monkeypatch) -> None:
+    """CI 注入完整版本不能把 beta 编号写回仓库的基础版本模板。"""
+    build = _load_build_script()
+    app_file = tmp_path / "version.py"
+    resource_file = tmp_path / "version_info.txt"
+    original_app = b'__version__ = "1.5.0"\r\n'
+    original_resource = (PACKAGING / "version_info.txt").read_bytes()
+    app_file.write_bytes(original_app)
+    resource_file.write_bytes(original_resource)
+    monkeypatch.setattr(build, "BASE_VERSION_FILE", app_file)
+    monkeypatch.setattr(build, "VERSION_INFO_FILE", resource_file)
+
+    with build.injected_version("1.5.0-beta.8"):
+        assert '__version__ = "1.5.0-beta.8"' in app_file.read_text(encoding="utf-8")
+        assert "StringStruct('ProductVersion', '1.5.0-beta.8')" in resource_file.read_text(
+            encoding="utf-8"
+        )
+    assert app_file.read_bytes() == original_app
+    assert resource_file.read_bytes() == original_resource
 
 
 def test_spec_declares_single_gui_executable() -> None:

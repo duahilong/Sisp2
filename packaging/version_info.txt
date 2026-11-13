@@ -1,5 +1,6 @@
 # Windows 版本资源（PyInstaller version= 参数）。
-# 版本号必须与 app/version.py 的 __version__ 一致，tests/test_packaging.py 会检查。
+# 仓库模板与 app/version.py 的基础版本一致，tests/test_packaging.py 会检查。
+# CI 的 beta.N 由 build.py --version 在构建期临时注入，打包后恢复模板。
 VSVersionInfo(
   ffi=FixedFileInfo(
     filevers=(1, 5, 0, 0),

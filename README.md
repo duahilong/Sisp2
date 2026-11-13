@@ -99,7 +99,9 @@ python -m pytest tests/ -q
 
 仓库的 `.github/workflows/windows-tests.yml` 会在 GitHub 的 Windows runner 上对 Python 3.10 / 3.12
 运行上述非破坏性测试、ruff 与 `compileall`。main 推送且两个版本全部通过后，会继续用 Python 3.12
-构建 `Sisp2.exe`、生成 SHA256，并更新同一个 `nightly` 滚动预发布 Release；失败时不会替换旧产物。
+构建 `Sisp2-beta.exe`、生成 SHA256，并更新同一个 `beta` 滚动预发布 Release；失败时不会替换旧产物。
+完整版本号为 ``app/version.py`` 的基础版本加 GitHub 运行编号，例如 `1.5.0-beta.8`；
+同一个值会写入关于页面、exe 的 FileVersion/ProductVersion 和 Release 标题。
 PR 与手动触发只检查，不发布。连续推送只让最新提交发布，避免旧构建覆盖新构建。
 **云端全绿只证明替身覆盖的逻辑与兼容性，不能替代隔离 VM 上的真实清盘、多盘串行和写盘验收。**
 
@@ -126,7 +128,8 @@ PR 与手动触发只检查，不发布。连续推送只让最新提交发布�
   在 VM 上跑 `ruff` / `pytest` / `tools/ui_check.py` / `ui_smoke` → 本地 `python packaging/build.py` →
   提交 → `git tag -a v1.1.1 -m "..."` → `git push origin main --tags`。
 - 发布产物不入库（`.gitignore` 跳过 `dist/`）。每次 main 推送通过全部检查后，自动把
-  `Sisp2.exe` 与 `Sisp2.exe.sha256` 上传到 `nightly` 滚动预发布，并将 `nightly` tag 移到对应提交；
+  `Sisp2-beta.exe` 与 `Sisp2-beta.exe.sha256` 上传到 `beta` 滚动预发布，并将 `beta` tag 移到对应提交；
+  固定下载地址为 `https://github.com/duahilong/Sisp2/releases/download/beta/Sisp2-beta.exe`。
   同一提交也在 Actions Artifacts 保留 7 天。正式稳定版仍使用 `v*` 注释 tag 单独发布。
 
 ## 文档索引

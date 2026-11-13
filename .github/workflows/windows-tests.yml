@@ -1,4 +1,4 @@
-name: Windows test, build and nightly release
+name: Windows test, build and beta release
 
 on:
   push:
@@ -49,8 +49,8 @@ jobs:
       - name: Run isolated tests
         run: python -m pytest tests -q
 
-  nightly:
-    name: Build exe and update rolling prerelease
+  beta:
+    name: Build exe and update rolling beta
     needs: test
     # PR 和手动触发只检查；只有 main 的 push 才更新滚动预发布。
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -69,20 +69,36 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - name: Compute the full prerelease version
+        id: version
+        shell: pwsh
+        run: |
+          $match = Select-String -Path "app/version.py" -Pattern '^__version__ = "(\d+\.\d+\.\d+)"$'
+          if (-not $match) { throw "无法从 app/version.py 读取 X.Y.Z 基础版本" }
+          $base = $match.Matches[0].Groups[1].Value
+          $full = "${base}-beta.${env:GITHUB_RUN_NUMBER}"
+          "full_version=$full" >> $env:GITHUB_OUTPUT
+
       - name: Install build dependencies
         run: python -m pip install -r requirements-build.txt
 
-      - name: Build single-file exe
-        run: python packaging/build.py
+      - name: Build single-file exe with the full version
+        run: python packaging/build.py --version "${{ steps.version.outputs.full_version }}"
 
-      - name: Verify artifact and create checksum
+      - name: Verify artifact version and create checksum
         id: artifact
         shell: pwsh
         run: |
-          $file = Get-Item "dist/Sisp2.exe"
-          if ($file.Length -le 0) { throw "Sisp2.exe 是空文件" }
+          $expected = "${{ steps.version.outputs.full_version }}"
+          $built = Get-Item "dist/Sisp2.exe"
+          if ($built.Length -le 0) { throw "Sisp2.exe 是空文件" }
+          if ($built.VersionInfo.ProductVersion -ne $expected) {
+            throw "exe ProductVersion=$($built.VersionInfo.ProductVersion)，应为 $expected"
+          }
+          Copy-Item $built.FullName "dist/Sisp2-beta.exe"
+          $file = Get-Item "dist/Sisp2-beta.exe"
           $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  Sisp2.exe" | Set-Content "dist/Sisp2.exe.sha256" -Encoding ascii
+          "$hash  Sisp2-beta.exe" | Set-Content "dist/Sisp2-beta.exe.sha256" -Encoding ascii
           "sha256=$hash" >> $env:GITHUB_OUTPUT
           "size=$($file.Length)" >> $env:GITHUB_OUTPUT
 
@@ -91,21 +107,23 @@ jobs:
         with:
           name: sisp2-${{ github.sha }}
           path: |
-            dist/Sisp2.exe
-            dist/Sisp2.exe.sha256
+            dist/Sisp2-beta.exe
+            dist/Sisp2-beta.exe.sha256
           if-no-files-found: error
           retention-days: 7
 
-      - name: Publish rolling nightly release
+      - name: Publish rolling beta release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          full_version="${{ steps.version.outputs.full_version }}"
           cat > release-notes.md <<EOF
-          这是 main 分支的滚动预发布，每次推送并通过全部自动化检查后更新。
+          这是 main 分支的滚动 Beta，每次推送并通过全部自动化检查后更新。
 
+          - 完整版本：${full_version}
           - 提交：${GITHUB_SHA}
           - 工作流：https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
           - exe 字节数：${{ steps.artifact.outputs.size }}
@@ -116,13 +134,18 @@ jobs:
           EOF
 
           # Release 的源码快照也必须跟随 exe 所对应的提交，不能只替换附件。
-          git tag -f nightly "${GITHUB_SHA}"
-          git push -f origin refs/tags/nightly
+          git tag -f beta "${GITHUB_SHA}"
+          git push -f origin refs/tags/beta
 
-          title="Nightly · ${GITHUB_SHA::7}"
-          if gh release view nightly >/dev/null 2>&1; then
-            gh release edit nightly --title "$title" --notes-file release-notes.md
+          title="Sisp2 ${full_version}"
+          if gh release view beta >/dev/null 2>&1; then
+            gh release edit beta --title "$title" --notes-file release-notes.md
           else
-            gh release create nightly --prerelease --title "$title" --notes-file release-notes.md
+            gh release create beta --prerelease --title "$title" --notes-file release-notes.md
           fi
-          gh release upload nightly dist/Sisp2.exe dist/Sisp2.exe.sha256 --clobber
+          gh release upload beta dist/Sisp2-beta.exe dist/Sisp2-beta.exe.sha256 --clobber
+
+          # 新通道的附件完整上传后，才移除旧 nightly，避免迁移期间没有可下载版本。
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release delete nightly --yes --cleanup-tag
+          fi

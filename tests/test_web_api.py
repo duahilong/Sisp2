@@ -103,7 +103,11 @@ def _preflight() -> dict[str, Any]:
 
 
 def _build_client(
-    tmp_path: Path, *, host_check: bool = False, log_dir: Path | None = None
+    tmp_path: Path,
+    *,
+    host_check: bool = False,
+    log_dir: Path | None = None,
+    app_version: str | None = None,
 ) -> tuple[TestClient, WorkflowController]:
     wf = WorkflowController(
         service=_FakeService([_disk(1), _disk(2)]),
@@ -113,7 +117,8 @@ def _build_client(
     )
     wf.start()
     store = build_store(tmp_path / "settings.json")
-    api = WebApi(wf, settings=store, log_dir=log_dir)
+    version_args = {} if app_version is None else {"app_version": app_version}
+    api = WebApi(wf, settings=store, log_dir=log_dir, **version_args)
     app = create_app(api, wf, host_check=host_check)
     return TestClient(app), wf
 
@@ -141,6 +146,12 @@ def test_health_and_index(client: TestClient) -> None:
 def test_app_info(client: TestClient) -> None:
     data = _unwrap(client.get("/api/info"))
     assert "python" in data
+
+
+def test_app_info_returns_the_exact_prerelease_version(tmp_path: Path) -> None:
+    app_client, _wf = _build_client(tmp_path, app_version="1.5.0-beta.8")
+    data = _unwrap(app_client.get("/api/info"))
+    assert data["version"] == "1.5.0-beta.8"
 
 
 # ---------------------------------------------------------------- Host 校验
