@@ -12,7 +12,12 @@
 3. 每个 ``import ... from './x.js'`` 的目标文件存在；
 4. 具名导入的每个名字在目标模块里**确实被导出**（ES 模块链接期错误会让整个
    模块图不实例化，界面只剩静态 HTML）；
-5. ``derive.js`` 的纯函数在给定输入下输出正确（用 node 真跑一遍）。
+5. ``derive.js`` 的纯函数在给定输入下输出正确（用 node 真跑一遍）；
+6. DOM/字段契约：``.pline`` 必须带 ``data-role``（``ui_smoke`` 靠它数数据分区）、
+   引导修复结果必须用 ``success`` 判成败、boot finding 的说明必须兼容 ``message``
+   —— 这三条都真的出过错（详见 ``_CONTRACTS`` 里的注释）。
+
+检查 6 不需要 ``node``，所以在没有 node 的机器上也会跑。
 
 返回码：0 全部通过，1 有失败项。失败明细打到 stdout。
 """
@@ -313,6 +318,48 @@ def check_named_exports() -> list[str]:
     return failures
 
 
+# DOM/字段契约：(文件, 必须出现的模式, 必须同时出现的配对模式, 失败说明)。
+# 都是真发生过的错：第一条导致 ui_smoke 数不到“数据分区”，第二/三条导致
+# 引导修复成功被渲染成失败、引导检查的每一条说明都是空白。
+_CONTRACTS: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "view-install.js",
+        r'class="pline',
+        r"data-role",
+        ".pline 行必须带 data-role（ui_smoke 按 .pline[data-role^=\"data\"] 数数据分区）",
+    ),
+    (
+        "dialogs.js",
+        r"result\.exit",
+        r"result\.success",
+        "引导修复结果必须用 result.success 判成败（后端返回的是 success/message，没有 exit）",
+    ),
+    (
+        "dialogs.js",
+        r"item\.detail",
+        r"item\.message",
+        "boot finding 的说明字段是 message（后端 _finding() 只给 message），detail 只能作兼容",
+    ),
+)
+
+
+def check_contracts() -> list[str]:
+    """DOM/字段契约的字符串级检查（不依赖 node）。"""
+    failures: list[str] = []
+    for name, required, paired, message in _CONTRACTS:
+        path = JS / name
+        if not path.is_file():
+            failures.append(f"缺少 {name}")
+            continue
+        source = path.read_text(encoding="utf-8")
+        if not re.search(required, source):
+            failures.append(f"{name}: 找不到预期模式 {required!r}（{message}）")
+            continue
+        if not re.search(paired, source):
+            failures.append(f"{name}: {message}")
+    return failures
+
+
 def check_html_assets() -> list[str]:
     index = UI / "index.html"
     if not index.is_file():
@@ -367,12 +414,20 @@ def check_derive(node: str, tmp: Path) -> list[str]:
 
 
 def main() -> int:
+    failures: list[str] = []
+    # 契约检查不需要 node，先跑（没有 node 的机器也能拦住这类错）。
+    failures += check_contracts()
+
     node = shutil.which("node")
     if not node:
-        print("跳过：PATH 里没有 node")
+        if failures:
+            print("前端检查失败（未跑 node 相关项）：")
+            for item in failures:
+                print(f"  - {item}")
+            return 1
+        print("跳过：PATH 里没有 node（契约检查已通过）")
         return 0
 
-    failures: list[str] = []
     failures += check_syntax(node)
     failures += check_imports()
     failures += check_named_exports()
@@ -391,7 +446,10 @@ def main() -> int:
         for item in failures:
             print(f"  - {item}")
         return 1
-    print(f"前端检查通过：{len(list(JS.glob('*.js')))} 个模块，导入/导出、资源引用与 derive.js 行为正常")
+    print(
+        f"前端检查通过：{len(list(JS.glob('*.js')))} 个模块，"
+        "导入/导出、资源引用、契约与 derive.js 行为正常"
+    )
     return 0
 
 

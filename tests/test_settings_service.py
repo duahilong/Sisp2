@@ -279,3 +279,22 @@ def test_two_system_slots_need_distinct_labels(store: SettingsStore) -> None:
             }
         )
     assert excinfo.value.field == "sysImageBLabel"
+
+
+def test_update_keeps_memory_when_save_fails(
+    store: SettingsStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """落盘失败时内存不能先变（旧写法会“报保存失败但行为已按新值走”）。"""
+    before = store.get()["partitionSettleMs"]
+
+    def boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("app.modules.settings.service.os.replace", boom)
+    with pytest.raises(OSError):
+        store.update({"partitionSettleMs": 4321})
+
+    assert store.get()["partitionSettleMs"] == before
+    # 重读磁盘也必须是旧值（没有写出半份文件）。
+    reloaded = SettingsStore(store.path, which=lambda _name: None)
+    assert reloaded.get()["partitionSettleMs"] == before

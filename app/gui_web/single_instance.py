@@ -44,8 +44,27 @@ class _WinMutex:
     """``CreateMutexW`` 的最小封装（只在 Windows 上可用）。"""
 
     def __init__(self) -> None:
+        from ctypes import wintypes
+
         self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
         self._user32 = ctypes.WinDLL("user32", use_last_error=True)  # type: ignore[attr-defined]
+        # 显式声明签名：不声明时 restype 默认是 ``c_int``，64 位下 ``HANDLE`` /
+        # ``HWND`` 会被截断成 32 位。现存的句柄值都很小所以一直没出事，
+        # 属于“运气正确”——一旦系统给一个 > 0x7fffffff 的句柄就会关错对象。
+        self._kernel32.CreateMutexW.argtypes = (
+            wintypes.LPVOID,
+            wintypes.BOOL,
+            wintypes.LPCWSTR,
+        )
+        self._kernel32.CreateMutexW.restype = wintypes.HANDLE
+        self._kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        self._kernel32.CloseHandle.restype = wintypes.BOOL
+        self._user32.FindWindowW.argtypes = (wintypes.LPCWSTR, wintypes.LPCWSTR)
+        self._user32.FindWindowW.restype = wintypes.HWND
+        self._user32.ShowWindow.argtypes = (wintypes.HWND, ctypes.c_int)
+        self._user32.ShowWindow.restype = wintypes.BOOL
+        self._user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
+        self._user32.SetForegroundWindow.restype = wintypes.BOOL
 
     def create(self, name: str) -> tuple[int, bool]:
         """创建/打开互斥体，返回 ``(句柄, 是否已经存在)``。"""

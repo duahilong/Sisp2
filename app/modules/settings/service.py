@@ -278,19 +278,29 @@ class SettingsStore:
             merged[key] = coerce_value(key, value)
 
         self._validate_relations(merged)
+        # 先落盘、成功后再换内存：磁盘满 / 目录被占 / 杀软锁文件时 ``save()`` 会抛，
+        # 旧写法先改 ``self._data`` 再落盘，会出现“界面报保存失败，但实际行为已按
+        # 新设置走”（下次保存成功才写进文件，中间状态无法解释）。
+        self.save(merged)
         self._data = merged
-        self.save()
         return dict(self._data)
 
     def reset(self) -> dict[str, Any]:
-        self._data = dict(self._defaults)
-        self.save()
+        defaults = dict(self._defaults)
+        self.save(defaults)
+        self._data = defaults
         return dict(self._data)
 
-    def save(self) -> None:
+    def save(self, data: dict[str, Any] | None = None) -> None:
+        """把设置写入 ``settings.json``（原子替换）。
+
+        ``data`` 默认是当前内存值；``update()`` / ``reset()`` 传“候选值”，
+        落盘成功后才替换内存，避免内存与文件不一致。
+        """
+        snapshot = dict(self._data if data is None else data)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(
-            {"version": SETTINGS_VERSION, "settings": self._data},
+            {"version": SETTINGS_VERSION, "settings": snapshot},
             ensure_ascii=False,
             indent=2,
         )

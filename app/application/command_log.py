@@ -119,7 +119,10 @@ class CommandLog:
             except OSError:
                 _LOGGER.warning("写执行日志失败: %s", self.path, exc_info=True)
 
+        warned = False
+
         def write(line: str) -> None:
+            nonlocal warned
             stamped = f"[{datetime.now().strftime('%H:%M:%S')}] {line}"
             with self._lock:
                 self._lines.append(stamped)
@@ -130,7 +133,15 @@ class CommandLog:
                     except (OSError, ValueError):
                         # ``ValueError`` = 句柄已被 ``finally`` 关掉（取消/超时后
                         # 读线程还在写）。吞掉它，别让一句日志把读取线程打崩。
-                        _LOGGER.warning("写执行日志失败: %s", self.path, exc_info=True)
+                        # 但**只告警一次**：Ghost 进度每秒好几行，每行一条带堆栈的
+                        # warning 会把 stdout / app.log 刷满（取消后特别明显）。
+                        if not warned:
+                            warned = True
+                            _LOGGER.warning(
+                                "写执行日志失败（后续同类错误不再重复告警）: %s",
+                                self.path,
+                                exc_info=True,
+                            )
 
         try:
             yield write

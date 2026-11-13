@@ -178,12 +178,26 @@ def relaunch_as_admin(argv: list[str] | None = None, *, n_show: int = SW_SHOWNOR
     else:
         executable, params = sys.executable, subprocess.list2cmdline(["-m", MODULE, *arguments])
     try:
-        result = ctypes.windll.shell32.ShellExecuteW(
+        from ctypes import wintypes
+
+        shell32 = ctypes.windll.shell32  # type: ignore[attr-defined]
+        # 显式声明签名：``HINSTANCE`` 是指针，默认 ``c_int`` 在 64 位下会被截断，
+        # ``> 32`` 的判断就看错值了（UAC 明明拉起成功却当成失败）。
+        shell32.ShellExecuteW.argtypes = (
+            wintypes.HWND,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            ctypes.c_int,
+        )
+        shell32.ShellExecuteW.restype = ctypes.c_void_p
+        result = shell32.ShellExecuteW(
             None, "runas", executable, params, None, int(n_show)
         )
     except Exception:  # noqa: BLE001
         return False
-    return result > 32
+    return int(result or 0) > 32
 
 
 def backend_argv(args, port: int, parent_pid: int) -> list[str]:
@@ -224,7 +238,17 @@ def _parent_alive(pid: int) -> bool:
     if pid <= 0 or pid == os.getpid():
         return False
     try:
-        kernel32 = ctypes.windll.kernel32
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        # 声明签名：``OpenProcess`` 返回 ``HANDLE``，默认 ``c_int`` 在 64 位下会
+        # 被截断；截断后的句柄交给 ``WaitForSingleObject`` 可能匹配到别的对象。
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
         handle = kernel32.OpenProcess(_SYNCHRONIZE, False, pid)
     except Exception:  # noqa: BLE001 - 非 Windows / 受限环境
         return False
@@ -283,7 +307,17 @@ def configure_window_logging(settings_path: str | None, settings: dict | None) -
 def alert_blocking(message: str, title: str = "硬盘工具箱") -> None:
     """模态消息框：窗口打不开时必须让用户看见原因，而不是静默退出。"""
     try:
-        ctypes.windll.user32.MessageBoxW(None, message, title, 0x10 | 0x00040000)
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        user32.MessageBoxW.argtypes = (
+            wintypes.HWND,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.UINT,
+        )
+        user32.MessageBoxW.restype = ctypes.c_int
+        user32.MessageBoxW(None, message, title, 0x10 | 0x00040000)
     except Exception:  # noqa: BLE001, S110 - 弹不出框也不能让进程崩在入口
         pass
 

@@ -82,14 +82,29 @@ def relaunch_as_admin(
                 payload = [script, *arguments] if script.endswith(".py") else list(arguments)
             parameters = subprocess.list2cmdline(payload)
 
-        result = ctypes.windll.shell32.ShellExecuteW(
+        from ctypes import wintypes
+
+        shell32 = ctypes.windll.shell32  # type: ignore[attr-defined]
+        # 显式声明签名（同 ``app.gui_web.main.relaunch_as_admin``）：
+        # ``HINSTANCE`` 不声明时按 ``c_int`` 返，64 位下被截断，
+        # ``> 32`` 的成功判断不可靠。
+        shell32.ShellExecuteW.argtypes = (
+            wintypes.HWND,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            ctypes.c_int,
+        )
+        shell32.ShellExecuteW.restype = ctypes.c_void_p
+        result = shell32.ShellExecuteW(
             None, "runas", target, parameters, None, SW_SHOWNORMAL
         )
     except Exception:  # noqa: BLE001 - 提权失败只返回 False，由调用方决定怎么提示
         return False
 
     try:
-        return int(result) > SE_HINSTANCE_SUCCESS_MIN
+        return int(result or 0) > SE_HINSTANCE_SUCCESS_MIN
     except (TypeError, ValueError):
         return False
 

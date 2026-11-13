@@ -54,7 +54,7 @@ async function loadBootReport(modal) {
 function bootBodyHtml(report) {
   const findings = (report.findings || []).map((item) => `<div class="finding ${item.level === 'error' ? 'bad' : (item.level === 'warn' ? 'warn' : 'ok')}">
       <span class="fk">${esc(BOOT_CODES[item.code] || item.code || item.level)}</span>
-      <span class="fb"><span class="ft">${esc(item.title || '')}</span><br>${esc(item.detail || '')}</span>
+      <span class="fb"><span class="ft">${esc(item.title || '')}</span><br>${esc(item.detail || item.message || '')}</span>
     </div>`).join('') || '<div class="finding ok"><span class="fk">ok</span><span class="fb">引导看起来正常</span></div>';
 
   const targets = (report.targets || []).map((target) => {
@@ -109,8 +109,17 @@ async function repairBoot(diskNumber, modal) {
         <tbody>${steps || '<tr><td colspan="3" class="dim">没有步骤</td></tr>'}</tbody></table></div>
       ${result.log_path ? `<div class="set-mono" style="margin-top:8px">${esc(result.log_path)}</div>` : ''}
       ${result.script ? `<div class="codebox" style="margin-top:10px">${esc(result.script.join('\n'))}</div>` : ''}`;
-    pushLog(`修复引导 磁盘 ${diskNumber}：${result.exit === 0 ? '成功' : `失败（退出码 ${result.exit}）`}`, result.exit === 0 ? '' : 'err', 'boot');
-    toast(result.exit === 0 ? '引导修复完成' : '引导修复失败，看日志', result.exit === 0 ? '' : 'err');
+    // 后端返回的是 ``{success, message, steps, log_path}``（``boot/service.py``），
+    // 没有 ``exit`` 字段——旧代码只看 ``result.exit === 0``，于是**成功也渲染成
+    // “失败（退出码 undefined）”，日志还标红**。失败路径走的是 BootError 异常，
+    // 所以只有成功这条被写错了。
+    const repaired = result.success === true || result.exit === 0;
+    pushLog(
+      `修复引导 磁盘 ${diskNumber}：${repaired ? '成功' : `失败${result.message ? `（${result.message}）` : ''}`}`,
+      repaired ? '' : 'err',
+      'boot',
+    );
+    toast(repaired ? '引导修复完成' : '引导修复失败，看日志', repaired ? '' : 'err');
   } catch (exc) {
     modal.body.innerHTML = `<div class="warnbox"><span class="wi">!</span>
       <div>${esc(exc instanceof ApiError ? exc.message : String(exc))}</div></div>`;

@@ -8,8 +8,9 @@
 
 本层由 ``app/gui_web/server.py`` 调用，不直接接触 pywebview；文件选择框经
 ``app.gui_web.native_dialog``（本进程弹 WinForms 对话框，跨进程拿不到窗口）。
-禁止在此层写任何磁盘、PowerShell 或业务判断逻辑；
-也不 import 除 ``workflow`` 之外的模块，避免把重依赖带进界面进程。
+禁止在此层写任何磁盘、PowerShell 或业务判断逻辑；除 ``workflow`` 外只依赖
+同包的 ``log_tail``（纯标准库的增量读尾），不 import 应用层模块，
+避免把重依赖带进界面进程。
 
 设置相关方法（get_settings / update_settings / reset_settings /
 probe_path / pick_path / open_settings_folder），
@@ -32,6 +33,9 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:  # 只为类型标注，避免 import 时拉起整条应用层依赖链
     from app.application.workflow import WorkflowController
     from app.modules.settings.service import SettingsStore
+
+# 日志尾部增量读取（纯标准库；不带应用层依赖，api 层只允许这一个例外）
+from app.gui_web.log_tail import LogTailReader
 
 # 版本号只有一个来源（app/version.py），打包时的 Windows 版本资源也用它
 from app.version import __version__
@@ -102,6 +106,9 @@ class WebApi:
         # 整体复制一遍（5000 条时每次事件都 O(n)）。
         self._events: deque[dict[str, Any]] = deque(maxlen=MAX_BUFFER)
         self._base = 0
+        # 日志尾部增量读取：进度页展开日志时每 1.5 秒调一次 ``job_log()``，
+        # 历史实现每次读整个文件（Ghost 两小时能有几十 MB）。
+        self._log_tail = LogTailReader()
         self._lock = threading.Lock()
         self._unsub = wf.job_manager.subscribe(self._on_event)
         if settings is None:
@@ -272,13 +279,12 @@ class WebApi:
         allowed = self._allowed_log_path(path)
         if allowed is None:
             return err("E_PATH", "日志路径不在日志目录内，拒绝读取", {"path": str(path)})
+        limit = max(1, min(int(tail or 200), 5000))
         try:
-            text = allowed.read_text(encoding="utf-8", errors="replace")
+            lines, total = self._log_tail.read(allowed, limit)
         except OSError as exc:
             return err("E_LOG", f"读取日志失败：{exc}")
-        lines = text.splitlines()
-        limit = max(1, min(int(tail or 200), 5000))
-        return ok({"path": str(allowed), "lines": lines[-limit:], "total": len(lines)})
+        return ok({"path": str(allowed), "lines": lines, "total": total})
 
     # ------------------------------------------------------------------ 日志导出
     def export_logs(

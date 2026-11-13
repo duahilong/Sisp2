@@ -434,6 +434,10 @@ class BootRepairer:
             return {
                 **plan,
                 "success": True,
+                # 历史上前端读 ``result.exit`` 判断成败，而这里只给了 ``success``，
+                # 于是“修复成功”会被渲染成“失败（退出码 undefined）”。现在两个都带：
+                # 失败路径本来就抛 BootError，不需要伪造非 0 退出码。
+                "exit": 0,
                 "message": f"硬盘 {disk_number} 引导已重写",
                 "steps": steps,
                 "log_path": str(log.path) if log.path else "",

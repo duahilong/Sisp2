@@ -204,3 +204,24 @@ def test_stream_process_heartbeats_when_command_is_silent(tmp_path):
     assert summary.count("仍在运行") >= 2
     # 心跳只是日志，不污染子进程输出。
     assert "仍在运行" not in outcome.output
+
+
+def test_streaming_warns_once_after_handle_closed(tmp_path, caplog):
+    """句柄关掉后继续写：不能崩，也不能每行一条带堆栈的 warning。
+
+    Ghost 进度每秒好几行，取消之后读线程还会继续写几秒——旧写法会把
+    stdout / app.log 刷成成百上千条堆栈，真正有用的日志被溺没。
+    """
+    import logging
+
+    log = CommandLog(tmp_path)
+    with caplog.at_level(logging.WARNING):
+        with log.streaming() as write:
+            write("first")
+        for index in range(5):
+            write(f"late {index}")
+
+    warnings = [item for item in caplog.records if "写执行日志失败" in item.getMessage()]
+    assert len(warnings) == 1
+    # 内存里的尾部仍然完整（只是文件写不进去）。
+    assert log.summary().count("late") == 5

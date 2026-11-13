@@ -535,6 +535,30 @@ def test_job_log_rejects_non_log_suffix(tmp_path: Path, monkeypatch: pytest.Monk
     assert body["error"]["code"] == "E_PATH"
 
 
+def test_job_log_tracks_appends_without_rereading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """连续轮询只申请增量：新行能看到、总数正确（接口契约不变）。"""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    log_file = logs / "disk-runner-20260101-000000-1.log"
+    log_file.write_text("a\nb\n", encoding="utf-8")
+    client, wf = _build_client(tmp_path, log_dir=logs)
+    monkeypatch.setattr(
+        wf.job_manager, "get", lambda job_id: _fake_job(job_id, str(log_file))
+    )
+
+    first = _unwrap(client.get("/api/jobs/any/log?tail=5"))
+    assert first["lines"] == ["a", "b"]
+    assert first["total"] == 2
+
+    with log_file.open("a", encoding="utf-8") as handle:
+        handle.write("c\nd\n")
+    second = _unwrap(client.get("/api/jobs/any/log?tail=2"))
+    assert second["lines"] == ["c", "d"]
+    assert second["total"] == 4
+
+
 # ---------------------------------------------------------------- 危险操作确认
 
 def test_resolve_identity_prefers_caller_then_scans(tmp_path: Path, monkeypatch) -> None:
