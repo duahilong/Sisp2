@@ -26,6 +26,9 @@ tag 上的提交树就是那一版的完整代码与文档快照。
 
 VM 验证：Ruff、`compileall` 通过，完整测试 **760 passed**（80.59 秒）；仍只有一条
 Starlette 第三方弃用警告。全程启用 `SISP_BLOCK_REAL_DISK=1`，未做真实写盘。
+PyInstaller 6.22.3 已在同一 VM 构建 `1.5.0-beta.10`，产物 17,108,566 字节，SHA256
+`2657bd1a0f7469e8f3e903e99ff0bf29e4f3f4cf59bd95bae9ca93adb50bdffb`；exe 的 `/health`
+与 `/api/info` 冒烟通过，FileVersion / ProductVersion 与完整版本一致。
 
 ## 未发布（main）— Windows VM 复验与 Beta 9
 
