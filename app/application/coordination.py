@@ -59,8 +59,10 @@ class PartitionSequencer:
 
     # ------------------------------------------------------------------ 配置
     def set_order(self, order: Iterable[int]) -> None:
-        """设定本批盘的顺序（去重、保持给定顺序）。重复调用会重置状态。"""
+        """设定新批次的顺序；旧批次未结束时拒绝重置，避免破坏互斥。"""
         with self._cond:
+            if self._running is not None or self._head_locked() is not None:
+                raise RuntimeError("上一批分区任务尚未结束，不能重置分区顺序")
             self._order = []
             for number in order:
                 value = int(number)
@@ -83,23 +85,28 @@ class PartitionSequencer:
     ) -> bool:
         """等到轮到 ``disk_number`` 再返回 True；排队期间被取消返回 False。
 
-        不在顺序表里的盘（例如单盘任务、或调用方忘了 set_order）直接放行，
-        避免一个配置疏漏把任务永久卡死。
+        已配置批次时，不在顺序表里的盘必须拒绝，不能绕过全局互斥。没有配置
+        顺序表时仍支持独立单盘调用，但同样要等待上一个运行者释放闸门。
         """
         target = int(disk_number)
         with self._cond:
-            if target not in self._order:
-                self._running = target
-                return True
+            if self._order and target not in self._order:
+                raise RuntimeError(f"磁盘 {target} 不在本批分区顺序表内，拒绝绕过串行闸门")
             while True:
                 if cancelled is not None and cancelled():
                     return False
-                head = self._head_locked()
-                if head is None or head == target:
+                if self._running == target:
+                    raise RuntimeError(f"磁盘 {target} 已经持有分区闸门，不能重复进入")
+                if self._order:
+                    head = self._head_locked()
+                    ready = head is None or head == target
+                else:
+                    ready = self._running is None
+                if ready and self._running is None:
                     self._running = target
                     return True
-                # 持有闸门只能由 done() 或 reset() 释放。绝不能按等待时长
-                # 推断旧任务已经结束，否则两块盘会同时进入清盘/分区阶段。
+                # 持有闸门只能由 done() 或批次结束后的 reset() 释放。绝不能按
+                # 等待时长推断旧任务已经结束，否则两块盘会同时清盘/分区。
                 self._cond.wait(poll)
 
     def done(self, disk_number: int) -> None:

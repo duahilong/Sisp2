@@ -32,6 +32,7 @@ from typing import Any
 from app.application.command_log import CommandLog, _CommandLog
 from app.application.disk_label import disk_label, disk_slug, model_of
 from app.application.partitions import (
+    allow_small_partitions,
     create_partition_lines,
     diskpart_lines,
     msr_delete_lines,
@@ -215,7 +216,7 @@ class WindowsDiskRunner:
         # 收尾阶段：设置里留空时阶段自己记 skipped，所以这里无条件装配。
         copy_source = str(ctx.options.get("copy_source") or "")
         return JobPipeline(
-            partition=PartitionPhase(shell),
+            partition=PartitionPhase(shell, allow_small=ctx.allow_small_partitions),
             system=SystemPhase(
                 GhostImagePhase(
                     process, ghost=self.ghost, cwd=cwd, start_gate=self._ghost_gate
@@ -287,6 +288,7 @@ class WindowsDiskRunner:
             work_dir=work_dir,
             label=label,
             identity=identity,
+            allow_small_partitions=allow_small_partitions(payload),
         )
 
         missing_tools = [

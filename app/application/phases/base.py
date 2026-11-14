@@ -45,6 +45,8 @@ class PhaseContext:
     # 分区阶段在每段 diskpart 之前复核「要动的还是不是这块盘」，防止热插拔导致
     # 盘号漂移后把别的盘清掉。
     identity: Mapping[str, Any] = field(default_factory=dict)
+    # 分区下限策略也必须进入最终验收；不能只在前置检查里放宽。
+    allow_small_partitions: bool = False
     env: Mapping[str, str] | None = None
     on_step: Any = None
     # 本任务独占的 Ghost 工作目录（放 ghosterr.txt / ghost32.dmp）；结束后由

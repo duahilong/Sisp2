@@ -75,11 +75,53 @@ def test_done_is_idempotent_and_releases_head() -> None:
     assert seq.snapshot()["finished"] == [1, 2]
 
 
-def test_unknown_disk_passes_through() -> None:
-    """没被 set_order() 收录的盘直接放行：单盘任务不该被闸门卡住。"""
+def test_unknown_disk_cannot_bypass_configured_batch() -> None:
+    """没被 set_order() 收录的盘必须拒绝，不能在别人的分区期间直通。"""
     seq = PartitionSequencer([1])
     assert seq.enter(1) is True
-    assert seq.enter(7) is True
+    with pytest.raises(RuntimeError, match="不在本批分区顺序表"):
+        seq.enter(7)
+    seq.done(1)
+
+
+def test_unordered_single_calls_still_share_one_mutex() -> None:
+    """没有顺序表的独立调用仍受同一把互斥锁保护。"""
+    seq = PartitionSequencer()
+    assert seq.enter(1) is True
+    result: dict[str, bool] = {}
+
+    def wait_second() -> None:
+        result["ok"] = seq.enter(2, poll=0.01)
+
+    thread = threading.Thread(target=wait_second)
+    thread.start()
+    time.sleep(0.05)
+    assert "ok" not in result
+    seq.done(1)
+    thread.join(3)
+    assert result["ok"] is True
+    seq.done(2)
+
+
+def test_set_order_cannot_reset_an_active_or_pending_batch() -> None:
+    seq = PartitionSequencer([1, 2])
+    with pytest.raises(RuntimeError, match="尚未结束"):
+        seq.set_order([3])
+    seq.enter(1)
+    with pytest.raises(RuntimeError, match="尚未结束"):
+        seq.set_order([3])
+    seq.done(1)
+    seq.done(2)
+    seq.set_order([3])
+    assert seq.snapshot()["order"] == [3]
+
+
+def test_running_disk_cannot_enter_twice() -> None:
+    seq = PartitionSequencer([1])
+    assert seq.enter(1) is True
+    with pytest.raises(RuntimeError, match="不能重复进入"):
+        seq.enter(1)
+    seq.done(1)
 
 
 def test_enter_returns_false_when_cancelled_while_queued() -> None:

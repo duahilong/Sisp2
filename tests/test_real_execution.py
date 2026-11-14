@@ -660,6 +660,41 @@ def test_release_efi_letter_switch_on_removes_letter():
     assert shell.released == [(2, 1, "E")]
 
 
+def test_release_efi_letter_rechecks_identity_in_production_path():
+    shell = FakeShell()
+    identity = {"disk_number": 2, "model": "Test Disk 120GB", "size_bytes": None}
+
+    _releaser(shell).release(
+        disk_number=2,
+        letter="E",
+        outcome=_touched(1),
+        options={},
+        log=_CommandLog(None),
+        identity=identity,
+    )
+
+    assert shell.released == [(2, 1, "E")]
+    assert shell.disk_states == [2]
+
+
+def test_release_efi_letter_skips_when_identity_changes():
+    log = _CommandLog(None)
+    shell = FakeShell()  # 默认没有序列号，与下面的确认身份不符
+    identity = {"disk_number": 2, "serial_number": "SN-EXPECTED", "size_bytes": 100}
+
+    _releaser(shell).release(
+        disk_number=2,
+        letter="E",
+        outcome=_touched(1),
+        options={},
+        log=log,
+        identity=identity,
+    )
+
+    assert shell.released == []
+    assert "身份或状态与确认时不一致" in log.summary()
+
+
 def test_release_efi_letter_switch_off_does_not_even_query():
     """关掉开关时连 ESP 分区号都不查（不碰盘，性能与安全都更好）。"""
     log = _CommandLog(None)
@@ -1107,6 +1142,31 @@ def test_partition_verification_failure_never_reaches_image(
         "ok",
     ]
     assert next(step for step in result.steps if step.key == "layout").status == "failed"
+
+
+def test_runner_carries_small_partition_policy_into_final_acceptance(
+    tmp_path, make_runner, fake_shell, fake_process, make_snapshot
+):
+    """小盘逃生阀必须穿过 runner/PhaseContext，一直生效到最终验收。"""
+    image = _tiny_image(tmp_path)
+    payload = _payload(image)
+    parts = _parts(payload)
+
+    def small_auto(disk):
+        snapshot = make_snapshot(parts)
+        auto = snapshot["partitions"][-1]
+        old_size = auto["size_bytes"]
+        auto["size_bytes"] = 5 * 1024**3
+        snapshot["disk_size_bytes"] -= old_size - auto["size_bytes"]
+        return snapshot
+
+    shell = fake_shell(msr=None, query_handler=small_auto)
+    runner = make_runner(shell=shell, process=fake_process())
+    result = runner.run(_tiny_spec(image, payload=payload), threading.Event())
+
+    assert result.success is True, result.error
+    layout = next(step for step in result.steps if step.key == "layout")
+    assert layout.details["allow_small"] is True
 
 
 def test_partition_step_details_carry_verification(

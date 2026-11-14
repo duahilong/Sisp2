@@ -89,9 +89,7 @@ VOLUME_READY_TIMEOUT = 12.0
 VOLUME_READY_INTERVAL = 0.4
 
 # 验收判据可替换（默认就是 ``partitions.partition_verdict``）。
-Acceptance = Callable[
-    [Mapping[str, Any], Sequence[PlannedPartition]], tuple[bool, str, dict[str, Any]]
-]
+Acceptance = Callable[..., tuple[bool, str, dict[str, Any]]]
 
 
 class PartitionAcceptance:
@@ -101,9 +99,16 @@ class PartitionAcceptance:
     与装机之后"能不能开机"的校验是两件事，以前混在一起，界面上看不出来。
     """
 
-    def __init__(self, shell: DiskpartShell, verdict: Acceptance = partition_verdict) -> None:
+    def __init__(
+        self,
+        shell: DiskpartShell,
+        verdict: Acceptance = partition_verdict,
+        *,
+        allow_small: bool = False,
+    ) -> None:
         self.shell = shell
         self._verdict = verdict
+        self.allow_small = bool(allow_small)
 
     def run(
         self,
@@ -112,7 +117,7 @@ class PartitionAcceptance:
         log: Any,
     ) -> tuple[bool, str, dict[str, Any]]:
         payload = self.shell.query(disk_number)
-        ok, message, details = self._verdict(payload, parts)
+        ok, message, details = self._verdict(payload, parts, allow_small=self.allow_small)
         log.write(f"分区验收：{'通过' if ok else '不通过'} —— {message}")
         for warning in details.get("warnings") or ():
             log.write(f"分区验收（警告）：{warning}")
@@ -130,6 +135,7 @@ class PartitionPhase:
         acceptance: PartitionAcceptance | None = None,
         *,
         verdict: Acceptance = partition_verdict,
+        allow_small: bool = False,
         wipe_attempts: int = WIPE_ATTEMPTS,
         retry_delay: float = WIPE_RETRY_DELAY,
         sleep: Callable[[float], None] = time.sleep,
@@ -142,7 +148,9 @@ class PartitionPhase:
         ready_interval: float = VOLUME_READY_INTERVAL,
     ) -> None:
         self.shell = shell
-        self.acceptance = acceptance or PartitionAcceptance(shell, verdict)
+        self.acceptance = acceptance or PartitionAcceptance(
+            shell, verdict, allow_small=allow_small
+        )
         self.wipe_attempts = max(1, int(wipe_attempts))
         self.retry_delay = max(0.0, float(retry_delay))
         self._sleep = sleep
@@ -174,17 +182,15 @@ class PartitionPhase:
         if self._settle_ms:
             log.write(f"每次 diskpart 之间等待 {self._settle_ms} ms（设置 partitionSettleMs）")
 
-        # ===== 0：动盘之前复核身份（热插拔会让盘号漂移）=====
-        guard = self._guard(ctx, log, where="清盘", disk_touched=False)
-        if guard is not None:
-            return guard
-
-        # ===== ① 清盘 + 转 GPT（幂等，允许重试）=====
+        # ===== ① 清盘 + 转 GPT（每次尝试前都复核身份）=====
         ctx.notify("efi", "running", "清盘并重建分区表")
         try:
-            code, output, attempts = self._run_wipe(ctx, log)
+            wiped = self._run_wipe(ctx, log)
         except Exception as exc:  # noqa: BLE001 - 统一翻成步骤失败
             return self._fail(f"无法执行 diskpart：{exc}")
+        if isinstance(wiped, PhaseOutcome):
+            return wiped
+        code, output, attempts = wiped
         if code != 0:
             return self._fail(
                 self._wipe_failure_message(code, attempts),
@@ -222,16 +228,15 @@ class PartitionPhase:
             if failure is not None:
                 return failure
 
-        # ===== ④ 建分区（**只建几何**：不格式化、不分配盘符）=====
-        # 清盘已经动过盘，这里再看一眼：盘要是中途掉线/换了，立刻停手。
-        guard = self._guard(ctx, log, where="建分区", disk_touched=True)
-        if guard is not None:
-            return guard
+        # ===== ④ 建分区（每次创建/续跑前复核；只建几何）=====
         self._settle(ctx, log, "建分区前")
         try:
-            code, output, repairs = self._run_create(ctx, log)
+            created = self._run_create(ctx, log)
         except Exception as exc:  # noqa: BLE001
             return self._fail(f"无法执行 diskpart：{exc}", disk_touched=True)
+        if isinstance(created, PhaseOutcome):
+            return created
+        code, output, repairs = created
         if code != 0:
             return self._fail(
                 self._create_failure_message(code, repairs),
@@ -261,7 +266,9 @@ class PartitionPhase:
             ok, message, details = self.acceptance.run(ctx.disk_number, ctx.parts, log)
         except Exception as exc:  # noqa: BLE001
             return self._fail(f"无法验证分区结果：{exc}", disk_touched=True)
-        if not ok and self._repair_after_acceptance(ctx, log):
+        if not ok and self._repair_after_acceptance(
+            ctx, log, details.get("issues") or ()
+        ):
             # 补做成功（典型：某个分区没格式化 / 盘符没挂上），再验一次
             try:
                 ok, message, details = self.acceptance.run(ctx.disk_number, ctx.parts, log)
@@ -392,6 +399,16 @@ class PartitionPhase:
         output = ""
         for attempt in range(1, total + 1):
             reason = "删除 MSR 前" if attempt == 1 else f"删除 MSR 前（第 {attempt} 次）"
+            if ctx.cancelled():
+                return PhaseOutcome(
+                    ok=False,
+                    cancelled=True,
+                    disk_touched=True,
+                    message="任务已取消（盘已清空，MSR 删除尚未继续）",
+                )
+            guard = self._guard(ctx, log, where=reason, disk_touched=True)
+            if guard is not None:
+                return guard
             self._settle(ctx, log, reason)
             try:
                 code, output = self.shell.run_diskpart(
@@ -415,9 +432,13 @@ class PartitionPhase:
             # 重试前复查：上一条可能"删掉了但报错"，再删会撞"分区不存在"
             try:
                 still = self.shell.find_msr(ctx.disk_number, label="复查 MSR")
-            except Exception as exc:  # noqa: BLE001 - 查不到就只能按原分区号重试
-                log.write(f"复查 MSR 失败（按原分区号重试）：{exc}")
-                still = number
+            except Exception as exc:  # noqa: BLE001 - 无法复查时不能沿用旧编号删除
+                return self._fail(
+                    f"删除 MSR 后复查失败，拒绝按旧分区号重试：{exc}",
+                    code=code,
+                    output=output,
+                    disk_touched=True,
+                )
             if still is None:
                 log.write("复查 MSR：已经不存在（上一条其实是成功的），继续下一步")
                 code = 0
@@ -445,14 +466,17 @@ class PartitionPhase:
         return None
 
     # ------------------------------------------------------------------ 验收补救
-    def _repair_after_acceptance(self, ctx: PhaseContext, log: Any) -> bool:
-        """验收不通过时，把「没格式化 / 没挂盘符」的分区按原路径再补一次。
-
-        补做复用逐分区那条路径（含 format.com /X 兜底），比单发一条 diskpart
-        脚本更可能真的修好；大小/类型不符这类"补不动"的问题不硬来——直接交给
-        验收报错，人工判断比乱改安全。
-        """
+    def _repair_after_acceptance(
+        self,
+        ctx: PhaseContext,
+        log: Any,
+        issues: Sequence[Mapping[str, Any]] = (),
+    ) -> bool:
+        """只补救明确的文件系统/盘符问题；几何错误和缺失分区不乱修。"""
         if self.create_repair_attempts <= 0:
+            return False
+        if any(not bool(issue.get("repairable")) for issue in issues):
+            log.write("验收包含大小、类型、卷标或缺失分区等不可补救项，跳过格式化补救")
             return False
         try:
             actual = self.shell.query(ctx.disk_number)
@@ -472,16 +496,32 @@ class PartitionPhase:
             + "、".join(f"#{pos}（{part.label}）" for pos, part in pending)
         )
         for pos, part in pending:
+            if ctx.cancelled():
+                log.write("验收补救已取消，不再执行新的写盘命令")
+                return False
+            try:
+                # 前一项修复可能改变卷和盘符映射；不能把初始快照用于后续决策。
+                actual = self.shell.query(ctx.disk_number)
+            except Exception as exc:  # noqa: BLE001
+                log.write(f"补做分区 #{pos} 前查询失败：{exc}")
+                return False
             got = _actual_partition(actual, pos)
+            if not got:
+                log.write(f"分区 #{pos} 不存在，验收补救不会格式化不存在的分区")
+                return False
             file_system = str(got.get("file_system") or "").strip().upper()
             wanted = str(part.letter or "").strip().upper()[:1]
             letter_only = (
-                bool(got)
-                and file_system == str(part.file_system or "").strip().upper()
+                file_system == str(part.file_system or "").strip().upper()
                 and bool(wanted)
                 and _letter_of(got) != wanted
             )
             if letter_only:
+                guard = self._guard(
+                    ctx, log, where=f"验收补做盘符 #{pos}", disk_touched=True
+                )
+                if guard is not None:
+                    return False
                 corrected = self._ensure_letter(ctx, log, pos, part)
                 if corrected != wanted or not self._letter_belongs_to(ctx, wanted, pos, part):
                     return False
@@ -491,13 +531,22 @@ class PartitionPhase:
         return True
 
     # ------------------------------------------------------------------ 建分区（几何）
-    def _run_create(self, ctx: PhaseContext, log: Any) -> tuple[int, str, int]:
+    def _run_create(
+        self, ctx: PhaseContext, log: Any
+    ) -> tuple[int, str, int] | PhaseOutcome:
         """只建分区几何，返回 ``(退出码, 输出, 续跑次数)``。
 
         瞬时错误（CRC/设备未就绪/卷占用）按**真实分区表补齐缺失项**：重跑原脚本会
         撞「分区已存在」，所以只能按现场状态生成 create 行。这一段不格式化，
         失败也不会留下半格式化的卷。
         """
+        if ctx.cancelled():
+            return PhaseOutcome(
+                ok=False, cancelled=True, disk_touched=True, message="任务已取消（尚未建分区）"
+            )
+        guard = self._guard(ctx, log, where="建分区", disk_touched=True)
+        if guard is not None:
+            return guard
         code, output = self.shell.run_diskpart(
             create_geometry_lines(ctx.disk_number, ctx.parts),
             title="diskpart 脚本（建分区）",
@@ -525,6 +574,18 @@ class PartitionPhase:
                 log.write("补齐检查：盘上的分区已经与计划一致，无需补做")
                 return 0, output, repairs
             repairs += 1
+            if ctx.cancelled():
+                return PhaseOutcome(
+                    ok=False,
+                    cancelled=True,
+                    disk_touched=True,
+                    message="任务已取消（分区续跑尚未继续）",
+                )
+            guard = self._guard(
+                ctx, log, where=f"补齐分区（第 {round_no} 次）", disk_touched=True
+            )
+            if guard is not None:
+                return guard
             log.write(f"补齐第 {round_no} 次：只补缺失的 create 命令（合计 {len(lines) - 2} 条）")
             try:
                 code, output = self.shell.run_diskpart(
@@ -597,6 +658,13 @@ class PartitionPhase:
         history: list[str] = []
         total = self.format_attempts
         for attempt in range(1, total + 1):
+            if ctx.cancelled():
+                return PhaseOutcome(
+                    ok=False,
+                    cancelled=True,
+                    disk_touched=True,
+                    message=f"任务已取消（分区 #{position} 的格式化尚未继续）",
+                )
             tool = self.format_plan[(attempt - 1) % len(self.format_plan)]
             label = self._tool_label(tool)
             if attempt > 1:
@@ -611,9 +679,11 @@ class PartitionPhase:
                     self.shell.rescan()
                 except Exception as exc:  # noqa: BLE001
                     log.write(f"重试前重新扫描失败（已忽略）：{exc}")
-            self._settle(
-                ctx, log, f"格式化分区 #{position}（{part.label}，第 {attempt} 次）前"
-            )
+            reason = f"格式化分区 #{position}（{part.label}，第 {attempt} 次）"
+            self._settle(ctx, log, reason + "前")
+            guard = self._guard(ctx, log, where=reason, disk_touched=True)
+            if guard is not None:
+                return guard
 
             if tool == "format.com":
                 code, output = self._format_with_tool(ctx, log, position, part)
@@ -776,6 +846,11 @@ class PartitionPhase:
         current = _letter_of(_actual_partition(actual, position))
         if current == wanted:
             return None
+        guard = self._guard(
+            ctx, log, where=f"校正分区 #{position} 的盘符", disk_touched=True
+        )
+        if guard is not None:
+            return guard
         corrected = self._ensure_letter(ctx, log, position, part)
         if corrected == wanted and self._letter_belongs_to(ctx, wanted, position, part):
             return None
@@ -832,7 +907,9 @@ class PartitionPhase:
         return self.format_backoff[min(max(0, index), len(self.format_backoff) - 1)]
 
     # ------------------------------------------------------------------ 清盘重试
-    def _run_wipe(self, ctx: PhaseContext, log: Any) -> tuple[int, str, int]:
+    def _run_wipe(
+        self, ctx: PhaseContext, log: Any
+    ) -> tuple[int, str, int] | PhaseOutcome:
         """跑「清盘 + 转 GPT」，返回 ``(退出码, 输出, 实际尝试次数)``。
 
         只在**瞬时类**失败（0x80070017 数据错误 / 0x80070015 设备未就绪 / I/O 类）
@@ -843,6 +920,18 @@ class PartitionPhase:
         code = -1
         output = ""
         for attempt in range(1, total + 1):
+            touched = attempt > 1  # 上一次 clean 可能已经成功，只是 convert/返回码失败
+            if ctx.cancelled():
+                return PhaseOutcome(
+                    ok=False,
+                    cancelled=True,
+                    disk_touched=touched,
+                    message="任务已取消（清盘重试尚未继续）",
+                )
+            where = "清盘" if attempt == 1 else f"清盘重试（第 {attempt} 次）"
+            guard = self._guard(ctx, log, where=where, disk_touched=touched)
+            if guard is not None:
+                return guard
             code, output = self.shell.run_diskpart(
                 wipe_lines(ctx.disk_number), title="diskpart 脚本（清盘 + 转 GPT）"
             )
@@ -1087,6 +1176,7 @@ class EfiLetterReleaser:
         options: Mapping[str, Any] | None,
         log: Any,
         label: str = "",
+        identity: Mapping[str, Any] | None = None,
     ) -> None:
         if outcome is None or not outcome.disk_touched:
             return
@@ -1099,6 +1189,34 @@ class EfiLetterReleaser:
                 "不执行 remove letter"
             )
             return
+        if identity is not None:
+            # 生产编排总会传确认时的身份；Ghost 可能已运行很久，收尾仍要防止
+            # 盘号漂移后从另一块盘的 ESP 上移除同名盘符。None 仅保留给旧的外部
+            # 直接调用方；空 dict 表示生产任务没有基准，必须跳过。
+            if not identity:
+                log.write("释放 EFI 盘符前缺少确认时的磁盘身份，已跳过")
+                return
+            state: dict[str, Any] | None = None
+            last_error: Exception | None = None
+            for attempt in range(1, DISK_GUARD_ATTEMPTS + 1):
+                try:
+                    state = self.shell.disk_state(disk_number)
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    if attempt < DISK_GUARD_ATTEMPTS:
+                        time.sleep(0.3)
+            if state is None:
+                log.write(f"释放 EFI 盘符前无法复核磁盘身份，已跳过：{last_error}")
+                return
+            actual = build_worker_disk_identity(state)
+            if (
+                state.get("is_offline")
+                or state.get("is_read_only")
+                or not identity_matches(identity, actual, require_strong=False)
+            ):
+                log.write("释放 EFI 盘符前磁盘身份或状态与确认时不一致，已跳过")
+                return
         number = outcome.efi_partition
         if number is None:
             try:

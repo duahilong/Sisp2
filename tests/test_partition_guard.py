@@ -205,13 +205,107 @@ def test_guard_without_identity_aborts_before_any_diskpart(tmp_path) -> None:
     assert "缺少确认时的磁盘身份" in ctx.log.summary()
 
 
-def test_guard_runs_again_before_create(tmp_path) -> None:
-    """清盘后、建分区前要再看一眼（此时盘已经动过了）。"""
+def test_guard_runs_before_every_destructive_step(tmp_path) -> None:
+    """清盘、建分区以及三个分区的格式化都要分别复核。"""
     shell = _shell(msr=None, query_handler=lambda _n: build_snapshot(_parts()))
     outcome = _phase(shell).run(_ctx(tmp_path))
 
     assert outcome.ok is True
-    assert len(shell.disk_states) == 2  # 清盘前 + 建分区前
+    assert len(shell.disk_states) == 2 + len(_parts())
+
+
+def test_identity_change_aborts_before_first_format(tmp_path) -> None:
+    calls = {"n": 0}
+
+    def changed_after_create(_n):
+        calls["n"] += 1
+        serial = "SN-TEST" if calls["n"] <= 2 else "SN-OTHER"
+        return _state(serial_number=serial)
+
+    shell = _shell(
+        msr=None,
+        disk_state_handler=changed_after_create,
+        query_handler=lambda _n: build_snapshot(_parts()),
+    )
+    outcome = _phase(shell).run(_ctx(tmp_path))
+
+    assert outcome.ok is False
+    assert "格式化分区 #1" in (outcome.message or "")
+    assert len(shell.scripts) == 2, "只有清盘和建分区，不能开始格式化"
+
+
+def test_wipe_retry_rechecks_identity_after_rescan(tmp_path) -> None:
+    calls = {"n": 0}
+
+    def changed_after_first_wipe(_n):
+        calls["n"] += 1
+        return _state(serial_number="SN-TEST" if calls["n"] == 1 else "SN-OTHER")
+
+    shell = _shell(
+        msr=None,
+        disk_state_handler=changed_after_first_wipe,
+        diskpart_handler=lambda *_args: (CRC, "CRC"),
+        query_handler=lambda _n: build_snapshot(_parts()),
+    )
+    outcome = _phase(shell).run(_ctx(tmp_path))
+
+    assert outcome.ok is False
+    assert "清盘重试" in (outcome.message or "")
+    assert len(shell.scripts) == 1, "身份变化后不能再次 clean"
+
+
+def test_msr_retry_query_failure_is_fail_closed(tmp_path) -> None:
+    queries = {"n": 0}
+
+    def find_msr(_n):
+        queries["n"] += 1
+        if queries["n"] == 1:
+            return 1
+        raise RuntimeError("分区枚举不可用")
+
+    def diskpart(lines, _title, _timeout):
+        if "delete partition override" in lines:
+            return CRC, "CRC"
+        return 0, "ok"
+
+    shell = _shell(
+        msr=find_msr,
+        diskpart_handler=diskpart,
+        query_handler=lambda _n: build_snapshot(_parts()),
+    )
+    outcome = _phase(shell).run(_ctx(tmp_path))
+
+    assert outcome.ok is False
+    assert "拒绝按旧分区号重试" in (outcome.message or "")
+    deletes = [
+        script for script in shell.scripts if "delete partition override" in script
+    ]
+    assert len(deletes) == 1
+
+
+def test_cancel_stops_before_the_next_format_attempt(tmp_path) -> None:
+    ctx = _ctx(tmp_path)
+
+    def diskpart(lines, _title, _timeout):
+        if any(line.startswith("format quick") for line in lines):
+            ctx.cancel.set()
+            return CRC, "transient"
+        return 0, "ok"
+
+    shell = _shell(
+        msr=None,
+        diskpart_handler=diskpart,
+        query_handler=lambda _n: build_snapshot(_parts()),
+    )
+    outcome = _phase(shell).run(ctx)
+
+    assert outcome.cancelled is True
+    formats = [
+        script
+        for script in shell.scripts
+        if any(line.startswith("format quick") for line in script)
+    ]
+    assert len(formats) == 1
 
 
 # ---------------------------------------------------------------- 删 MSR 重试
@@ -369,7 +463,7 @@ def test_acceptance_failure_with_nothing_to_repair_still_fails(tmp_path) -> None
 
     assert outcome.ok is False
     assert "分区验收不通过" in (outcome.message or "")
-    assert "没有可补做的项" in ctx.log.summary()
+    assert "不可补救项" in ctx.log.summary()
 
 
 def test_acceptance_repair_disabled_by_zero_attempts(tmp_path) -> None:
@@ -379,6 +473,38 @@ def test_acceptance_repair_disabled_by_zero_attempts(tmp_path) -> None:
     assert outcome.ok is False
     assert state["p2_formats"] == 1, "关掉补做就只能格式化一次"
     assert "分区验收不通过" in (outcome.message or "")
+
+
+def test_acceptance_repair_never_formats_a_missing_partition(tmp_path) -> None:
+    parts = _parts()
+    actual = build_snapshot(parts)
+    actual["partitions"] = [
+        part for part in actual["partitions"] if part.get("number") != 2
+    ]
+    shell = _shell(msr=None, query_handler=lambda _n: actual)
+
+    repaired = _phase(shell)._repair_after_acceptance(_ctx(tmp_path), CommandLog(None))
+
+    assert repaired is False
+    assert shell.scripts == []
+
+
+def test_acceptance_repair_skips_all_writes_when_geometry_is_wrong(tmp_path) -> None:
+    from app.application.partitions import partition_verdict
+
+    parts = _parts()
+    actual = build_snapshot(parts)
+    actual["partitions"][1]["size_bytes"] -= 10 * 1024**2
+    actual["partitions"][2]["drive_letter"] = "X"
+    ok, _message, details = partition_verdict(actual, parts, allow_small=True)
+    assert ok is False
+    shell = _shell(msr=None, query_handler=lambda _n: actual)
+    ctx = _ctx(tmp_path)
+
+    repaired = _phase(shell)._repair_after_acceptance(ctx, ctx.log, details["issues"])
+
+    assert repaired is False
+    assert shell.scripts == []
 
 
 # ---------------------------------------------------------------- 日志可读性

@@ -274,6 +274,23 @@ def test_partition_verdict_rejects_wrong_file_system() -> None:
     assert "文件系统不符" in message
 
 
+@pytest.mark.parametrize(
+    ("field", "code"),
+    [
+        ("gpt_type", "GPT_TYPE_MISSING"),
+        ("file_system", "FS_MISSING"),
+        ("label", "LABEL_MISSING"),
+    ],
+)
+def test_partition_verdict_rejects_missing_required_metadata(field, code) -> None:
+    """查询缺字段是验收数据不完整，不能当成字段正确而放行。"""
+    payload = _part_payload()
+    payload["partitions"][1][field] = None
+    ok, _message, details = partition_verdict(payload, _part_parts())
+    assert ok is False
+    assert code in {issue["code"] for issue in details["issues"]}
+
+
 def test_partition_verdict_rejects_leftover_free_space() -> None:
     """最后一个分区没吃满（还剩 50 GB）→ 报未分配 + 容量不闭合。"""
     payload = _part_payload(largest_free=50 * GIB)
@@ -310,6 +327,15 @@ def test_partition_verdict_rejects_too_small_auto_partition() -> None:
     ok, message, _ = partition_verdict(payload, _part_parts(c_size_gb=460))
     assert ok is False
     assert "低于下限" in message
+
+
+def test_partition_verdict_honours_explicit_small_partition_policy() -> None:
+    """前置检查显式放宽后，最终验收必须使用同一下限策略。"""
+    payload = _part_payload(c_size_gb=460)
+    parts = _part_parts(c_size_gb=460)
+    ok, message, details = partition_verdict(payload, parts, allow_small=True)
+    assert ok is True, message
+    assert details["allow_small"] is True
 
 
 # --------------------------------------------------------------------- 默认布局

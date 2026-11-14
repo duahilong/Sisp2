@@ -685,6 +685,8 @@ def is_reserved_partition(part: Mapping[str, Any]) -> bool:
 def partition_verdict(
     payload: Mapping[str, Any],
     parts: Sequence[PlannedPartition],
+    *,
+    allow_small: bool = False,
 ) -> tuple[bool, str, dict[str, Any]]:
     """对照**分区计划**逐项验证盘上的实际结果（分区验收的唯一判据）。
 
@@ -721,29 +723,66 @@ def partition_verdict(
 
     problems: list[str] = []
     warnings: list[str] = []
+    issues: list[dict[str, Any]] = []
+
+    def problem(
+        code: str,
+        message: str,
+        *,
+        position: int | None = None,
+        repairable: bool = False,
+    ) -> None:
+        """同时给人读的消息和给恢复流程用的稳定问题码。"""
+        problems.append(message)
+        issues.append(
+            {
+                "code": code,
+                "message": message,
+                "partition_number": position,
+                "repairable": repairable,
+            }
+        )
 
     if style != "GPT":
-        problems.append(f"分区表不是 GPT（{style}）")
+        problem("PARTITION_STYLE_MISMATCH", f"分区表不是 GPT（{style}）")
 
     if len(actual) != len(parts):
-        problems.append(f"分区数与计划不符（期望 {len(parts)} 个，实际 {len(actual)} 个）")
+        problem(
+            "PARTITION_COUNT_MISMATCH",
+            f"分区数与计划不符（期望 {len(parts)} 个，实际 {len(actual)} 个）",
+        )
 
     reserved = [part for part in actual if is_reserved_partition(part)]
     if reserved:
-        problems.append("盘上还有保留分区（MSR），预期布局是 EFI + C + D(+E)")
+        problem("RESERVED_PARTITION_PRESENT", "盘上还有保留分区（MSR），预期布局是 EFI + C + D(+E)")
 
     # 按物理顺序（offset）对照计划：第 i 个分区应当就是计划里的第 i 个
     ordered = sorted(actual, key=lambda part: to_int(part.get("offset_bytes")) or 0)
     for index, (got, want) in enumerate(zip(ordered, parts, strict=False), start=1):
         where = f"第 {index} 个分区（{want.label}）"
+        if to_int(got.get("offset_bytes")) is None:
+            problem("OFFSET_MISSING", f"{where}缺少有效偏移，无法确认物理顺序", position=index)
         expect_gpt = ESP_GPT if want.role == "efi" else BASIC_GPT
         got_gpt = str(got.get("gpt_type") or "").strip("{}").lower()
-        if got_gpt and got_gpt != expect_gpt:
-            problems.append(f"{where}的 GPT 类型不对（{got_gpt or '空'}）")
+        if not got_gpt:
+            problem("GPT_TYPE_MISSING", f"{where}缺少 GPT 类型", position=index)
+        elif got_gpt != expect_gpt:
+            problem(
+                "GPT_TYPE_MISMATCH",
+                f"{where}的 GPT 类型不对（{got_gpt}）",
+                position=index,
+            )
 
-        got_mb = (to_int(got.get("size_bytes")) or 0) / BYTES_PER_MB
-        if want.size_mb is not None and abs(got_mb - want.size_mb) > 1:
-            problems.append(f"{where}大小不符：计划 {want.size_mb} MB，实际 {got_mb:.0f} MB")
+        got_size = to_int(got.get("size_bytes"))
+        got_mb = (got_size or 0) / BYTES_PER_MB
+        if got_size is None:
+            problem("SIZE_MISSING", f"{where}缺少有效容量", position=index)
+        elif want.size_mb is not None and abs(got_mb - want.size_mb) > 1:
+            problem(
+                "SIZE_MISMATCH",
+                f"{where}大小不符：计划 {want.size_mb} MB，实际 {got_mb:.0f} MB",
+                position=index,
+            )
 
         # 盘符：ESP 的临时字母在 Get-Partition 里看不到（隐藏卷），
         # WMI 关联能查到；两者都查不到才算问题（ESP 只告警，因为它收尾就释放）。
@@ -752,19 +791,44 @@ def partition_verdict(
         if want_letter:
             if not got_letter:
                 message = f"{where}没有挂上计划盘符 {want_letter}"
-                (warnings if want.role == "efi" else problems).append(message)
+                if want.role == "efi":
+                    warnings.append(message)
+                else:
+                    problem("LETTER_MISSING", message, position=index, repairable=True)
             elif got_letter.strip().upper()[:1] != want_letter.strip().upper()[:1]:
-                problems.append(
-                    f"{where}盘符不符：计划 {want_letter}:，实际 {got_letter.upper()}:"
+                problem(
+                    "LETTER_MISMATCH",
+                    f"{where}盘符不符：计划 {want_letter}:，实际 {got_letter.upper()}:",
+                    position=index,
+                    repairable=True,
                 )
 
         got_label = to_text(got.get("label"))
-        if got_label is not None and got_label.casefold() != want.label.casefold():
-            problems.append(f"{where}卷标不符：计划 {want.label}，实际 {got_label}")
+        if got_label is None:
+            problem("LABEL_MISSING", f"{where}缺少卷标", position=index)
+        elif got_label.casefold() != want.label.casefold():
+            # 卷标错误不应靠重新格式化修复；后续可以单独实现无损 set label。
+            problem(
+                "LABEL_MISMATCH",
+                f"{where}卷标不符：计划 {want.label}，实际 {got_label}",
+                position=index,
+            )
 
         got_fs = to_text(got.get("file_system"))
-        if got_fs is not None and got_fs.casefold() != want.file_system.casefold():
-            problems.append(f"{where}文件系统不符：计划 {want.file_system}，实际 {got_fs}")
+        if got_fs is None:
+            problem(
+                "FS_MISSING",
+                f"{where}缺少文件系统信息",
+                position=index,
+                repairable=True,
+            )
+        elif got_fs.casefold() != want.file_system.casefold():
+            problem(
+                "FS_MISMATCH",
+                f"{where}文件系统不符：计划 {want.file_system}，实际 {got_fs}",
+                position=index,
+                repairable=True,
+            )
 
     # 只有 auto（不带 size=）分区才应当吃掉剩余空间。全显式计划允许用户
     # 有意留下未分配空间；每个显式分区的实际大小已在上面逐项核对。
@@ -775,20 +839,22 @@ def partition_verdict(
         slack_mb = disk_size / BYTES_PER_MB - used_mb
         # GPT 首尾各 1 MB 是正常开销；超出 2 MB 说明中间留了未分配
         if slack_mb > 2:
-            problems.append(f"盘上有 {slack_mb:.0f} MB 未分配（最后分区应当吃满）")
+            problem("UNALLOCATED_SPACE", f"盘上有 {slack_mb:.0f} MB 未分配（最后分区应当吃满）")
         if abs(slack_mb) > 2 and used_mb > 0:
-            problems.append(
-                f"容量对不上：分区合计 {used_mb:.0f} MB，盘容量 {disk_size / BYTES_PER_MB:.0f} MB"
+            problem(
+                "CAPACITY_MISMATCH",
+                f"容量对不上：分区合计 {used_mb:.0f} MB，盘容量 {disk_size / BYTES_PER_MB:.0f} MB",
             )
-        if used_mb > 0:
+        if used_mb > 0 and not allow_small:
             auto_mb = used_mb - explicit_mb
             minimum_gb = MIN_DATA_GB if auto[-1].role == "data" else MIN_EXTRA_DATA_GB
             if auto_mb < minimum_gb * 1024:
-                problems.append(
-                    f"{auto[-1].label} 只剩 {auto_mb / 1024:.1f} GB，低于下限 {minimum_gb} GB"
+                problem(
+                    "AUTO_PARTITION_TOO_SMALL",
+                    f"{auto[-1].label} 只剩 {auto_mb / 1024:.1f} GB，低于下限 {minimum_gb} GB",
                 )
     if auto and largest_free > 2 * BYTES_PER_MB:
-        problems.append(f"盘上还有 {format_size(largest_free)} 未分配（最后分区应当吃满）")
+        problem("LARGEST_FREE_TOO_LARGE", f"盘上还有 {format_size(largest_free)} 未分配（最后分区应当吃满）")
 
     summary = "、".join(
         f"#{part.get('number')}"
@@ -813,6 +879,8 @@ def partition_verdict(
         "efi_partition": esp,
         "problems": problems,
         "warnings": warnings,
+        "issues": issues,
+        "allow_small": bool(allow_small),
         "check": "partition_phase",
     }
     if problems:

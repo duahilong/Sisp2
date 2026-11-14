@@ -244,6 +244,7 @@ class JobPipeline:
             options=ctx.options,
             log=ctx.log,
             label=ctx.label,
+            identity=ctx.identity,
         )
 
     # ------------------------------------------------------------------ 内部
