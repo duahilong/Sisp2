@@ -227,6 +227,35 @@ def is_transient_diskpart_exit(code: int | None) -> bool:
 
 _LOGGER = logging.getLogger(__name__)
 
+# 只读几何查询：仅供 MSR/ESP 定位、分区数量等待与缺失分区续跑使用。
+# 保留完整返回字段，但不为用不到的盘符/卷标/文件系统启动 WMI 与 Get-Volume。
+PARTITIONS_GEOMETRY_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$number = [int]$env:VIX_DISK_NUMBER
+$disk = Get-Disk -Number $number
+$items = foreach ($part in Get-Partition -DiskNumber $number -ErrorAction SilentlyContinue) {
+    [pscustomobject]@{
+        number         = [int]$part.PartitionNumber
+        size_bytes     = [long]$part.Size
+        offset_bytes   = [long]$part.Offset
+        type           = [string]$part.Type
+        gpt_type       = [string]$part.GptType
+        drive_letter   = $null
+        mounted_letter = $null
+        file_system    = $null
+        label          = $null
+    }
+}
+[pscustomobject]@{
+    disk_number     = $number
+    partition_style = [string]$disk.PartitionStyle
+    disk_size_bytes = [long]$disk.Size
+    largest_free    = [long]$disk.LargestFreeExtent
+    partitions      = @($items)
+} | ConvertTo-Json -Depth 4 -Compress
+"""
+
+
 # 只读：查分区表 + 卷信息（盘符/卷标/文件系统）+ 盘容量。
 # 其中 ``Win32_LogicalDiskToPartition`` 用来关联 ESP 的临时盘符——ESP 是隐藏卷，
 # ``Get-Partition.DriveLetter`` 对它永远为空，只有 WMI 关联看得到。
@@ -642,23 +671,30 @@ class DiskpartShell:
         return False
 
     # ------------------------------------------------------------------ 读
-    def query(self, disk_number: int) -> dict[str, Any]:
-        """查一次真实分区表（分区列表 + 盘容量 + 最大空闲块），不碰盘。"""
+    def query(self, disk_number: int, *, detail: str = "volume") -> dict[str, Any]:
+        """查真实分区表；``geometry`` 跳过本次调用不需要的卷/WMI 信息。"""
         if not self.powershell:
             raise RunnerError("找不到 powershell.exe，无法查询分区")
+        if detail not in ("geometry", "volume"):
+            raise ValueError(f"未知分区查询级别：{detail!r}")
         env = dict(os.environ)
         env["VIX_DISK_NUMBER"] = str(int(disk_number))
+        script = PARTITIONS_GEOMETRY_SCRIPT if detail == "geometry" else PARTITIONS_SCRIPT
         code, output, _elapsed = self.process.run(
             [
                 self.powershell,
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                PARTITIONS_SCRIPT,
+                script,
             ],
             QUERY_TIMEOUT,
             env=env,
-            quiet=f"查询磁盘 {int(disk_number)} 的分区表（PowerShell 脚本见 shell.py）",
+            quiet=(
+                f"查询磁盘 {int(disk_number)} 的"
+                f"{'几何信息' if detail == 'geometry' else '分区表'}"
+                "（PowerShell 脚本见 shell.py）"
+            ),
         )
         if code != 0:
             raise RunnerError(f"查询分区失败（退出码 {code}）：{tail(output, 400)}")
@@ -723,7 +759,7 @@ class DiskpartShell:
         wanted = str(gpt_type).strip("{}").lower()
         total = max(1, int(attempts if attempts is not None else self.attempts))
         for attempt in range(1, total + 1):
-            payload = self.query(disk_number)
+            payload = self.query(disk_number, detail="geometry")
             for part in payload.get("partitions") or ():
                 if not isinstance(part, Mapping):
                     continue
@@ -762,6 +798,7 @@ __all__ = [
     "DISK_STATE_SCRIPT",
     "FORMAT_TIMEOUT",
     "GHOST_TIMEOUT",
+    "PARTITIONS_GEOMETRY_SCRIPT",
     "PARTITIONS_SCRIPT",
     "QUERY_ATTEMPTS",
     "QUERY_INTERVAL",

@@ -65,7 +65,7 @@ def _ctx(tmp_path, *, options=None) -> PhaseContext:
     )
 
 
-def _shell(*, msr=1):
+def _shell(*, msr=1, **kwargs):
     """``msr=1`` = 「convert gpt 建出了 MSR」；删完复查时必须查不到，
     否则分区阶段会按“MSR 没删掉”中止（真实行为）。"""
     if msr == 1:
@@ -75,8 +75,12 @@ def _shell(*, msr=1):
             seen.append(1)
             return 1 if len(seen) == 1 else None  # 第一次查到、复查查不到
 
-        return FakeDiskpartShell(msr=msr_reader, query_handler=lambda disk: build_snapshot(_parts()))
-    return FakeDiskpartShell(msr=msr, query_handler=lambda disk: build_snapshot(_parts()))
+        return FakeDiskpartShell(
+            msr=msr_reader, query_handler=lambda disk: build_snapshot(_parts()), **kwargs
+        )
+    return FakeDiskpartShell(
+        msr=msr, query_handler=lambda disk: build_snapshot(_parts()), **kwargs
+    )
 
 
 # ---------------------------------------------------------------- 设置项本身
@@ -128,7 +132,8 @@ def test_settle_happens_between_diskpart_calls(tmp_path) -> None:
     # 1.4.1 起只等一次（卷就绪后不再重复等，见 _wait_volumes）
     assert "格式化分区 #1（EFI，第 1 次）前：等待 1000 ms" in log_text
     assert "格式化前：等待 1000 ms" not in log_text, "卷就绪后不再重复等待"
-    assert delays and set(delays) == {1.0}
+    assert delays
+    assert all(delay == pytest.approx(1.0, abs=0.05) for delay in delays)
 
 
 def test_settle_can_be_disabled(tmp_path) -> None:
@@ -146,14 +151,63 @@ def test_settle_comes_from_runner_options(tmp_path) -> None:
     shell = _shell(msr=1)
     phase = PartitionPhase(shell, sleep=delays.append)
     phase.run(_ctx(tmp_path, options={"partition_settle_ms": 250}))
-    assert delays and set(delays) == {0.25}
+    assert delays
+    assert all(delay == pytest.approx(0.25, abs=0.02) for delay in delays)
 
 
 def test_settle_is_clamped_for_absurd_values(tmp_path) -> None:
     delays: list[float] = []
     phase = PartitionPhase(_shell(msr=1), sleep=delays.append)
     phase.run(_ctx(tmp_path, options={"partition_settle_ms": 10 * 60 * 1000}))
-    assert delays and set(delays) == {5.0}  # 上限 5 秒
+    assert delays
+    assert all(delay == pytest.approx(5.0, abs=0.05) for delay in delays)  # 上限 5 秒
+
+
+def test_identity_guard_time_counts_toward_settle(tmp_path) -> None:
+    now = [0.0]
+    delays: list[float] = []
+    base = FakeDiskpartShell()
+
+    def sleep(seconds):
+        delays.append(seconds)
+        now[0] += seconds
+
+    def slow_guard(disk):
+        state = base.disk_state(disk)
+        now[0] += 0.4
+        return state
+
+    phase = PartitionPhase(
+        _shell(msr=None, disk_state_handler=slow_guard),
+        sleep=sleep,
+        clock=lambda: now[0],
+    )
+    outcome = phase.run(_ctx(tmp_path))
+
+    assert outcome.ok is True
+    assert delays
+    assert all(delay == pytest.approx(0.6) for delay in delays)
+
+
+def test_guard_longer_than_settle_adds_no_extra_sleep(tmp_path) -> None:
+    now = [0.0]
+    delays: list[float] = []
+    base = FakeDiskpartShell()
+
+    def very_slow_guard(disk):
+        state = base.disk_state(disk)
+        now[0] += 1.2
+        return state
+
+    phase = PartitionPhase(
+        _shell(msr=None, disk_state_handler=very_slow_guard),
+        sleep=delays.append,
+        clock=lambda: now[0],
+    )
+    outcome = phase.run(_ctx(tmp_path))
+
+    assert outcome.ok is True
+    assert delays == []
 
 
 def test_no_settle_needed_when_there_is_no_msr(tmp_path) -> None:
@@ -162,7 +216,8 @@ def test_no_settle_needed_when_there_is_no_msr(tmp_path) -> None:
     phase = PartitionPhase(_shell(msr=None), sleep=delays.append)
     outcome = phase.run(_ctx(tmp_path))
     assert outcome.ok is True
-    assert delays and set(delays) == {1.0}
+    assert delays
+    assert all(delay == pytest.approx(1.0, abs=0.05) for delay in delays)
 
 
 # ---------------------------------------------------------------- A5 诊断

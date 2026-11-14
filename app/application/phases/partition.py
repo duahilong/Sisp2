@@ -139,6 +139,7 @@ class PartitionPhase:
         wipe_attempts: int = WIPE_ATTEMPTS,
         retry_delay: float = WIPE_RETRY_DELAY,
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
         create_repair_attempts: int = CREATE_REPAIR_ATTEMPTS,
         format_attempts: int = FORMAT_ATTEMPTS,
         format_backoff: Sequence[float] = FORMAT_BACKOFF,
@@ -154,6 +155,7 @@ class PartitionPhase:
         self.wipe_attempts = max(1, int(wipe_attempts))
         self.retry_delay = max(0.0, float(retry_delay))
         self._sleep = sleep
+        self._clock = clock
         self._settle_ms = DEFAULT_SETTLE_MS
         self.create_repair_attempts = max(0, int(create_repair_attempts))
         self.format_attempts = max(1, int(format_attempts))
@@ -229,7 +231,6 @@ class PartitionPhase:
                 return failure
 
         # ===== ④ 建分区（每次创建/续跑前复核；只建几何）=====
-        self._settle(ctx, log, "建分区前")
         try:
             created = self._run_create(ctx, log)
         except Exception as exc:  # noqa: BLE001
@@ -406,10 +407,16 @@ class PartitionPhase:
                     disk_touched=True,
                     message="任务已取消（盘已清空，MSR 删除尚未继续）",
                 )
-            guard = self._guard(ctx, log, where=reason, disk_touched=True)
+            guard = self._settle(
+                ctx,
+                log,
+                reason,
+                during=lambda reason=reason: self._guard(
+                    ctx, log, where=reason, disk_touched=True
+                ),
+            )
             if guard is not None:
                 return guard
-            self._settle(ctx, log, reason)
             try:
                 code, output = self.shell.run_diskpart(
                     msr_delete_lines(ctx.disk_number, number),
@@ -544,7 +551,12 @@ class PartitionPhase:
             return PhaseOutcome(
                 ok=False, cancelled=True, disk_touched=True, message="任务已取消（尚未建分区）"
             )
-        guard = self._guard(ctx, log, where="建分区", disk_touched=True)
+        guard = self._settle(
+            ctx,
+            log,
+            "建分区前",
+            during=lambda: self._guard(ctx, log, where="建分区", disk_touched=True),
+        )
         if guard is not None:
             return guard
         code, output = self.shell.run_diskpart(
@@ -565,7 +577,7 @@ class PartitionPhase:
             except Exception as exc:  # noqa: BLE001
                 log.write(f"补齐分区前重新扫描失败（已忽略）：{exc}")
             try:
-                actual = self.shell.query(ctx.disk_number)
+                actual = self.shell.query(ctx.disk_number, detail="geometry")
             except Exception as exc:  # noqa: BLE001
                 log.write(f"补齐分区前无法查询真实分区表，放弃补齐：{exc}")
                 return code, output, repairs
@@ -611,7 +623,7 @@ class PartitionPhase:
         found = 0
         while True:
             try:
-                actual = self.shell.query(ctx.disk_number)
+                actual = self.shell.query(ctx.disk_number, detail="geometry")
             except Exception as exc:  # noqa: BLE001 - 查不到就按"已就绪"往下走
                 log.write(f"等待卷就绪时查询失败（继续格式化）：{exc}")
                 break
@@ -680,8 +692,14 @@ class PartitionPhase:
                 except Exception as exc:  # noqa: BLE001
                     log.write(f"重试前重新扫描失败（已忽略）：{exc}")
             reason = f"格式化分区 #{position}（{part.label}，第 {attempt} 次）"
-            self._settle(ctx, log, reason + "前")
-            guard = self._guard(ctx, log, where=reason, disk_touched=True)
+            guard = self._settle(
+                ctx,
+                log,
+                reason + "前",
+                during=lambda reason=reason: self._guard(
+                    ctx, log, where=reason, disk_touched=True
+                ),
+            )
             if guard is not None:
                 return guard
 
@@ -958,21 +976,35 @@ class PartitionPhase:
             message += f"。{hint}"
         return message
 
-    def _settle(self, ctx: PhaseContext, log: Any, reason: str) -> None:
-        """两次 diskpart 之间的等待（``partitionSettleMs``，0 = 不等待）。
+    def _settle(
+        self,
+        ctx: PhaseContext,
+        log: Any,
+        reason: str,
+        *,
+        during: Callable[[], PhaseOutcome | None] | None = None,
+    ) -> PhaseOutcome | None:
+        """保持 diskpart 最小间隔；身份复核等只读耗时可计入该间隔。
 
-        顺便记一条诊断：如果此时有别的盘在写镜像，说明这条命令是在 I/O 争用下跑的，
-        真出问题时有据可查。
+        ``during`` 仍会在下一条写命令前执行。若它返回失败则立即停止；否则只睡眠
+        ``settle - 已消耗时间``，不会减少配置要求的总间隔，也不会叠加重复等待。
         """
+        started = self._clock()
         others = activity.describe(exclude=ctx.disk_number)
         if self._settle_ms <= 0:
             if others:
                 log.write(f"[诊断] {reason}：其它盘正在 {others}（未启用间隔等待）")
-            return
-        seconds = self._settle_ms / 1000.0
-        suffix = f"；其它盘正在 {others}" if others else ""
-        log.write(f"{reason}：等待 {self._settle_ms} ms 让磁盘链路落盘{suffix}")
-        self._sleep(seconds)
+        else:
+            suffix = f"；其它盘正在 {others}" if others else ""
+            log.write(f"{reason}：等待 {self._settle_ms} ms 让磁盘链路落盘{suffix}")
+        outcome = during() if during is not None else None
+        if outcome is not None:
+            return outcome
+        if self._settle_ms > 0:
+            remaining = max(0.0, self._settle_ms / 1000.0 - (self._clock() - started))
+            if remaining > 0:
+                self._sleep(remaining)
+        return None
 
     def _wipe_failure_message(self, code: int, attempts: int) -> str:
         message = f"diskpart 失败（退出码 {describe_diskpart_exit(code)}）"

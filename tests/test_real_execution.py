@@ -1013,6 +1013,28 @@ def _msr_shell(fake_process, *payloads):
     )
 
 
+def test_geometry_query_skips_volume_and_wmi_lookups(fake_process) -> None:
+    from app.application.command_log import CommandLog
+    from app.application.shell import DiskpartShell
+
+    process = fake_process(
+        handler=lambda *_args: (0, json.dumps({"partition_style": "GPT", "partitions": []}), 0.1)
+    )
+    shell = DiskpartShell(
+        log=CommandLog(None), powershell="powershell.exe", process=process
+    )
+
+    shell.query(2, detail="geometry")
+    shell.find_msr(2)
+
+    for call in process.calls:
+        script = call[-1]
+        assert "Get-Volume" not in script
+        assert "Win32_LogicalDiskToPartition" not in script
+    shell.query(2)
+    assert "Win32_LogicalDiskToPartition" in process.calls[-1][-1]
+
+
 def test_find_msr_partition_reads_partition_number(fake_process) -> None:
     shell = _msr_shell(fake_process, _msr_payload(3))
     assert shell.find_msr(2) == 3

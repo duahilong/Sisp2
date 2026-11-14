@@ -149,6 +149,7 @@ def test_waits_until_all_partitions_are_visible(tmp_path) -> None:
 
     assert outcome.ok is True, outcome.message
     assert state["queries"] >= 3
+    assert shell.query_details[:3] == ["geometry", "geometry", "geometry"]
     assert "卷就绪" in ctx.log.summary()
 
 

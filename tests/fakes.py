@@ -75,6 +75,7 @@ class FakeDiskpartShell:
         self.scripts: list[list[str]] = []
         self.titles: list[str] = []
         self.queries: list[int] = []
+        self.query_details: list[str] = []
         self.disk_states: list[int] = []
         #: ``format_letter`` 调用记录：``(盘符, 文件系统, 卷标)``
         self.formats: list[tuple[str, str, str]] = []
@@ -132,8 +133,9 @@ class FakeDiskpartShell:
         return self.release_result
 
     # 读
-    def query(self, disk_number: int):
+    def query(self, disk_number: int, *, detail: str = "volume"):
         self.queries.append(int(disk_number))
+        self.query_details.append(str(detail))
         if self._query is not None:
             return self._query(int(disk_number))
         return {"partition_style": "GPT", "partitions": [], "largest_free": 0}
