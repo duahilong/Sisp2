@@ -7,6 +7,20 @@ tag 上的提交树就是那一版的完整代码与文档快照。
 定版（`v1.1.0`）之后只做优化与修复：功能以 tag 为准，`main` 继续向前走，
 需要回到某一版时 `git checkout v1.1.0` 或 `git archive v1.1.0`。
 
+## 未发布（main）— Windows VM 复验与 Beta 9
+
+2026-11-14 在专用 `windows-mcp-vm`（Windows 10 19045）上使用 Python 3.12.16 完成非破坏性复验，
+本机未执行任何测试或构建：
+
+- `ruff check app tests tools packaging` 全部通过，`compileall` 通过，完整测试 **744 passed**；
+  仅有 FastAPI TestClient 引入的一条 Starlette 弃用警告。
+- 测试全程设置 `SISP_BLOCK_REAL_DISK=1`，未执行真实清盘、Ghost 写盘或现场硬件验收。
+- PyInstaller 6.22.3 构建 `Sisp2-beta.exe`，完整版本 `1.5.0-beta.9` 已核对 FileVersion、
+  ProductVersion 与 `/api/info`；产物 17,105,152 字节，SHA256
+  `9d271ef574e8b86158ce2b252a60bdd1e9423a28f45ff99b1e9d22672d8e83b9`。
+- exe 的 `--serve` 冒烟通过：`/health` 返回 `ok=true`，关于接口报告 Python 3.12.16 /
+  Windows 10 19045。构建后源码版本模板已恢复，Git 工作区无构建残留。
+
 ## 未发布（main）— 自动构建与滚动 Beta
 
 - `.github/workflows/windows-tests.yml` 扩展为检查、测试、构建、发布一体化流水线：main 推送后，
