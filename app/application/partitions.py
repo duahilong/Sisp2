@@ -711,7 +711,8 @@ def partition_verdict(
 
     纯函数：输入是 PowerShell 查到的真实分区表 + 计划，方便用假 payload 测每一条
     失败分支。返回 ``(ok, message, details)``，``details`` 里带 ``problems`` /
-    ``warnings`` / ``efi_partition``（供收尾释放盘符复用）。
+    ``warnings`` / ``issues``（稳定问题码与可补救标记）/ ``efi_partition``。
+    ``allow_small=True`` 必须与显式测试载荷的前置检查策略一致，普通任务保持默认严格下限。
     """
     actual = payload.get("partitions") or []
     if isinstance(actual, Mapping):
