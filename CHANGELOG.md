@@ -21,6 +21,9 @@ tag 上的提交树就是那一版的完整代码与文档快照。
 专用 `windows-mcp-vm` 验证：Ruff、`compileall` 通过，定向测试 164 passed，完整测试
 **763 passed**（81.42 秒）。另在 VM 的真实系统盘上完成两种模式的只读 PowerShell 冒烟，
 字段与分区数量读取正常；未做真实写盘，本机未执行任何测试。
+同一 VM 已用 PyInstaller 6.22.3 构建 `1.5.0-beta.11`，产物 17,106,731 字节，SHA256
+`bc0baf785ea1063079b271a4c11a004a818edcfdf9ca8e108917b61524490df7`；exe 版本资源、
+`/health` 与 `/api/info` 冒烟均通过。
 
 ## 未发布（main）— 分区串行、身份复核与验收恢复加固
 
